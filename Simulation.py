@@ -1,9 +1,11 @@
+"""
+Simulation of DNA-mediated SiNP using HOOMD-blue with modified LJ-potential.
+"""
 from __future__ import annotations
 import os, time
 import numpy as np
 import hoomd
 import hoomd.md
-
 def modified_LJ(r, rmin, rmax, U_0, n, m, r0):
     """
     n–m Lennard-Jones-like table potential used in the project.
