@@ -1,2 +1,2 @@
 # DNA_digitwin
-Digital Twin trining framework for DNA-mediated silica NPs
+Digital Twin training framework for DNA-mediated silica NPs
