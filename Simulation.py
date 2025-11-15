@@ -29,7 +29,8 @@ def run_simulation(
     kT: float = 1.0,
     rmax: float = 5.0,
     device: str = "gpu",   # "cpu" also works on HOOMD 2.x
-    seed: int = 42
+    seed: int = 42,
+    plot: bool = True
 ) -> dict:
     """
     Run a HOOMD simulation of N spheres with an n–m LJ table potential.
@@ -49,6 +50,9 @@ def run_simulation(
         HOOMD context device mode.
     seed : int
         Langevin thermostat seed.
+
+    plot: bool
+        Controls whether potential and energy plots are generated or not.
 
     Returns
     -------
@@ -110,6 +114,12 @@ def run_simulation(
         coeff=dict(U_0=U_0, n=n, m=m, r0=r0)
     ) 
 
+    # --- Generate Potential Plot
+    if plot:
+        out_png = os.path.join(outdir, "potential_plot.png")
+        # helpers already defined in this file under the “Plotting Block”
+        plot_pair_potential(rmin, rmax, width, U_0, n, m, r0, out_png, modified_LJ)
+
     # --- Integrator ---
     group_all = hoomd.group.all()
     hoomd.md.integrate.mode_standard(dt=dt)
@@ -133,7 +143,13 @@ def run_simulation(
     # --- Run ---
     print(f"Running {steps} steps with {N} spheres at density {density:.3f}")
     hoomd.run(steps)
-    print("Simulation complete.")
+
+    # --- Generate Potential Energy Plot
+    if plot:
+        plot_energy(energy_csv, os.path.join(outdir, "potential_energy_plot.png"))
+        print("Simulation complete.Plots Generated.")
+    else:
+        print("Simulation complete.")
 
     return {
         "gsd_path": gsd_path,
@@ -158,7 +174,7 @@ def plot_pair_potential(rmin, rmax, width, U_0, n, m, r0, out_png, potential_fn)
     plt.figure(figsize=(6,4))
     plt.plot(r_vals, U, label=f"n={n}, m={m}, r0={r0}, U0={U_0}")
     plt.xlabel("r"); plt.ylabel("U(r)"); plt.grid(True); plt.legend()
-    plt.tight_layout(); plt.savefig(out_png, dpi=300); plt.close()
+    plt.tight_layout(); plt.savefig(out_png, dpi=600); plt.close()
 
 def plot_energy(csv_path, out_png):
     df = pd.read_csv(csv_path, delimiter='\t').values
@@ -166,4 +182,4 @@ def plot_energy(csv_path, out_png):
     plt.plot(df[6:,0], df[6:,1])
     plt.xlabel("Time"); plt.ylabel("Potential Energy")
     plt.grid(True); plt.tight_layout()
-    plt.savefig(out_png, dpi=300); plt.close()
+    plt.savefig(out_png, dpi=600); plt.close()
