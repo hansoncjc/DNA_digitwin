@@ -48,8 +48,8 @@ import torch
 from torch import tensor
 from typing import Dict, List, Tuple, Any
 
-from Simulation import run_simulation
-from Scattering import convert_to_SAXS
+from simulation import run_simulation
+from scattering import convert_to_SAXS
 from metrics import compare_to_exp
 
 
