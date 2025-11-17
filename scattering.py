@@ -215,18 +215,17 @@ def convert_to_SAXS(save_dir):
     plot_every_n_frame = 50
     histogram_bins = 10000
     q = np.geomspace(0.8, 20, 2000)
-    path = save_dir + '/scattering_data/'
-    path_intensity = save_dir + '/scattering_data_intensity/'
+    path_structure_factor = save_dir + '/S(q)_data/'
+    path_intensity = save_dir + '/I(q)_data/'
     # ------------------------------------
 
-    os.makedirs(path, exist_ok=True)
+    os.makedirs(path_structure_factor, exist_ok=True)
     os.makedirs(path_intensity, exist_ok=True)
 
     frames = len(lattice_coordinates)
     cmap = cm.jet
     norm = plt.Normalize(0, frames - 1)
     plt.rcParams.update({'font.size': 18})
-    fig, ax = plt.subplots(figsize=(10,7))
 
     for i in range(1, 6):
         n_samples = 10_000_000
@@ -239,12 +238,12 @@ def convert_to_SAXS(save_dir):
             points, lattice_coordinates[i], histogram_bins, q, save=False
         ).cpu().numpy()
         I_q = np.mean(I_q, axis=1)
-
+        fig, ax = plt.subplots(figsize=(10,7))
         plt.rcParams.update({'font.size': 18})
         q_rescaled = q / 260
         ax.plot(q_rescaled, I_q, color='k', linewidth=3, label='scattering curve')
         ax.set_yscale('log'); ax.set_xscale('log')
-        ax.set_ylabel('S(q)'); ax.set_xlabel('q ($\\AA^{-1}$)')
+        ax.set_ylabel('I(q)'); ax.set_xlabel('q ($\\AA^{-1}$)')
 
         data = np.hstack((q_rescaled.reshape(-1,1), I_q.reshape(-1,1)))
         np.save(path_intensity + f'Intensity_plot{-i}.npy', data)
@@ -265,8 +264,8 @@ def convert_to_SAXS(save_dir):
         ax2.plot(S_q[:,0], S_q[:,1], color='k', linewidth=3, label='Structure Factor')
         ax2.set_yscale('log'); ax2.set_xscale('log')
         ax2.set_ylabel('S(q)'); ax2.set_xlabel('q ($\\AA^{-1}$)')
-        np.save(path + f'structure_factor{-i}.npy', S_q)
-        plt.savefig(path + f'structure_factor_plot{-i}.png', dpi=600, bbox_inches="tight")
+        np.save(path_structure_factor + f'structure_factor{-i}.npy', S_q)
+        plt.savefig(path_structure_factor + f'structure_factor_plot{-i}.png', dpi=600, bbox_inches="tight")
         plt.close(fig2)
 
         if i == 1:
@@ -279,8 +278,8 @@ def convert_to_SAXS(save_dir):
     ax3.plot(S_q[:,0], np.mean(all_Sq, axis=1), color='k', linewidth=3, label='average S(q)')
     ax3.set_yscale('log'); ax3.set_xscale('log')
     ax3.set_ylabel('Intensity (arb. unit)'); ax3.set_xlabel('q ($\\AA^{-1}$)')
-    plt.savefig(path + 'scattering_curve_plot_average.png', dpi=600, bbox_inches="tight")
+    plt.savefig(path_structure_factor + 'scattering_curve_plot_average.png', dpi=600, bbox_inches="tight")
     plt.close(fig3)
 
     data = np.hstack((S_q[:,0].reshape(-1,1), np.mean(all_Sq, axis=1).reshape(-1,1)))
-    np.save(path + 'average_structure_factor.npy', data)
+    np.save(path_structure_factor + 'average_structure_factor.npy', data)
