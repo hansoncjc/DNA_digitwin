@@ -194,14 +194,17 @@ def calculate_structure_factor(data0, data2, q_min, q_max, plot):
 
 # ======== End-to-end: GSD → I(q) → S(q) ========
 
-def convert_to_SAXS(save_dir):
+def convert_to_SAXS(save_dir, path = None):
     """
     From a GSD in `save_dir`, compute scattering curves and structure factors
     for the last few frames, save per-frame results and an average curve.
     Produces the same .npy and .png artifacts as the original.
     """
     filenames = sorted(os.listdir(save_dir))
-    file_path = save_dir + '/' + filenames[0]  # first file is the .gsd
+    if path is None:
+        file_path = save_dir + '/' + filenames[0]  # first file is the .gsd
+    else:
+        file_path = path
     lattice_coordinates = extract_positions_orientations(file_path)
 
     # Sphere building block
@@ -231,11 +234,11 @@ def convert_to_SAXS(save_dir):
         n_samples = 10_000_000
         simulator = pairwise_method.scattering_simulator(n_samples)
         simulator.sample_building_block(points)
-        simulator.sample_lattice_coordinates(lattice_coordinates[-i])
-        simulator.calculate_structure_coordinates()
+        #simulator.sample_lattice_coordinates(lattice_coordinates[-i])
+        #simulator.calculate_structure_coordinates()
 
         I_q = simulator.simulate_multiple_scattering_curves_lattice_coords(
-            points, lattice_coordinates[i], histogram_bins, q, save=False
+            points, lattice_coordinates[-i], histogram_bins, q, save=False
         ).cpu().numpy()
         I_q = np.mean(I_q, axis=1)
         fig, ax = plt.subplots(figsize=(10,7))
@@ -259,6 +262,7 @@ def convert_to_SAXS(save_dir):
             np.hstack((q_rescaled.reshape(-1,1), I_q.reshape(-1,1))),
             0.02, 0.03, False
         )
+        plt.close(fig)
 
         fig2, ax2 = plt.subplots(figsize=(10,7))
         ax2.plot(S_q[:,0], S_q[:,1], color='k', linewidth=3, label='Structure Factor')
@@ -273,7 +277,6 @@ def convert_to_SAXS(save_dir):
         else:
             all_Sq = np.hstack((all_Sq, S_q[:,1].reshape(-1,1)))
 
-    plt.close(fig)
     fig3, ax3 = plt.subplots(figsize=(10,7))
     ax3.plot(S_q[:,0], np.mean(all_Sq, axis=1), color='k', linewidth=3, label='average S(q)')
     ax3.set_yscale('log'); ax3.set_xscale('log')
