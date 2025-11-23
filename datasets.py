@@ -225,7 +225,7 @@ class Dataset:
         num = 2.0 * (self.exp.t_b + LC_ss * self.exp.L_poly) + LC_ds * (2.0 * self.exp.L_HBP + self.exp.L_bridge)
         return 1.0 + float(k) * (num / self.exp.d_si)
 
-    def U0_from_gaussian(self, A=2.0, mu_c=100.0, sigma_c=0.1, sigma_b=15.0):
+    def U0_from_gaussian(self, A=2.0, mu_c=100.0, mu_b = 0.5, sigma_c=0.1, sigma_b=15.0):
         """
         Compute U0 from a separable Gaussian in C_chol and b_bridge.
 
@@ -263,30 +263,55 @@ class Dataset:
         b_bridge = float(self.exp.b_bridge)
 
         term_c = ((C_chol - float(mu_c)) ** 2) / (2.0 * (float(sigma_c) ** 2))
-        term_b = ((b_bridge - 0.5) ** 2) / (2.0 * (float(sigma_b) ** 2))
+        term_b = ((b_bridge - float(mu_b)) ** 2) / (2.0 * (float(sigma_b) ** 2))
 
         return float(A) * np.exp(- (term_c + term_b))
 
-
+    def _autofill_sim_from_default(self,
+                                    *,
+                                    alpha=3.0,
+                                    k=0.76,
+                                    A=2.0, mu_c=100.0, sigma_c=10.0,
+                                    mu_b=0.5, sigma_b=0.2):
+        """
+        Fill self.sim.{density,r0,U0} from mappings if any of them is None.
+        Does NOT overwrite fields that are already set.
+        """
+        # density
+        if getattr(self.sim, "density", None) is None:
+            self.sim.density = self.rho_N(alpha=alpha)
+        # r0
+        if getattr(self.sim, "r0", None) is None:
+            self.sim.r0 = self.r0_sigma(k=k)
+        # U0
+        if getattr(self.sim, "U0", None) is None:
+            self.sim.U0 = self.U0_from_gaussian(A=A, mu_c=mu_c, sigma_c=sigma_c,
+                                                mu_b=mu_b, sigma_b=sigma_b)
     @classmethod
     def from_dict(cls, d):
         """
-        Build a Dataset from a nested dictionary.
-
-        Expected keys
-        -------------
+        Expected keys:
         {
-          "id": "d1",
-          "exp_path": "path/to/curve.npy",
-          "experimental": { ... keys accepted by ExperimentalParams ... },
-          "simulation":   { ... keys accepted by SimulationParams ... },
-          "weight": 1.0,
-          "out_dir": "Results/d1"
+            "id": "itr0",
+            "exp_path": "path/to/curve.npy",
+            "experimental": { ... ExperimentalParams ... },
+            "simulation":   { ... SimulationParams ... }   # optional/partial
+            "mapping": {                                  # optional overrides for auto-fill
+            "alpha": 3.0,
+            "k": 0.76,
+            "A": 2.0, "mu_c": 100.0, "sigma_c": 10.0,
+            "mu_b": 0.5, "sigma_b": 0.2
+            },
+            "weight": 1.0,
+            "out_dir": "Results/itr0"
         }
         """
         exp = ExperimentalParams(**d.get("experimental", {}))
-        sim = SimulationParams(**d.get("simulation", {}))
-        return cls(
+
+        sim_dict = d.get("simulation", {})
+        sim = SimulationParams(**sim_dict) if isinstance(sim_dict, dict) else SimulationParams()
+
+        ds = cls(
             id=d["id"],
             exp_path=d["exp_path"],
             exp=exp,
@@ -294,3 +319,7 @@ class Dataset:
             weight=d.get("weight", 1.0),
             out_dir=d.get("out_dir"),
         )
+
+        # Auto-fill any missing sim fields, allowing per-dataset overrides via "mapping"
+        ds._autofill_sim_from_mappings(**d.get("mapping", {}))
+        return ds
