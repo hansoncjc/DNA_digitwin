@@ -280,7 +280,7 @@ def convert_to_SAXS(save_dir, path = None):
     fig3, ax3 = plt.subplots(figsize=(10,7))
     ax3.plot(S_q[:,0], np.mean(all_Sq, axis=1), color='k', linewidth=3, label='average S(q)')
     ax3.set_yscale('log'); ax3.set_xscale('log')
-    ax3.set_ylabel('Intensity (arb. unit)'); ax3.set_xlabel('q ($\\AA^{-1}$)')
+    ax3.set_ylabel(' S(q)'); ax3.set_xlabel('q ($\\AA^{-1}$)')
     plt.savefig(path_structure_factor + 'scattering_curve_plot_average.png', dpi=600, bbox_inches="tight")
     plt.close(fig3)
 
