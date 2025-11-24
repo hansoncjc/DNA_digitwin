@@ -265,9 +265,14 @@ def make_global_objective(
                 convert_to_SAXS(save_dir)
 
                 # ---- 3) Compare to experiment ----
-                sim_sq_path = os.path.join(save_dir, "scattering_data", "average_structure_factor.npy")
-                if not os.path.exists(sim_sq_path):
-                    raise FileNotFoundError(f"Missing S(q): {sim_sq_path}")
+                cand_paths = [
+                    os.path.join(save_dir, "scattering_data", "average_structure_factor.npy"),
+                    os.path.join(save_dir, "S(q)_", "average_structure_factor.npy"),
+                    os.path.join(save_dir, "S(q)", "average_structure_factor.npy"),
+                ]
+                sim_sq_path = next((p for p in cand_paths if os.path.exists(p)), None)
+                if sim_sq_path is None:
+                    raise FileNotFoundError(f"Missing S(q): tried {cand_paths}")
                 sim_sq = np.load(sim_sq_path)
 
                 exp_curve = ds.load_exp_curve(trim_tail=trim_tail)
