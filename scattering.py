@@ -200,9 +200,11 @@ def convert_to_SAXS(save_dir, path = None):
     for the last few frames, save per-frame results and an average curve.
     Produces the same .npy and .png artifacts as the original.
     """
-    filenames = sorted(os.listdir(save_dir))
+    filenames = sorted(f for f in os.listdir(save_dir) if f.endswith('.gsd'))
     if path is None:
-        file_path = save_dir + '/' + filenames[0]  # first file is the .gsd
+        if not filenames:
+            raise FileNotFoundError(f'No .gsd in {save_dir}')
+        file_path = os.path.join(save_dir, filenames[0])
     else:
         file_path = path
     lattice_coordinates = extract_positions_orientations(file_path)
