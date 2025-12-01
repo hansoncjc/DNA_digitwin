@@ -52,7 +52,17 @@ from simulation import run_simulation
 from scattering import convert_to_SAXS
 from metrics import compare_to_exp
 
-
+#
+def _sanitize_curve(arr: np.ndarray) -> np.ndarray:
+    arr = np.asarray(arr)
+    arr = arr[np.isfinite(arr).all(axis=1)]
+    q, I = arr[:, 0], arr[:, 1]
+    order = np.argsort(q)
+    q, I = q[order], I[order]
+    uq, idx = np.unique(q, return_index=True)  # remove duplicate q (interp1d hates these)
+    q, I = uq, I[idx]
+    I = np.clip(I, 1e-12, None)               # avoid log(0) downstream
+    return np.column_stack([q, I])
 # ------------------------- Parameter packing ------------------------- #
 
 class ParamSpace:
@@ -266,18 +276,21 @@ def make_global_objective(
 
                 # ---- 3) Compare to experiment ----
                 cand_paths = [
+                    os.path.join(save_dir, "S(q)_data", "average_structure_factor.npy"),
                     os.path.join(save_dir, "scattering_data", "average_structure_factor.npy"),
                     os.path.join(save_dir, "S(q)_", "average_structure_factor.npy"),
                     os.path.join(save_dir, "S(q)", "average_structure_factor.npy"),
+                    os.path.join(save_dir, "I(q)_data", "average_structure_factor.npy"),
                 ]
                 sim_sq_path = next((p for p in cand_paths if os.path.exists(p)), None)
                 if sim_sq_path is None:
                     raise FileNotFoundError(f"Missing S(q): tried {cand_paths}")
-                sim_sq = np.load(sim_sq_path)
+                sim_sq = _sanitize_curve(np.load(sim_sq_path))
+                exp_curve = _sanitize_curve(ds.load_exp_curve(trim_tail=trim_tail))
 
-                exp_curve = ds.load_exp_curve(trim_tail=trim_tail)
                 loss = float(compare_to_exp(exp_curve, sim_sq, save_dir))
-
+                if not np.isfinite(loss):  # interpolation or scaling can still spit NaN
+                    raise ValueError("Non-finite loss (NaN/Inf) from compare_to_exp")
                 total_loss += ds.weight * loss
 
             except Exception as e:
@@ -291,7 +304,7 @@ def make_global_objective(
                     pass
 
         # Return as a 1-element tensor (BoTorch expects a tensor)
-        return torch.tensor([total_loss], dtype=torch.float64)
+        return torch.tensor([[total_loss]], dtype=torch.float64)
 
     return objective
 
