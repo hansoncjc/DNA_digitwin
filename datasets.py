@@ -50,7 +50,7 @@ class ExperimentalParams:
                  C_stock=60.0, V_stock=0.333, V_total=10.0, rho_si=2.2,
                  C_NaCl=10.0, C_chol=100.0, b_bridge=0.5,
                  L_poly=10.0, L_bridge=None, L_HBP=18.0,
-                 d_si=24.6, t_b=3.6,
+                 d_si=24.6, t_b=3.6, dna_coverage = None,
                  temperature_C=None, extra=None):
         # Stock / mixing
         self.C_stock = C_stock
@@ -114,7 +114,7 @@ class Dataset:
     id : str
         Short identifier, e.g., "d1".
     exp_path : str or pathlib.Path
-        Path to experimental .npy (shape (N,2) as [q, I]).
+        Path to experimental I(q) .npy (shape (N,2) as [q, I]).
     exp : ExperimentalParams or None
         If None, defaults are used.
     sim : SimulationParams or None
@@ -321,5 +321,5 @@ class Dataset:
         )
 
         # Auto-fill any missing sim fields, allowing per-dataset overrides via "mapping"
-        ds._autofill_sim_from_mappings(**d.get("mapping", {}))
+        ds._autofill_sim_from_default(**d.get("mapping", {}))
         return ds
