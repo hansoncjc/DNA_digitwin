@@ -254,6 +254,12 @@ def convert_to_SAXS(save_dir, path = None):
         np.save(path_intensity + f'Intensity_plot{-i}.npy', data)
         plt.savefig(path_intensity + f'Intensity_plot{-i}.png', dpi=600, bbox_inches="tight")
 
+        # Accumulate I(q) for averaging
+        if i == 1:
+            all_Iq = I_q.reshape(-1,1)
+        else:
+            all_Iq = np.hstack((all_Iq, I_q.reshape(-1,1)))
+
         # Convert to structure factor with a monodisperse sphere model
         q_sphere = np.geomspace(0.003, 0.08, 500)
         I_sphere = sphere(q_sphere, 130)
@@ -279,6 +285,17 @@ def convert_to_SAXS(save_dir, path = None):
         else:
             all_Sq = np.hstack((all_Sq, S_q[:,1].reshape(-1,1)))
 
+    # Plot and save averaged I(q)
+    fig_Iq, ax_Iq = plt.subplots(figsize=(10,7))
+    ax_Iq.plot(q_rescaled, np.mean(all_Iq, axis=1), color='k', linewidth=3, label='average I(q)')
+    ax_Iq.set_yscale('log'); ax_Iq.set_xscale('log')
+    ax_Iq.set_ylabel('I(q)'); ax_Iq.set_xlabel('q ($\\AA^{-1}$)')
+    plt.savefig(path_intensity + 'Intensity_plot_average.png', dpi=600, bbox_inches="tight")
+    plt.close(fig_Iq)
+
+    data_Iq = np.hstack((q_rescaled.reshape(-1,1), np.mean(all_Iq, axis=1).reshape(-1,1)))
+    np.save(path_intensity + 'average_intensity.npy', data_Iq)
+
     fig3, ax3 = plt.subplots(figsize=(10,7))
     ax3.plot(S_q[:,0], np.mean(all_Sq, axis=1), color='k', linewidth=3, label='average S(q)')
     ax3.set_yscale('log'); ax3.set_xscale('log')
@@ -288,3 +305,44 @@ def convert_to_SAXS(save_dir, path = None):
 
     data = np.hstack((S_q[:,0].reshape(-1,1), np.mean(all_Sq, axis=1).reshape(-1,1)))
     np.save(path_structure_factor + 'average_structure_factor.npy', data)
+
+import os
+import numpy as np
+
+def extract_exp_sq(
+    exp_scattering: np.ndarray,
+    ffpath: str,
+    q_min: float = 0.02,
+    q_max: float = 0.03,
+    normalize: bool = False,
+) -> np.ndarray:
+    """
+    Convert experimental scattering intensity [q, I(q)] to an effective
+    structure factor [q, S(q)] using the same polydisperse-sphere
+    form factor as the monolith script.
+
+    Parameters
+    ----------
+    exp_scattering : (N, 2) ndarray
+        Experimental [q, I(q)].
+    ffpath : 
+        Selects which form-factor file to use. Should receive a path.
+    q_min, q_max : float
+        q-window passed to calculate_structure_factor (monolith used 0.02–0.03).
+    normalize : bool
+        Passed through to calculate_structure_factor.
+
+    Returns
+    -------
+    sq : (M, 2) ndarray
+        Effective [q, S(q)] over the chosen q-range.
+    """
+    sphere_polydisperse = np.loadtxt(ffpath, skiprows=1)
+    sq = calculate_structure_factor(
+        sphere_polydisperse,
+        exp_scattering,
+        q_min,
+        q_max,
+        plot = False,
+    )
+    return sq
