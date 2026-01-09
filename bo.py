@@ -36,7 +36,7 @@ from bo import ParamSpace, make_global_objective, run_bo
 ps = ParamSpace(param_cfg, dataset_ids=[d.id for d in datasets])
 
 obj = make_global_objective(datasets, ps, out_root="Optimization_Results",
-                            trim_tail=200, sim_defaults={"steps": 1_500_000})
+                            trim_tail=0, sim_defaults={"steps": 1_500_000})
 
 best, history = run_bo(obj, ps, n_iters=20, seed=0)
 print("Best params (physical):", ps.decode(best))
@@ -47,12 +47,79 @@ import numpy as np
 import torch
 from torch import tensor
 from typing import Dict, List, Tuple, Any
+import csv
 
 from simulation import run_simulation
-from scattering import convert_to_SAXS
+from scattering import convert_to_SAXS, extract_exp_sq
 from metrics import compare_to_exp
 
-#
+# ------------------------- Modes & param types ------------------------- #
+
+# Parameters that correspond to direct simulation inputs
+_SIM_PARAMS = {"density", "r0", "U0"}
+
+# Parameters that don't correpond to modes
+_ALWAYS_OK_SIM = {"n", "m"}
+
+# Parameters that correspond to mapping coefficients
+_MAP_PARAMS = {"alpha", "k", "A", "mu_c", "sigma_c", "sigma_b", "mu_b"}
+
+
+def _validate_param_mode(ps, mode: str) -> None:
+    """
+    Ensure that the ParamSpace configuration is consistent with the chosen mode.
+
+    mode = "map": only mapping parameters (alpha, k, A, ...) are allowed.
+    mode = "sim": only direct simulation parameters (density, r0, U0, ...) are allowed.
+
+    n and m are always treated as *simulation* parameters and are allowed in both modes.
+    """
+    if mode not in ("map", "sim"):
+        raise ValueError(f"Unknown mode '{mode}'. Expected 'map' or 'sim'.")
+
+    g_names = set(ps.cfg.get("global", {}).keys())
+    l_names = set(ps.cfg.get("local", {}).keys())
+
+    if mode == "map":
+        illegal = (g_names | l_names) & _SIM_PARAMS
+        if illegal:
+            raise ValueError(
+                "ParamSpace configuration is inconsistent with mode='map'. "
+                f"These direct simulation parameters are not allowed here: {sorted(illegal)}"
+            )
+    else:  # mode == "sim"
+        illegal = (g_names | l_names) & _MAP_PARAMS
+        if illegal:
+            raise ValueError(
+                "ParamSpace configuration is inconsistent with mode='sim'. "
+                f"These mapping parameters are not allowed here: {sorted(illegal)}"
+            )
+def describe_training_config(ps, mode: str) -> str:
+    """
+    Return a human-readable description of what the BO objective will train,
+    given the ParamSpace and the chosen mode.
+
+    You can simply print(describe_training_config(ps, mode)) from your script.
+    """
+    g_names = set(ps.cfg.get("global", {}).keys())
+    l_names = set(ps.cfg.get("local", {}).keys())
+
+    map_params = (g_names | l_names) & _MAP_PARAMS
+    sim_params     = (g_names | l_names) & _SIM_PARAMS
+
+    lines = []
+    lines.append(f"Training mode: {mode}")
+    lines.append(f"  Global params: {sorted(g_names)}")
+    lines.append(f"  Local  params: {sorted(l_names)}")
+    lines.append(f"  Recognized map params: {sorted(map_params)}")
+    lines.append(f"  Recognized sim params:     {sorted(sim_params)}")
+    if mode == "map" and sim_params:
+        lines.append("  [WARNING] sim params present but will cause an error if used with mode='map'.")
+    if mode == "sim" and map_params:
+        lines.append("  [WARNING] map params present but will cause an error if used with mode='sim'.")
+    return "\n".join(lines)
+
+# ------------------------- Nan Handling ------------------------- #
 def _sanitize_curve(arr: np.ndarray) -> np.ndarray:
     arr = np.asarray(arr)
     arr = arr[np.isfinite(arr).all(axis=1)]
@@ -62,9 +129,10 @@ def _sanitize_curve(arr: np.ndarray) -> np.ndarray:
     uq, idx = np.unique(q, return_index=True)  # remove duplicate q (interp1d hates these)
     q, I = uq, I[idx]
     I = np.clip(I, 1e-12, None)               # avoid log(0) downstream
-    return np.column_stack([q, I])
-# ------------------------- Parameter packing ------------------------- #
 
+    return np.column_stack([q, I])
+
+# ------------------------- Parameter packing ------------------------- #
 class ParamSpace:
     """
     Pack/unpack parameters for BO with global + per-dataset roles.
@@ -191,9 +259,11 @@ class ParamSpace:
 def make_global_objective(
     datasets: List[Any],
     ps: ParamSpace,
+    ffpath: str,
     out_root: str = "Optimization_Results",
     trim_tail: int = 200,
     sim_defaults: Dict[str, Any] = None,
+    mode: str = "map"
 ):
     """
     Create an objective(x_unit) that:
@@ -215,12 +285,36 @@ def make_global_objective(
         * else if GLOBAL ("A","mu_c","sigma_c","sigma_b") present, use dataset.U0_from_gaussian(...),
         * else if dataset.sim.U0 is set, use it,
         * else raise.
+    mode: default to be "map"
+    ----
+    "map" (default):
+        density, r0, U0 are computed via dataset mappings
+        (alpha → density, k → r0, A/mu_c/sigma_* → U0).
+        Direct sim params (density/r0/U0) are not allowed in ParamSpace.
+    "sim":
+        density, r0, U0 are taken directly from ParamSpace (global/local),
+        or fall back to dataset.sim.* if not optimized.
+        Mapping params (alpha/k/A/...) are not allowed in ParamSpace.
 
+    "trim_tail":
+        number of points to drop from the end of the experimental intensity 
+            curve returned by Dataset.load_exp_curve.
+        If exp_path already points to a processed S(q), set trim_tail=0.
     Exceptions during any dataset evaluation yield a large penalty to keep BO stable.
     """
     sim_defaults = {} if sim_defaults is None else dict(sim_defaults)
 
-    def objective(x_unit: torch.Tensor) -> torch.Tensor:
+    # Ensure the ParamSpace is consistent with the chosen mode
+    _validate_param_mode(ps, mode)
+
+    def objective(x_unit: torch.Tensor, ffpath: str) -> torch.Tensor:
+        # assign a unique id to this BO evaluation
+        # ffpath: path to polydispersed sphere formfactor
+        if not hasattr(objective, "_eval_id"):
+            objective._eval_id = 0
+        eval_id = objective._eval_id
+        objective._eval_id += 1
+
         # x_unit: (1,d) or (d,)
         x_unit = x_unit.reshape(-1)
         # 1) map [0,1] → physical
@@ -234,38 +328,104 @@ def make_global_objective(
 
         for ds in datasets:
             try:
-                # ---- Shared params ----
-                alpha = float(G.get("alpha", 1.0))
-                density = ds.rho_N(alpha=alpha)
-
+                # ---- Shared n, m (always "sim" style) ----
                 n = float(G["n"]) if "n" in G else float(ds.sim.n)
                 m = float(G["m"]) if "m" in G else float(ds.sim.m)
 
-                # ---- Per-dataset r0 ----
-                if "r0" in L[ds.id]:
-                    r0 = float(L[ds.id]["r0"])
-                elif "k" in G:
-                    r0 = float(ds.r0_sigma(k=float(G["k"])))
-                elif ds.sim.r0 is not None:
-                    r0 = float(ds.sim.r0)
-                else:
-                    raise ValueError(f"Dataset {ds.id}: r0 not provided and no mapping coeff 'k' found.")
+                # ---- density ----
+                if mode == "map":
+                    alpha = float(G.get("alpha", 1.0))
+                    density = ds.rho_N(alpha=alpha)
+                else:  # mode == "sim"
+                    # Prefer local, then global, then dataset.sim
+                    if "density" in L[ds.id]:
+                        density = float(L[ds.id]["density"])
+                    elif "density" in G:
+                        density = float(G["density"])
+                    elif ds.sim.density is not None:
+                        density = float(ds.sim.density)
+                    else:
+                        raise ValueError(
+                            f"Dataset {ds.id}: density not provided in mode='sim' "
+                            "and dataset.sim.density is None."
+                        )
 
-                # ---- Per-dataset U0 ----
-                if "U0" in L[ds.id]:
-                    U0 = float(L[ds.id]["U0"])
-                elif all(k in G for k in ("A", "mu_c", "sigma_c", "sigma_b")):
-                    U0 = float(ds.U0_from_gaussian(A=G["A"], mu_c=G["mu_c"],
-                                                   sigma_c=G["sigma_c"], sigma_b=G["sigma_b"]))
-                elif ds.sim.U0 is not None:
-                    U0 = float(ds.sim.U0)
-                else:
-                    raise ValueError(f"Dataset {ds.id}: U0 not provided and no global Gaussian coeffs found.")
+                # ---- r0 ----
+                if mode == "map":
+                    if "k" in G:
+                        r0 = float(ds.r0_sigma(k=float(G["k"])))
+                    elif ds.sim.r0 is not None:
+                        r0 = float(ds.sim.r0)
+                    else:
+                        raise ValueError(
+                            f"Dataset {ds.id}: r0 not provided and no mapping coeff 'k' found "
+                            "in mode='map'."
+                        )
+                else:  # mode == "sim"
+                    if "r0" in L[ds.id]:
+                        r0 = float(L[ds.id]["r0"])
+                    elif "r0" in G:
+                        r0 = float(G["r0"])
+                    elif ds.sim.r0 is not None:
+                        r0 = float(ds.sim.r0)
+                    else:
+                        raise ValueError(
+                            f"Dataset {ds.id}: r0 not provided in mode='sim' "
+                            "and dataset.sim.r0 is None."
+                        )
+
+                # ---- U0 ----
+                if mode == "map":
+                    if all(k in G for k in ("A", "mu_c", "sigma_c", "sigma_b")):
+                        U0 = float(
+                            ds.U0_from_gaussian(
+                                A=G["A"],
+                                mu_c=G["mu_c"],
+                                sigma_c=G["sigma_c"],
+                                sigma_b=G["sigma_b"],
+                            )
+                        )
+                    elif ds.sim.U0 is not None:
+                        U0 = float(ds.sim.U0)
+                    else:
+                        raise ValueError(
+                            f"Dataset {ds.id}: U0 not provided and no global Gaussian coeffs "
+                            "found in mode='map'."
+                        )
+                else:  # mode == "sim"
+                    if "U0" in L[ds.id]:
+                        U0 = float(L[ds.id]["U0"])
+                    elif "U0" in G:
+                        U0 = float(G["U0"])
+                    elif ds.sim.U0 is not None:
+                        U0 = float(ds.sim.U0)
+                    else:
+                        raise ValueError(
+                            f"Dataset {ds.id}: U0 not provided in mode='sim' "
+                            "and dataset.sim.U0 is None."
+                        )
 
                 # ---- Output directory ----
-                save_dir = ds.out_dir or os.path.join(out_root, f"dataset_{ds.id}")
-                os.makedirs(save_dir, exist_ok=True)
+                base_dir = ds.out_dir or os.path.join(out_root, ds.id)
 
+                # make a unique folder per BO evaluation
+                save_dir = os.path.join(base_dir, f"eval_{eval_id:03d}")
+                os.makedirs(save_dir, exist_ok=True)
+                # ---- save sim params for this eval + dataset ----
+                sim_params_record = {
+                    "dataset_id": ds.id,
+                    "eval_id": eval_id,
+                    "density": float(density),
+                    "n": float(n),
+                    "m": float(m),
+                    "r0": float(r0),
+                    "U0": float(U0),
+                }
+                param_path = os.path.join(save_dir, f"sim_params_{ds.id}.csv")
+                with open(param_path, "w", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=list(sim_params_record.keys()))
+                    writer.writeheader()
+                    writer.writerow(sim_params_record)
                 # ---- 1) Simulation ----
                 _ = run_simulation(
                     density=density, U_0=U0, r0=r0, n=n, m=m, outdir=save_dir, **sim_defaults
@@ -280,28 +440,30 @@ def make_global_objective(
                     os.path.join(save_dir, "scattering_data", "average_structure_factor.npy"),
                     os.path.join(save_dir, "S(q)_", "average_structure_factor.npy"),
                     os.path.join(save_dir, "S(q)", "average_structure_factor.npy"),
-                    os.path.join(save_dir, "I(q)_data", "average_structure_factor.npy"),
                 ]
                 sim_sq_path = next((p for p in cand_paths if os.path.exists(p)), None)
                 if sim_sq_path is None:
                     raise FileNotFoundError(f"Missing S(q): tried {cand_paths}")
-                sim_sq = _sanitize_curve(np.load(sim_sq_path))
-                exp_curve = _sanitize_curve(ds.load_exp_curve(trim_tail=trim_tail))
+                sim_sq = np.load(sim_sq_path)
 
-                loss = float(compare_to_exp(exp_curve, sim_sq, save_dir))
-                if not np.isfinite(loss):  # interpolation or scaling can still spit NaN
-                    raise ValueError("Non-finite loss (NaN/Inf) from compare_to_exp")
+                exp_Iq = ds.load_exp_curve(trim_tail=trim_tail)
+                exp_sq = extract_exp_sq(
+                    exp_scattering=exp_Iq,
+                    ffpath=ffpath,
+                    q_min=0.02,
+                    q_max=0.03,
+                    normalize=False)
+                loss = float(compare_to_exp(exp_sq, sim_sq, save_dir))
                 total_loss += ds.weight * loss
 
             except Exception as e:
-                # Large penalty for any failure in this dataset
                 total_loss += 1e9
-                # Optional: write the error to a file for debugging
                 try:
                     with open(os.path.join(ds.out_dir or out_root, f"error_{ds.id}.txt"), "a") as fh:
                         fh.write(str(e) + "\n")
                 except Exception:
                     pass
+
 
         # Return as a 1-element tensor (BoTorch expects a tensor)
         return torch.tensor([[total_loss]], dtype=torch.float64)
@@ -314,6 +476,7 @@ def make_global_objective(
 def run_bo(
     objective_fn,
     ps: ParamSpace,
+    ffpath: str,
     n_iters: int = 20,
     seed: int = 0,
 ):
@@ -333,7 +496,7 @@ def run_bo(
 
     # Initial design (1 point at provided init)
     x_unit = ps.init_unit().to(dtype).unsqueeze(0)  # (1,d)
-    y = -objective_fn(x_unit)  # maximize EI on negative loss
+    y = -objective_fn(x_unit, ffpath = ffpath)  # maximize EI on negative loss
     train_x = x_unit.clone()
     train_y = y.clone()
 
@@ -366,7 +529,7 @@ def run_bo(
         )
 
         # Evaluate objective at candidate
-        y_new = -objective_fn(cand)  # negative loss for maximization
+        y_new = -objective_fn(cand, ffpath = ffpath)  # negative loss for maximization
         train_x = torch.cat([train_x, cand], dim=0)
         train_y = torch.cat([train_y, y_new], dim=0)
 
@@ -378,3 +541,110 @@ def run_bo(
     best_x_phys = ps.unit_to_phys(best_x_unit)
 
     return best_x_phys, history
+
+# # ------------------------- 2-Stage BO runner ------------------------- #
+# def run_two_stage_bo(
+#     datasets,
+#     global_param_cfg: Dict[str, Dict[str, float]],
+#     local_param_cfg: Dict[str, Dict[str, float]],
+#     ffpath: str,
+#     out_root: str = "Optimization_Results",
+#     trim_tail: int = 200,
+#     sim_defaults: Dict[str, Any] = None,
+#     mode: str = "map",
+#     n_global_iters: int = 20,
+#     n_local_iters: int = 20,
+#     seed: int = 0,
+# ):
+#     """
+#     Convenience helper that implements the 2-stage schedule:
+
+#     1) Stage 1 (GLOBAL):
+#        - Optimize only the GLOBAL parameters (shared across all datasets).
+#        - Loss = sum of dataset losses.
+
+#     2) Stage 2 (LOCAL):
+#        - For each dataset individually, fit LOCAL parameters while keeping
+#          the GLOBAL ones fixed at the Stage-1 optimum.
+
+#     Returns
+#     -------
+#     results : dict with keys
+#         "global"         : dict of best global params
+#         "global_history" : list of losses from global BO
+#         "local"          : {ds.id: {local_param_name: value, ...}, ...}
+#         "local_history"  : {ds.id: [loss_0, loss_1, ...], ...}
+#     """
+#     sim_defaults = {} if sim_defaults is None else dict(sim_defaults)
+#     dataset_ids = [ds.id for ds in datasets]
+
+#     # -------------------- Stage 1: GLOBAL only -------------------- #
+#     ps_global = ParamSpace(
+#         {"global": dict(global_param_cfg), "local": {}},
+#         dataset_ids=dataset_ids,
+#     )
+#     _validate_param_mode(ps_global, mode)
+
+#     obj_global = make_global_objective(
+#         datasets=datasets,
+#         ps=ps_global,
+#         ffpath = ffpath,
+#         out_root=out_root,
+#         trim_tail=trim_tail,
+#         sim_defaults=sim_defaults,
+#         mode=mode,
+#     )
+
+#     best_global_vec, global_history = run_bo(
+#         obj_global, ps_global, ffpath = ffpath, n_iters=n_global_iters, seed=seed
+#     )
+#     decoded_global = ps_global.decode(best_global_vec)["global"]
+
+#     results = {
+#         "global": decoded_global,
+#         "global_history": global_history,
+#         "local": {},
+#         "local_history": {},
+#     }
+
+#     # -------------------- Stage 2: LOCAL per-dataset -------------------- #
+#     for ds in datasets:
+#         # Freeze globals at the Stage-1 optimum by marking them as "fixed"
+#         global_cfg_stage2: Dict[str, Dict[str, float]] = {}
+#         for name, val in decoded_global.items():
+#             v = float(val)
+#             global_cfg_stage2[name] = {
+#                 "bounds": (v, v),
+#                 "init": v,
+#                 "fixed": v,
+#             }
+
+#         # Local config is the same for every dataset; ParamSpace will expand it
+#         param_cfg_stage2 = {
+#             "global": global_cfg_stage2,
+#             "local": dict(local_param_cfg),
+#         }
+
+#         ps_local = ParamSpace(param_cfg_stage2, dataset_ids=[ds.id])
+#         _validate_param_mode(ps_local, mode)
+
+#         obj_local = make_global_objective(
+#             datasets=[ds],
+#             ps=ps_local,
+#             ffpath = ffpath,
+#             out_root=out_root,
+#             trim_tail=trim_tail,
+#             sim_defaults=sim_defaults,
+#             mode=mode,
+#         )
+
+#         best_local_vec, local_history = run_bo(
+#             obj_local, ps_local, ffpath = ffpath, n_iters=n_local_iters, seed=seed
+#         )
+#         decoded_local = ps_local.decode(best_local_vec)
+
+#         # Store only the locals for this dataset id
+#         results["local"][ds.id] = decoded_local["local"][ds.id]
+#         results["local_history"][ds.id] = local_history
+
+#     return results
