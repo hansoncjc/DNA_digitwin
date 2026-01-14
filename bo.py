@@ -256,6 +256,50 @@ class ParamSpace:
 
 # ------------------------- Objective factory ------------------------- #
 
+def _write_iteration_block(filepath: str, iteration: int, total_loss: float, records: List[Dict[str, Any]]):
+    """
+    Append one iteration block to the global trajectory CSV.
+
+    Parameters
+    ----------
+    filepath : str
+        Path to the global trajectory CSV file (e.g., "Optimization_Results/bo_trajectory.csv")
+    iteration : int
+        Current iteration number
+    total_loss : float
+        Total loss summed across all datasets for this iteration
+    records : List[Dict[str, Any]]
+        List of parameter/loss records for each dataset in this iteration.
+        Each record should have keys: iteration, dataset_id, loss, k, alpha, A, etc.
+
+    Format
+    ------
+    # Iteration N,total_loss,<value>
+    iteration,dataset_id,loss,k,alpha,A,mu_c,mu_b,sigma_c,sigma_b,density,n,m,r0,U0
+    N,d0,loss_val,k_val,...
+    N,d1,loss_val,k_val,...
+    <blank line>
+    """
+    mode = 'a' if os.path.exists(filepath) else 'w'
+
+    with open(filepath, mode, newline='') as f:
+        writer = csv.writer(f)
+
+        # Header line with total loss
+        writer.writerow([f"# Iteration {iteration}", "total_loss", total_loss])
+
+        # Column headers
+        if len(records) > 0:
+            writer.writerow(list(records[0].keys()))
+
+        # Data rows
+        for record in records:
+            writer.writerow(list(record.values()))
+
+        # Blank separator line
+        writer.writerow([])
+
+
 def make_global_objective(
     datasets: List[Any],
     ps: ParamSpace,
@@ -312,6 +356,7 @@ def make_global_objective(
         # ffpath: path to polydispersed sphere formfactor
         if not hasattr(objective, "_eval_id"):
             objective._eval_id = 0
+            objective._iteration_data = []  # Track data for global CSV
         eval_id = objective._eval_id
         objective._eval_id += 1
 
@@ -406,15 +451,23 @@ def make_global_objective(
                         )
 
                 # ---- Output directory ----
-                base_dir = ds.out_dir or os.path.join(out_root, ds.id)
-
-                # make a unique folder per BO evaluation
-                save_dir = os.path.join(base_dir, f"eval_{eval_id:03d}")
+                # New structure: eval_XXX/d0/, eval_XXX/d1/, etc.
+                # (Groups all datasets from same iteration together)
+                save_dir = os.path.join(out_root, f"eval_{eval_id:03d}", ds.id)
                 os.makedirs(save_dir, exist_ok=True)
                 # ---- save sim params for this eval + dataset ----
                 sim_params_record = {
                     "dataset_id": ds.id,
                     "eval_id": eval_id,
+                    # Mapping coefficients (saved regardless of mode)
+                    "k": G.get("k", ""),
+                    "alpha": G.get("alpha", ""),
+                    "A": G.get("A", ""),
+                    "mu_c": G.get("mu_c", ""),
+                    "mu_b": G.get("mu_b", ""),
+                    "sigma_c": G.get("sigma_c", ""),
+                    "sigma_b": G.get("sigma_b", ""),
+                    # Simulation parameters
                     "density": float(density),
                     "n": float(n),
                     "m": float(m),
@@ -456,14 +509,65 @@ def make_global_objective(
                 loss = float(compare_to_exp(exp_sq, sim_sq, save_dir))
                 total_loss += ds.weight * loss
 
+                # Store data for global trajectory CSV
+                trajectory_record = {
+                    "iteration": eval_id,
+                    "dataset_id": ds.id,
+                    "loss": loss,
+                    "k": G.get("k", ""),
+                    "alpha": G.get("alpha", ""),
+                    "A": G.get("A", ""),
+                    "mu_c": G.get("mu_c", ""),
+                    "mu_b": G.get("mu_b", ""),
+                    "sigma_c": G.get("sigma_c", ""),
+                    "sigma_b": G.get("sigma_b", ""),
+                    "density": float(density),
+                    "n": float(n),
+                    "m": float(m),
+                    "r0": float(r0),
+                    "U0": float(U0),
+                }
+                objective._iteration_data.append(trajectory_record)
+
             except Exception as e:
                 total_loss += 1e9
                 try:
-                    with open(os.path.join(ds.out_dir or out_root, f"error_{ds.id}.txt"), "a") as fh:
+                    with open(os.path.join(out_root, f"error_{ds.id}.txt"), "a") as fh:
                         fh.write(str(e) + "\n")
                 except Exception:
                     pass
 
+                # Still track failed dataset in trajectory with error marker
+                trajectory_record = {
+                    "iteration": eval_id,
+                    "dataset_id": ds.id,
+                    "loss": 1e9,
+                    "k": G.get("k", ""),
+                    "alpha": G.get("alpha", ""),
+                    "A": G.get("A", ""),
+                    "mu_c": G.get("mu_c", ""),
+                    "mu_b": G.get("mu_b", ""),
+                    "sigma_c": G.get("sigma_c", ""),
+                    "sigma_b": G.get("sigma_b", ""),
+                    "density": "ERROR",
+                    "n": "ERROR",
+                    "m": "ERROR",
+                    "r0": "ERROR",
+                    "U0": "ERROR",
+                }
+                objective._iteration_data.append(trajectory_record)
+
+        # Write iteration block to global trajectory CSV
+        if len(objective._iteration_data) > 0:
+            trajectory_path = os.path.join(out_root, "bo_trajectory.csv")
+            _write_iteration_block(
+                filepath=trajectory_path,
+                iteration=eval_id,
+                total_loss=float(total_loss),
+                records=objective._iteration_data
+            )
+            # Reset for next iteration
+            objective._iteration_data = []
 
         # Return as a 1-element tensor (BoTorch expects a tensor)
         return torch.tensor([[total_loss]], dtype=torch.float64)
