@@ -225,7 +225,7 @@ class Dataset:
         num = 2.0 * (self.exp.t_b + LC_ss * self.exp.L_poly) + LC_ds * (2.0 * self.exp.L_HBP + self.exp.L_bridge)
         return 1.0 + float(k) * (num / self.exp.d_si)
 
-    def U0_from_gaussian(self, A=2.0, mu_c=100.0, mu_b = 0.5, sigma_c=0.1, sigma_b=15.0):
+    def U0_from_gaussian(self, A=2.0, mu_c=100.0, mu_b = 0.5, sigma_c=10.0, sigma_b=0.2):
         """
         Compute U0 from a separable Gaussian in C_chol and b_bridge.
 
@@ -237,8 +237,8 @@ class Dataset:
         --------------------
             default 2.0
             default 100.0
-            default 0.1
-            default 15.0
+            default 10.0
+            default 0.2
 
         Parameters
         ----------
