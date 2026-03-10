@@ -50,8 +50,8 @@ from typing import Dict, List, Tuple, Any
 import csv
 
 from simulation import run_simulation
-from scattering import convert_to_SAXS, extract_exp_sq
-from metrics import compare_to_exp
+from scattering import convert_to_SAXS, convert_to_SAXS_fft, extract_exp_sq
+from metrics import compare_to_exp, compare_to_exp_saxsfft
 
 # ------------------------- Modes & param types ------------------------- #
 
@@ -307,7 +307,9 @@ def make_global_objective(
     out_root: str = "Optimization_Results",
     trim_tail: int = 200,
     sim_defaults: Dict[str, Any] = None,
-    mode: str = "map"
+    mode: str = "map",
+    scattering_method: str = "saxsfft",
+    scattering_kwargs: Dict[str, Any] = None,
 ):
     """
     Create an objective(x_unit) that:
@@ -485,7 +487,11 @@ def make_global_objective(
                 )
 
                 # ---- 2) Sim → S(q) ----
-                convert_to_SAXS(save_dir)
+                _sc_kw = dict(scattering_kwargs) if scattering_kwargs else {}
+                if scattering_method == "saxsfft":
+                    convert_to_SAXS_fft(save_dir, **_sc_kw)
+                else:
+                    convert_to_SAXS(save_dir, **_sc_kw)
 
                 # ---- 3) Compare to experiment ----
                 cand_paths = [
@@ -506,7 +512,10 @@ def make_global_objective(
                     q_min=0.02,
                     q_max=0.03,
                     normalize=False)
-                loss = float(compare_to_exp(exp_sq, sim_sq, save_dir))
+                if scattering_method == "saxsfft":
+                    loss = float(compare_to_exp_saxsfft(exp_sq, sim_sq, save_dir))
+                else:
+                    loss = float(compare_to_exp(exp_sq, sim_sq, save_dir))
                 total_loss += ds.weight * loss
 
                 # Store data for global trajectory CSV

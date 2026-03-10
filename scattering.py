@@ -306,6 +306,84 @@ def convert_to_SAXS(save_dir, path = None):
     data = np.hstack((S_q[:,0].reshape(-1,1), np.mean(all_Sq, axis=1).reshape(-1,1)))
     np.save(path_structure_factor + 'average_structure_factor.npy', data)
 
+
+# ======== End-to-end: GSD → S(q) via saxs-fft ========
+
+def convert_to_SAXS_fft(save_dir, path=None, particle_diameter=24.6,
+                          N_grid=50, frames='last:150', trim=slice(3, -3)):
+    """
+    Compute the structure factor S(q) from a GSD trajectory using saxs-fft (FFT-based).
+
+    Unlike :func:`convert_to_SAXS` (MC-DFM), this function produces S(q) directly
+    from particle positions — no form-factor division is needed on the simulation
+    side.
+
+    Parameters
+    ----------
+    save_dir : str
+        Directory containing the GSD file (or where output will be saved).
+    path : str, optional
+        Explicit path to the GSD file.  If None, the first ``.gsd`` found in
+        ``save_dir`` is used.
+    particle_diameter : float
+        Particle diameter in **nm**.  Used by saxs-fft to convert q from
+        reduced simulation units to Å⁻¹ via ``q / (particle_diameter * 10)``.
+        Default is 24.6 nm.
+    N_grid : int
+        Number of FFT grid points in the smallest box dimension.
+    frames : str
+        Frame selection string, e.g. ``'last:150'``.
+    trim : slice
+        Slice applied to q and S(q) to remove FFT boundary artefacts.
+        Default ``slice(3, -3)`` drops the first and last 3 bins.
+
+    Outputs
+    -------
+    Saves to ``save_dir/S(q)_data/``:
+    - ``average_structure_factor.npy``  — (N, 2) array ``[q (Å⁻¹), S(q)]``
+    - ``average_structure_factor.png``  — log–log plot of the averaged S(q)
+    """
+    from saxsfft import StructureFactor
+
+    # ---- locate GSD ----
+    if path is None:
+        filenames = sorted(f for f in os.listdir(save_dir) if f.endswith('.gsd'))
+        if not filenames:
+            raise FileNotFoundError(f'No .gsd in {save_dir}')
+        file_path = os.path.join(save_dir, filenames[0])
+    else:
+        file_path = path
+
+    # ---- compute S(q) ----
+    sf = StructureFactor(
+        gsd_path=file_path,
+        N_grid=N_grid,
+        frames=frames,
+        particle_diameter=particle_diameter,
+        trim=trim,
+    )
+    q, S1d = sf.compute_s_1d()  # q already in Å⁻¹
+
+    # ---- save ----
+    path_structure_factor = os.path.join(save_dir, 'S(q)_data')
+    os.makedirs(path_structure_factor, exist_ok=True)
+
+    data = np.column_stack([q, S1d])
+    np.save(os.path.join(path_structure_factor, 'average_structure_factor.npy'), data)
+
+    # quick diagnostic plot
+    fig, ax = plt.subplots(figsize=(10, 7))
+    plt.rcParams.update({'font.size': 18})
+    ax.plot(q, S1d, color='k', linewidth=3, label='S(q) [saxs-fft]')
+    ax.set_yscale('log'); ax.set_xscale('log')
+    ax.set_ylabel('S(q)'); ax.set_xlabel('q ($\\AA^{-1}$)')
+    ax.legend()
+    plt.savefig(os.path.join(path_structure_factor, 'average_structure_factor.png'),
+                dpi=600, bbox_inches='tight')
+    plt.close(fig)
+
+    return data
+
 import os
 import numpy as np
 

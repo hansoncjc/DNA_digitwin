@@ -147,3 +147,43 @@ def compare_to_exp(experimental_data, simulated_data, save_dir):
     plt.savefig(os.path.join(save_dir, 'compare_to_exp_full_curve.png'), dpi=600, bbox_inches='tight')
     plt.close()
     return mse
+
+
+def compare_to_exp_saxsfft(experimental_data, simulated_data, save_dir):
+    """
+    Compare experimental and simulated S(q) using the wider q-range available
+    from saxs-fft.
+
+    Uses the same :func:`compare_saxs_curves` engine as :func:`compare_to_exp`,
+    but with a wider comparison window ``[0.001, 0.06]`` Å⁻¹.
+
+    Parameters
+    ----------
+    experimental_data : (N, 2) ndarray
+        Experimental [q, S(q)].
+    simulated_data : (N, 2) ndarray
+        Simulated [q, S(q)] from saxs-fft.
+    save_dir : str
+        Directory for diagnostic plots.
+
+    Returns
+    -------
+    float
+        AP distance (loss) over ``[0.001, 0.06]`` Å⁻¹.
+    """
+    q = [0.001, 0.06]
+    mse, q_ref, I_exp_resampled, I_sim_resampled = compare_saxs_curves(experimental_data, simulated_data, q)
+    plt.rcParams.update({'font.size': 18})
+    fig, ax = plt.subplots(figsize=(7, 6))
+    ax.scatter(q_ref, I_exp_resampled, linewidth=0.5, label='Exp_data', color='k')
+    ax.plot(q_ref, I_sim_resampled, linewidth=3, label='Sim_data', color='red')
+    ax.set_yscale('log')
+    ax.set_xscale('log')
+    ax.set_ylabel('Intensity (arb. unit)')
+    ax.set_xlabel('q ($\\AA^{-1}$)')
+    plt.title(str(mse))
+    plt.legend()
+    os.makedirs(save_dir, exist_ok=True)
+    plt.savefig(os.path.join(save_dir, 'compare_to_exp_saxsfft.png'), dpi=600, bbox_inches='tight')
+    plt.close()
+    return mse
