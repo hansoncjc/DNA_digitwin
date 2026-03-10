@@ -24,8 +24,8 @@ param_cfg = {
         # "k":       {"bounds": (0.5, 1.2),   "init": 0.76},  # r0 mapping coeff
         # "A":       {"bounds": (1.0, 20.0),  "init": 2.0},
         # "mu_c":    {"bounds": (40.0, 200.0),"init": 100.0},
-        # "sigma_c": {"bounds": (0.05, 0.5),  "init": 0.1},
-        # "sigma_b": {"bounds": (5.0, 25.0),  "init": 15.0},
+        # "sigma_c": {"bounds": (5.0, 25.0),  "init": 15.0},
+        # "sigma_b": {"bounds": (0.05, 0.5),  "init": 0.1},
     },
     "local": {
         # leave empty in Stage 1 (or put "U0"/"r0" here for Stage 2 refinements)
