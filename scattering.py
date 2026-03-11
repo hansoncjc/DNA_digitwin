@@ -310,7 +310,7 @@ def convert_to_SAXS(save_dir, path = None):
 # ======== End-to-end: GSD → S(q) via saxs-fft ========
 
 def convert_to_SAXS_fft(save_dir, path=None, particle_diameter=24.6,
-                          N_grid=50, frames='last:150', trim=slice(3, -3)):
+                          N_grid=300, frames='last:150', trim=slice(3, -3)):
     """
     Compute the structure factor S(q) from a GSD trajectory using saxs-fft (FFT-based).
 
