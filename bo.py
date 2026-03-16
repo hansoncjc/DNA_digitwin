@@ -505,13 +505,16 @@ def make_global_objective(
                     raise FileNotFoundError(f"Missing S(q): tried {cand_paths}")
                 sim_sq = np.load(sim_sq_path)
 
-                exp_Iq = ds.load_exp_curve(trim_tail=trim_tail)
-                exp_sq = extract_exp_sq(
-                    exp_scattering=exp_Iq,
-                    ffpath=ffpath,
-                    q_min=0.02,
-                    q_max=0.03,
-                    normalize=False)
+                exp_data = ds.load_exp_curve(trim_tail=trim_tail)
+                if getattr(ds, "datatype", "sq") == "sq":
+                    exp_sq = exp_data
+                else:
+                    exp_sq = extract_exp_sq(
+                        exp_scattering=exp_data,
+                        ffpath=ffpath,
+                        q_min=0.02,
+                        q_max=0.03,
+                        normalize=False)
                 if scattering_method == "saxsfft":
                     loss = float(compare_to_exp_saxsfft(exp_sq, sim_sq, save_dir))
                 else:

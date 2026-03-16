@@ -136,13 +136,14 @@ class Dataset:
         U0 = A * exp(-((x - B)^2)/(2*C^2)), where x = C_NaCl + C_chol + C_bridge.
     """
 
-    def __init__(self, id, exp_path, exp=None, sim=None, weight=1.0, out_dir=None):
+    def __init__(self, id, exp_path, exp=None, sim=None, weight=1.0, out_dir=None, datatype="sq"):
         self.id = id
         self.exp_path = Path(exp_path)
         self.exp = exp if exp is not None else ExperimentalParams()
         self.sim = sim if sim is not None else SimulationParams()
         self.weight = float(weight)
         self.out_dir = out_dir
+        self.datatype = datatype
         self._exp_curve_cache = None  # in-memory cache for the .npy
 
     def load_exp_curve(self, trim_tail=200):
@@ -318,6 +319,7 @@ class Dataset:
             sim=sim,
             weight=d.get("weight", 1.0),
             out_dir=d.get("out_dir"),
+            datatype=d.get("datatype", "sq"),
         )
 
         # Auto-fill any missing sim fields, allowing per-dataset overrides via "mapping"
