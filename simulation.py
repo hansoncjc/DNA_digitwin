@@ -5,6 +5,10 @@ run_simulation():
   - "modified_lj"  : n-m Lennard-Jones-like potential (original)
   - "shifted_mie"  : shifted Mie potential with hard-core offset r0 and
                      length-scale delta
+
+Table bounds (rmin, rmax) are derived analytically from the potential
+parameters rather than being hard-coded, so they remain valid across
+parameter sweeps.  See _compute_table_bounds() for the derivation.
 """
 from __future__ import annotations
 import os, time
@@ -62,7 +66,7 @@ def shifted_mie(r, rmin, rmax, U_0, n, m, r0, delta):
         Must satisfy rmin > r0 to avoid the xi = 0 singularity.
     delta : float
         Length scale.  The potential minimum sits at
-        r_min = r0 + delta * (n/m)^(1/(n-m)).
+        r_well = r0 + delta * (n/m)^(1/(n-m)).
 
     Returns
     -------
@@ -86,6 +90,132 @@ _POTENTIALS = {
 
 
 # ---------------------------------------------------------------------------
+# Physics-derived table bounds
+# ---------------------------------------------------------------------------
+
+def _compute_table_bounds(
+    potential: str,
+    U_0: float,
+    n: float,
+    m: float,
+    r0: float,
+    delta: float | None,
+    *,
+    tol_frac: float = 1e-4,
+    f_inner: float = 0.75,
+) -> tuple[float, float]:
+    """
+    Compute (rmin, rmax) analytically from the potential parameters.
+
+    The strategy for both potentials is:
+      - rmin: place it on the repulsive side of the well minimum, far
+              enough from any singularity to keep forces finite and
+              table values well-defined.
+      - rmax: solve for the separation at which the attractive tail
+              decays to U_tol = tol_frac * |U_0|.  This guarantees the
+              cutoff never truncates the well prematurely, regardless of
+              how (n, m, r0, delta) vary across a sweep.
+
+    Parameters
+    ----------
+    potential : {"modified_lj", "shifted_mie"}
+    U_0 : float   -- energy scale / well depth
+    n, m : float  -- repulsive and attractive exponents (n > m > 0)
+    r0 : float    -- reference length (modified_lj) or hard-core shift (shifted_mie)
+    delta : float -- length scale for shifted_mie; ignored for modified_lj
+    tol_frac : float
+        Fraction of |U_0| used as the tail-energy tolerance.
+        Default 1e-4 gives ~4 decimal places accuracy at the cutoff.
+    f_inner : float
+        Fraction of the inner potential minimum distance used to establish rmin.
+        For modified_lj: rmin = f_inner * r0.
+        For shifted_mie: rmin is placed at f_inner * xi_well above r0.
+        Must satisfy 0 < f_inner < 1. Default 0.75.
+
+    Returns
+    -------
+    rmin, rmax : float
+
+    Raises
+    ------
+    ValueError  -- if parameters would produce rmin >= rmax or rmin <= r0
+                   (shifted_mie only).
+
+    Notes
+    -----
+    modified_lj
+    -----------
+    The well minimum is exactly at r = r0.  The attractive tail behaves
+    asymptotically as:
+
+        U_attr(r) ~ U_0 * n/(n-m) * (r0/r)^m
+
+    Setting U_attr(rmax) = U_tol = tol_frac * |U_0| and solving:
+
+        rmax = r0 * (n / ((n-m) * tol_frac))^(1/m)
+
+    For rmin, a fraction f_inner below the minimum is used (repulsive side):
+
+        rmin = f_inner * r0
+
+    shifted_mie
+    -----------
+    Let xi = r - r0.  The singularity is at xi = 0 (r = r0).
+    The well minimum is at xi_well = delta * (n/m)^(1/(n-m)).
+    The Mie prefactor is C = n/(n-m) * (n/m)^(m/(n-m)).
+
+    rmin = r0 + f_inner * xi_well     (repulsive side, away from xi=0)
+           with hard clamp rmin > r0 + 1e-3
+
+    The attractive tail: U_attr ~ U_0 * C * (delta/xi)^m
+    Setting U_attr(xi_max) = U_tol:
+
+        xi_max = delta * (|U_0| * C / U_tol)^(1/m)
+               = delta * (C / tol_frac)^(1/m)
+        rmax   = r0 + xi_max
+    """
+    U_tol = tol_frac * abs(U_0)
+
+    if potential == "modified_lj":
+        # rmin: f_inner fraction of r0 (repulsive side of minimum at r0)
+        rmin = f_inner * r0
+
+        # rmax: tail decay to U_tol
+        # U_attr(r) ~ U_0 * n/(n-m) * (r0/r)^m  => rmax = r0*(n/((n-m)*tol_frac))^(1/m)
+        prefactor_m = n / (n - m)        # coefficient of the attractive (r0/r)^m term
+        rmax = r0 * (prefactor_m / tol_frac) ** (1.0 / m)
+
+    elif potential == "shifted_mie":
+        if delta is None:
+            raise ValueError("delta is required for shifted_mie bounds.")
+
+        C       = (n / (n - m)) * (n / m) ** (m / (n - m))
+        xi_well = delta * (n / m) ** (1.0 / (n - m))   # distance from r0 to well min
+
+        # rmin: f_inner fraction of the way to the well minimum
+        rmin = r0 + f_inner * xi_well
+        rmin = max(rmin, r0 + 1e-3)     # hard clamp away from singularity
+
+        # rmax: attractive tail decay to U_tol
+        # U_attr(xi) ~ U_0*C*(delta/xi)^m  => xi_max = delta*(|U_0|*C/U_tol)^(1/m)
+        xi_max = delta * (abs(U_0) * C / U_tol) ** (1.0 / m)
+        rmax   = r0 + xi_max
+
+    else:
+        raise ValueError(f"Unknown potential: {potential!r}")
+
+    if rmin >= rmax:
+        raise ValueError(
+            f"Computed rmin ({rmin:.4f}) >= rmax ({rmax:.4f}) for "
+            f"potential={potential!r}, n={n}, m={m}, r0={r0}, delta={delta}, "
+            f"tol_frac={tol_frac}.  Consider increasing tol_frac or checking "
+            f"that n > m > 0."
+        )
+
+    return rmin, rmax
+
+
+# ---------------------------------------------------------------------------
 # Main simulation entry-point
 # ---------------------------------------------------------------------------
 
@@ -103,7 +233,8 @@ def run_simulation(
     dt: float = 1e-3,
     steps: int = 15_000_000,
     kT: float = 1.0,
-    rmax: float = 5.0,
+    tol_frac: float = 1e-4,
+    f_inner: float = 0.75,
     device: str = "gpu",   # "cpu" also works on HOOMD 2.x
     seed: int = 42,
     plot: bool = True
@@ -119,23 +250,26 @@ def run_simulation(
         Energy scale / well depth.
     r0 : float
         Reference length.
-        - modified_lj : equilibrium distance scale (r_min ~ r0).
-        - shifted_mie : hard-core shift origin; xi = r - r0.
+        - modified_lj : equilibrium distance scale; well minimum is at r = r0.
+        - shifted_mie : hard-core shift origin; effective variable is xi = r - r0.
     n, m : float
-        Repulsive and attractive exponents (n > m).
+        Repulsive and attractive exponents (n > m > 0).
     outdir : str
         Directory to write artifacts (gsd, csv).
     potential : {"modified_lj", "shifted_mie"}
-        Selects the pair potential.  Default is ``"modified_lj"``
-        (preserves original behaviour).
+        Selects the pair potential.  Default is ``"modified_lj"``.
     delta : float, optional
         Length-scale parameter required by ``"shifted_mie"``.
         Ignored when ``potential="modified_lj"``.
     N, dt, steps, kT : see defaults
-    rmax : float
-        Table potential r-maximum.
-        - modified_lj : rmin defaults to 0.75 * r0
-        - shifted_mie : rmin defaults to r0 + 0.75 * delta  (keeps rmin > r0)
+    tol_frac : float
+        Fraction of |U_0| used as the energy tolerance for rmax.
+        rmax is the separation at which the attractive tail falls below
+        tol_frac * |U_0|.  Default 1e-4.  Increase (e.g. 1e-3) for a
+        shorter cutoff; decrease (e.g. 1e-6) for a longer one.
+    f_inner : float
+        Fraction of inner coordinate boundary to establish rmin.
+        rmin = f_inner * r0 (modified_lj) or r0 + f_inner * xi_well (shifted_mie). Default 0.75.
     device : {"gpu","cpu"}
         HOOMD context device mode.
     seed : int
@@ -151,13 +285,8 @@ def run_simulation(
     Raises
     ------
     ValueError
-        If an unknown potential name is given, or if ``"shifted_mie"`` is
-        selected without providing ``delta``.
-
-    Notes
-    -----
-    - This function is *purely simulation*: no plotting, no pandas.
-    - The potential and energy logging mirror the original script behaviour.
+        If an unknown potential name is given, if ``"shifted_mie"`` is
+        selected without providing ``delta``, or if the derived rmin >= rmax.
     """
     if potential not in _POTENTIALS:
         raise ValueError(
@@ -170,17 +299,19 @@ def run_simulation(
 
     os.makedirs(outdir, exist_ok=True)
 
+    # --- Analytically derived table bounds ---
+    rmin, rmax = _compute_table_bounds(
+        potential, U_0, n, m, r0, delta,
+        tol_frac=tol_frac, f_inner=f_inner
+    )
+    print(f"Table bounds: rmin={rmin:.4f}, rmax={rmax:.4f} "
+          f"(tol_frac={tol_frac}, f_inner={f_inner})")
+
     # --- HOOMD context ---
     mode_flag = "--mode=gpu" if device == "gpu" else "--mode=cpu"
     hoomd.context.initialize(mode_flag)
 
     # --- Derived params & box ---
-    # rmin depends on which potential is active.
-    if potential == "shifted_mie":
-        # Must stay > r0 to avoid xi = r - r0 = 0 singularity.
-        rmin = r0 + 0.75 * delta
-    else:
-        rmin = 0.75 * r0
     volume = N / density
     L = volume ** (1.0 / 3.0)  # cubic box from density.
 
