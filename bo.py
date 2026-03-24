@@ -310,6 +310,7 @@ def make_global_objective(
     mode: str = "map",
     scattering_method: str = "saxsfft",
     scattering_kwargs: Dict[str, Any] = None,
+    metric: str = "mse",
 ):
     """
     Create an objective(x_unit) that:
@@ -516,9 +517,9 @@ def make_global_objective(
                         q_max=0.03,
                         normalize=False)
                 if scattering_method == "saxsfft":
-                    loss = float(compare_to_exp_saxsfft(exp_sq, sim_sq, save_dir))
+                    loss = float(compare_to_exp_saxsfft(exp_sq, sim_sq, save_dir, metric=metric))
                 else:
-                    loss = float(compare_to_exp(exp_sq, sim_sq, save_dir))
+                    loss = float(compare_to_exp(exp_sq, sim_sq, save_dir, metric=metric))
                 total_loss += ds.weight * loss
 
                 # Store data for global trajectory CSV
