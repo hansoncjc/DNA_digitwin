@@ -16,7 +16,7 @@ from scipy.interpolate import interp1d
 from apdist.distances import AmplitudePhaseDistance
 
 
-def compare_saxs_curves(exp_data, sim_data, q_range=None, scale_intensity=True):
+def compare_saxs_curves(exp_data, sim_data, q_range=None, scale_intensity=True, metric='mse'):
     """
     Compare two SAXS curves in log space.
 
@@ -96,17 +96,25 @@ def compare_saxs_curves(exp_data, sim_data, q_range=None, scale_intensity=True):
     scale_factor = np.mean(I_exp_resampled[-6:-1]) / np.mean(I_sim_resampled[-6:-1])
     I_sim_scaled = I_sim_resampled * scale_factor
 
-    # AP distance on log10 intensities (same as original)
+    # Distance evaluation
     log_I_exp = np.log10(I_exp_resampled)
     log_I_sim = np.log10(I_sim_scaled)
-    q_AP = np.linspace(q_ref[0], q_ref[-1], len(q_ref))
-    da, dp = AmplitudePhaseDistance(q_AP, log_I_exp, log_I_sim)
-    d_ap = da + dp
+    
+    if metric == 'apdist':
+        # AP distance on log10 intensities (same as original)
+        q_AP = np.linspace(q_ref[0], q_ref[-1], len(q_ref))
+        da, dp = AmplitudePhaseDistance(q_AP, log_I_exp, log_I_sim)
+        distance = da + dp
+    elif metric == 'mse':
+        # Mean Squared Error on log10 intensities
+        distance = np.mean((log_I_exp - log_I_sim)**2)
+    else:
+        raise ValueError(f"Unknown metric chosen: {metric}")
 
-    return d_ap, q_ref, I_exp_resampled, I_sim_scaled
+    return distance, q_ref, I_exp_resampled, I_sim_scaled
 
 
-def compare_to_exp(experimental_data, simulated_data, save_dir):
+def compare_to_exp(experimental_data, simulated_data, save_dir, metric='mse'):
     """
     Generate the two diagnostic plots (as in the original) and return the short-window score.
 
@@ -117,7 +125,7 @@ def compare_to_exp(experimental_data, simulated_data, save_dir):
     - Return the first window’s AP distance.
     """
     q = [0.003, 0.03]
-    mse, q_ref, I_exp_resampled, I_sim_resampled = compare_saxs_curves(experimental_data, simulated_data, q)
+    mse, q_ref, I_exp_resampled, I_sim_resampled = compare_saxs_curves(experimental_data, simulated_data, q, metric=metric)
     plt.rcParams.update({'font.size': 18})
     fig, ax = plt.subplots(figsize=(7,6))
     ax.scatter(q_ref, I_exp_resampled, linewidth=0.5, label='Exp_data', color='k')
@@ -133,7 +141,7 @@ def compare_to_exp(experimental_data, simulated_data, save_dir):
     plt.close()
 
     q = [0.003, 0.07]
-    mse2, q_ref, I_exp_resampled, I_sim_resampled = compare_saxs_curves(experimental_data, simulated_data, q)
+    mse2, q_ref, I_exp_resampled, I_sim_resampled = compare_saxs_curves(experimental_data, simulated_data, q, metric=metric)
     plt.rcParams.update({'font.size': 18})
     fig, ax = plt.subplots(figsize=(7,6))
     ax.scatter(q_ref, I_exp_resampled, linewidth=0.5, label='Exp_data', color='k')
@@ -149,7 +157,7 @@ def compare_to_exp(experimental_data, simulated_data, save_dir):
     return mse
 
 
-def compare_to_exp_saxsfft(experimental_data, simulated_data, save_dir):
+def compare_to_exp_saxsfft(experimental_data, simulated_data, save_dir, metric='mse'):
     """
     Compare experimental and simulated S(q) using the wider q-range available
     from saxs-fft.
@@ -172,7 +180,7 @@ def compare_to_exp_saxsfft(experimental_data, simulated_data, save_dir):
         AP distance (loss) over ``[0.001, 0.06]`` Å⁻¹.
     """
     q = [0.001, 0.06]
-    mse, q_ref, I_exp_resampled, I_sim_resampled = compare_saxs_curves(experimental_data, simulated_data, q)
+    mse, q_ref, I_exp_resampled, I_sim_resampled = compare_saxs_curves(experimental_data, simulated_data, q, metric=metric)
     plt.rcParams.update({'font.size': 18})
     fig, ax = plt.subplots(figsize=(7, 6))
     ax.scatter(q_ref, I_exp_resampled, linewidth=0.5, label='Exp_data', color='k')
