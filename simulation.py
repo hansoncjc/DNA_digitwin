@@ -101,8 +101,8 @@ def _compute_table_bounds(
     r0: float,
     delta: float | None,
     *,
-    tol_frac: float = 1e-4,
-    f_inner: float = 0.75,
+    t_tol_lj: float = 0.02,
+    t_tol_mie: float = 4.7,
 ) -> tuple[float, float]:
     """
     Compute (rmin, rmax) analytically from the potential parameters.
@@ -112,7 +112,7 @@ def _compute_table_bounds(
               enough from any singularity to keep forces finite and
               table values well-defined.
       - rmax: solve for the separation at which the attractive tail
-              decays to U_tol = tol_frac * |U_0|.  This guarantees the
+              decays to the tolerance t_tol.  This guarantees the
               cutoff never truncates the well prematurely, regardless of
               how (n, m, r0, delta) vary across a sweep.
 
@@ -123,14 +123,12 @@ def _compute_table_bounds(
     n, m : float  -- repulsive and attractive exponents (n > m > 0)
     r0 : float    -- reference length (modified_lj) or hard-core shift (shifted_mie)
     delta : float -- length scale for shifted_mie; ignored for modified_lj
-    tol_frac : float
-        Fraction of |U_0| used as the tail-energy tolerance.
-        Default 1e-4 gives ~4 decimal places accuracy at the cutoff.
-    f_inner : float
-        Fraction of the inner potential minimum distance used to establish rmin.
-        For modified_lj: rmin = f_inner * r0.
-        For shifted_mie: rmin is placed at f_inner * xi_well above r0.
-        Must satisfy 0 < f_inner < 1. Default 0.75.
+    t_tol_lj : float
+        Tail-energy tolerance used as rmax cutoff for modified_lj.
+        rmax is where U_attr = t_tol_lj * (n/(n-m)).  Default 0.02.
+    t_tol_mie : float
+        Tail-energy tolerance used as rmax cutoff for shifted_mie.
+        rmax is where U_attr tail equals t_tol_mie.  Default 4.7.
 
     Returns
     -------
@@ -138,67 +136,55 @@ def _compute_table_bounds(
 
     Raises
     ------
-    ValueError  -- if parameters would produce rmin >= rmax or rmin <= r0
-                   (shifted_mie only).
+    ValueError  -- if parameters would produce rmin >= rmax.
 
     Notes
     -----
     modified_lj
     -----------
-    The well minimum is exactly at r = r0.  The attractive tail behaves
-    asymptotically as:
+    The well minimum is exactly at r = r0.  rmin is fixed at 0.7 * r0
+    (repulsive side).  The attractive tail behaves asymptotically as:
 
         U_attr(r) ~ U_0 * n/(n-m) * (r0/r)^m
 
-    Setting U_attr(rmax) = U_tol = tol_frac * |U_0| and solving:
+    Setting U_attr(rmax) = t_tol_lj * |U_0| and solving:
 
-        rmax = r0 * (n / ((n-m) * tol_frac))^(1/m)
-
-    For rmin, a fraction f_inner below the minimum is used (repulsive side):
-
-        rmin = f_inner * r0
+        rmax = r0 * (n / ((n-m) * t_tol_lj))^(1/m)
 
     shifted_mie
     -----------
     Let xi = r - r0.  The singularity is at xi = 0 (r = r0).
-    The well minimum is at xi_well = delta * (n/m)^(1/(n-m)).
     The Mie prefactor is C = n/(n-m) * (n/m)^(m/(n-m)).
 
-    rmin = r0 + f_inner * xi_well     (repulsive side, away from xi=0)
-           with hard clamp rmin > r0 + 1e-3
+    rmin is fixed at r0 + 0.7 * delta (symmetric with modified_lj).
 
     The attractive tail: U_attr ~ U_0 * C * (delta/xi)^m
-    Setting U_attr(xi_max) = U_tol:
+    Setting U_attr(xi_max) = t_tol_mie and solving directly:
 
-        xi_max = delta * (|U_0| * C / U_tol)^(1/m)
-               = delta * (C / tol_frac)^(1/m)
+        xi_max = delta * (|U_0| * C / t_tol_mie)^(1/m)
         rmax   = r0 + xi_max
     """
-    U_tol = tol_frac * abs(U_0)
-
     if potential == "modified_lj":
-        # rmin: f_inner fraction of r0 (repulsive side of minimum at r0)
-        rmin = f_inner * r0
+        # rmin: fixed at 0.7 * r0 (repulsive side of minimum at r0)
+        rmin = 0.7 * r0
 
-        # rmax: tail decay to U_tol
-        # U_attr(r) ~ U_0 * n/(n-m) * (r0/r)^m  => rmax = r0*(n/((n-m)*tol_frac))^(1/m)
+        # rmax: tail decay to t_tol_lj
+        # U_attr(r) ~ U_0 * n/(n-m) * (r0/r)^m  => rmax = r0*(n/((n-m)*t_tol_lj))^(1/m)
         prefactor_m = n / (n - m)        # coefficient of the attractive (r0/r)^m term
-        rmax = r0 * (prefactor_m / tol_frac) ** (1.0 / m)
+        rmax = r0 * (prefactor_m / t_tol_lj) ** (1.0 / m)
 
     elif potential == "shifted_mie":
         if delta is None:
             raise ValueError("delta is required for shifted_mie bounds.")
 
-        C       = (n / (n - m)) * (n / m) ** (m / (n - m))
-        xi_well = delta * (n / m) ** (1.0 / (n - m))   # distance from r0 to well min
+        C = (n / (n - m)) * (n / m) ** (m / (n - m))
 
-        # rmin: f_inner fraction of the way to the well minimum
-        rmin = r0 + f_inner * xi_well
-        rmin = max(rmin, r0 + 1e-3)     # hard clamp away from singularity
+        # rmin: fixed at r0 + 0.7 * delta (repulsive side, symmetric with modified_lj)
+        rmin = r0 + 0.7 * delta
 
-        # rmax: attractive tail decay to U_tol
-        # U_attr(xi) ~ U_0*C*(delta/xi)^m  => xi_max = delta*(|U_0|*C/U_tol)^(1/m)
-        xi_max = delta * (abs(U_0) * C / U_tol) ** (1.0 / m)
+        # rmax: attractive tail decay to t_tol_mie directly
+        # U_attr(xi) ~ U_0*C*(delta/xi)^m  => xi_max = delta*(|U_0|*C/t_tol_mie)^(1/m)
+        xi_max = delta * (abs(U_0) * C / t_tol_mie) ** (1.0 / m)
         rmax   = r0 + xi_max
 
     else:
@@ -207,9 +193,8 @@ def _compute_table_bounds(
     if rmin >= rmax:
         raise ValueError(
             f"Computed rmin ({rmin:.4f}) >= rmax ({rmax:.4f}) for "
-            f"potential={potential!r}, n={n}, m={m}, r0={r0}, delta={delta}, "
-            f"tol_frac={tol_frac}.  Consider increasing tol_frac or checking "
-            f"that n > m > 0."
+            f"potential={potential!r}, n={n}, m={m}, r0={r0}, delta={delta}.  "
+            f"Check that n > m > 0 and tolerance parameters are reasonable."
         )
 
     return rmin, rmax
@@ -233,8 +218,8 @@ def run_simulation(
     dt: float = 1e-3,
     steps: int = 15_000_000,
     kT: float = 1.0,
-    tol_frac: float = 1e-4,
-    f_inner: float = 0.75,
+    t_tol_lj: float = 0.02,
+    t_tol_mie: float = 4.7,
     device: str = "gpu",   # "cpu" also works on HOOMD 2.x
     seed: int = 42,
     plot: bool = True
@@ -262,14 +247,12 @@ def run_simulation(
         Length-scale parameter required by ``"shifted_mie"``.
         Ignored when ``potential="modified_lj"``.
     N, dt, steps, kT : see defaults
-    tol_frac : float
-        Fraction of |U_0| used as the energy tolerance for rmax.
-        rmax is the separation at which the attractive tail falls below
-        tol_frac * |U_0|.  Default 1e-4.  Increase (e.g. 1e-3) for a
-        shorter cutoff; decrease (e.g. 1e-6) for a longer one.
-    f_inner : float
-        Fraction of inner coordinate boundary to establish rmin.
-        rmin = f_inner * r0 (modified_lj) or r0 + f_inner * xi_well (shifted_mie). Default 0.75.
+    t_tol_lj : float
+        Tail-energy tolerance for rmax (modified_lj).  rmax is where the
+        attractive tail falls to t_tol_lj * |U_0|.  Default 0.02.
+    t_tol_mie : float
+        Tail-energy tolerance for rmax (shifted_mie).  rmax is where the
+        attractive tail falls to t_tol_mie.  Default 4.7.
     device : {"gpu","cpu"}
         HOOMD context device mode.
     seed : int
@@ -302,10 +285,10 @@ def run_simulation(
     # --- Analytically derived table bounds ---
     rmin, rmax = _compute_table_bounds(
         potential, U_0, n, m, r0, delta,
-        tol_frac=tol_frac, f_inner=f_inner
+        t_tol_lj=t_tol_lj, t_tol_mie=t_tol_mie
     )
     print(f"Table bounds: rmin={rmin:.4f}, rmax={rmax:.4f} "
-          f"(tol_frac={tol_frac}, f_inner={f_inner})")
+          f"(t_tol_lj={t_tol_lj}, t_tol_mie={t_tol_mie})")
 
     # --- HOOMD context ---
     mode_flag = "--mode=gpu" if device == "gpu" else "--mode=cpu"
