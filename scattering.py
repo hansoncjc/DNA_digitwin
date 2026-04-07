@@ -310,7 +310,7 @@ def convert_to_SAXS(save_dir, path = None):
 # ======== End-to-end: GSD → S(q) via saxs-fft ========
 
 def convert_to_SAXS_fft(save_dir, path=None, particle_diameter=24.6,
-                          N_grid=300, frames='last:150', trim=slice(3, -3)):
+                          N_grid=300, frames='last:100', step=5, trim=slice(3, -3)):
     """
     Compute the structure factor S(q) from a GSD trajectory using saxs-fft (FFT-based).
 
@@ -332,7 +332,7 @@ def convert_to_SAXS_fft(save_dir, path=None, particle_diameter=24.6,
     N_grid : int
         Number of FFT grid points in the smallest box dimension.
     frames : str
-        Frame selection string, e.g. ``'last:150'``.
+        Frame selection string, e.g. ``'last:100'``.
     trim : slice
         Slice applied to q and S(q) to remove FFT boundary artefacts.
         Default ``slice(3, -3)`` drops the first and last 3 bins.
@@ -359,6 +359,7 @@ def convert_to_SAXS_fft(save_dir, path=None, particle_diameter=24.6,
         gsd_path=file_path,
         N_grid=N_grid,
         frames=frames,
+        step=step,
         particle_diameter=particle_diameter,
         trim=trim,
     )
