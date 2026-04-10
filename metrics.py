@@ -71,21 +71,19 @@ def compare_saxs_curves(exp_data, sim_data, q_range=None, scale_intensity=True, 
     q_exp_crop, I_exp_crop = q_exp[mask_exp], I_exp[mask_exp]
     q_sim_crop, I_sim_crop = q_sim[mask_sim], I_sim[mask_sim]
 
-    # Resample to match shorter curve (original strategy)
-    if len(q_exp_crop) <= len(q_sim_crop):
-        q_ref = q_exp_crop
-        I_exp_resampled = I_exp_crop
-        I_sim_resampled = interp1d(
-            q_sim_crop, I_sim_crop, kind='linear',
-            bounds_error=False, fill_value='extrapolate'
-        )(q_ref)
-    else:
-        q_ref = q_sim_crop
-        I_sim_resampled = I_sim_crop
-        I_exp_resampled = interp1d(
-            q_exp_crop, I_exp_crop, kind='linear',
-            bounds_error=False, fill_value='extrapolate'
-        )(q_ref)
+    # Resample both curves onto a shared log-spaced q-grid
+    n_points = min(len(q_exp_crop), len(q_sim_crop))
+    q_ref = np.logspace(np.log10(q_min_common), np.log10(q_max_common), n_points)
+
+    I_exp_resampled = interp1d(
+        q_exp_crop, I_exp_crop, kind='linear',
+        bounds_error=False, fill_value='extrapolate'
+    )(q_ref)
+
+    I_sim_resampled = interp1d(
+        q_sim_crop, I_sim_crop, kind='linear',
+        bounds_error=False, fill_value='extrapolate'
+    )(q_ref)
 
     # Avoid log(0) by clipping
     eps = 1e-10
