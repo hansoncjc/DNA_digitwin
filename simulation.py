@@ -220,6 +220,7 @@ def run_simulation(
     kT: float = 1.0,
     t_tol_lj: float = 0.02,
     t_tol_mie: float = 4.7,
+    init_offset: float = 0.1,
     device: str = "gpu",   # "cpu" also works on HOOMD 2.x
     seed: int = 42,
     plot: bool = True
@@ -253,6 +254,9 @@ def run_simulation(
     t_tol_mie : float
         Tail-energy tolerance for rmax (shifted_mie).  rmax is where the
         attractive tail falls to t_tol_mie.  Default 4.7.
+    init_offset : float
+        Added to rmin to set the minimum distance between particles during
+        random initialization. Default 0.1.
     device : {"gpu","cpu"}
         HOOMD context device mode.
     seed : int
@@ -299,7 +303,8 @@ def run_simulation(
     L = volume ** (1.0 / 3.0)  # cubic box from density.
 
     # --- Generate non-overlapping initial positions (same strategy) ---
-    def generate_positions(N, L, min_dist=1.1):
+    def generate_positions(N, L, rmin, offset=0.1):
+        min_dist = rmin + offset
         positions, attempts, max_attempts = [], 0, N * 1000
         while len(positions) < N and attempts < max_attempts:
             pos = np.random.uniform(-L / 2, L / 2, 3)
@@ -309,7 +314,7 @@ def run_simulation(
         if len(positions) < N:
             raise RuntimeError("Failed to generate non-overlapping configuration.")
         return positions
-    positions = generate_positions(N, L)
+    positions = generate_positions(N, L, rmin=rmin, offset=init_offset)
 
     # --- Snapshot and system init ---
     snapshot = hoomd.data.make_snapshot(
