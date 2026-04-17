@@ -185,7 +185,20 @@ def _compute_table_bounds(
         # rmax: attractive tail decay to t_tol_mie directly
         # U_attr(xi) ~ U_0*C*(delta/xi)^m  => xi_max = delta*(|U_0|*C/t_tol_mie)^(1/m)
         xi_max = delta * (abs(U_0) * C / t_tol_mie) ** (1.0 / m)
-        rmax   = r0 + xi_max
+        rmax_raw = r0 + xi_max
+        # Sanity cap: rmax should not exceed half the box length,
+        # and realistically the tail is negligible beyond ~5*delta from r0
+        rmax_physical = r0 + 5.0 * delta
+        if rmax_raw > rmax_physical:
+            import warnings
+            warnings.warn(
+                f"Computed rmax ({rmax_raw:.3f}) exceeds physical cap "
+                f"({rmax_physical:.3f}). Clamping. Consider increasing t_tol_mie.",
+                RuntimeWarning
+            )
+            rmax = rmax_physical
+        else:
+            rmax = rmax_raw
 
     else:
         raise ValueError(f"Unknown potential: {potential!r}")
@@ -304,16 +317,34 @@ def run_simulation(
 
     # --- Generate non-overlapping initial positions (same strategy) ---
     def generate_positions(N, L, rmin, offset=0.1):
+        # min_dist = rmin + offset
+        # positions, attempts, max_attempts = [], 0, N * 1000
+        # while len(positions) < N and attempts < max_attempts:
+        #     pos = np.random.uniform(-L / 2, L / 2, 3)
+        #     if all(np.linalg.norm(pos - np.array(p)) >= min_dist for p in positions):
+        #         positions.append(pos)
+        #     attempts += 1
+        # if len(positions) < N:
+        #     raise RuntimeError("Failed to generate non-overlapping configuration.")
+        # return positions
+
+        # cubic lattice initialization
         min_dist = rmin + offset
-        positions, attempts, max_attempts = [], 0, N * 1000
-        while len(positions) < N and attempts < max_attempts:
-            pos = np.random.uniform(-L / 2, L / 2, 3)
-            if all(np.linalg.norm(pos - np.array(p)) >= min_dist for p in positions):
-                positions.append(pos)
-            attempts += 1
-        if len(positions) < N:
-            raise RuntimeError("Failed to generate non-overlapping configuration.")
-        return positions
+        n_side = int(np.ceil(N ** (1/3)))
+        spacing = L / n_side
+        if spacing < min_dist:
+            raise ValueError(
+                f"Box too small for non-overlapping init: "
+                f"grid spacing {spacing:.3f} < min_dist {min_dist:.3f}. "
+                f"Increase box size (lower density) or reduce rmin."
+            )
+        # Build a simple cubic lattice
+        coords = np.linspace(-L/2 + spacing/2, L/2 - spacing/2, n_side)
+        grid = np.array(np.meshgrid(coords, coords, coords)).T.reshape(-1, 3)
+        # Shuffle and take N points
+        rng = np.random.default_rng()
+        rng.shuffle(grid)
+        return grid[:N].tolist()
     positions = generate_positions(N, L, rmin=rmin, offset=init_offset)
 
     # --- Snapshot and system init ---
