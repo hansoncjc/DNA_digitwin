@@ -43,8 +43,10 @@ print("Best params (physical):", ps.decode(best))
 """
 
 import os
+import json
 import numpy as np
 import torch
+from pathlib import Path
 from torch import tensor
 from typing import Dict, List, Tuple, Any
 import csv
@@ -300,6 +302,290 @@ def _write_iteration_block(filepath: str, iteration: int, total_loss: float, rec
         writer.writerow([])
 
 
+def _run_objective_parallel(
+    datasets: List[Any],
+    eval_id: int,
+    G: Dict[str, Any],
+    L: Dict[str, Any],
+    out_root: str,
+    ffpath: str,
+    trim_tail: int,
+    sim_defaults: Dict[str, Any],
+    mode: str,
+    scattering_method: str,
+    scattering_kwargs: Dict[str, Any],
+    metric: str,
+    parallel_cfg: Dict[str, Any],
+    iteration_data: List[Dict[str, Any]],
+) -> float:
+    """
+    Parallel analogue of the per-dataset sequential loop in `objective`.
+
+    Submits one Slurm GPU job per dataset via `parallel.submit_jobs`, waits
+    for all of them to reach a terminal state, and collects each job's
+    loss from its `DONE` flag file. Mutates `iteration_data` in place so
+    the caller can write the trajectory CSV block exactly as in the
+    sequential path.
+    """
+    from parallel import LauncherConfig, submit_jobs  # lazy import
+
+    total_loss = 0.0
+    plans: List[Dict[str, Any]] = []
+
+    # Phase A: resolve per-dataset sim params with the same precedence as
+    # the sequential path; write per-dataset `sim_params_<id>.csv`.
+    for ds in datasets:
+        try:
+            n = float(G["n"]) if "n" in G else float(ds.sim.n)
+            m = float(G["m"]) if "m" in G else float(ds.sim.m)
+
+            if mode == "map":
+                alpha = float(G.get("alpha", 1.0))
+                density = ds.rho_N(alpha=alpha)
+            else:
+                if "density" in L[ds.id]:
+                    density = float(L[ds.id]["density"])
+                elif "density" in G:
+                    density = float(G["density"])
+                elif ds.sim.density is not None:
+                    density = float(ds.sim.density)
+                else:
+                    raise ValueError(
+                        f"Dataset {ds.id}: density not provided in mode='sim' "
+                        "and dataset.sim.density is None."
+                    )
+
+            if mode == "map":
+                if "k" in G:
+                    r0 = float(ds.r0_sigma(k=float(G["k"])))
+                elif ds.sim.r0 is not None:
+                    r0 = float(ds.sim.r0)
+                else:
+                    raise ValueError(
+                        f"Dataset {ds.id}: r0 not provided and no mapping coeff 'k' "
+                        "found in mode='map'."
+                    )
+            else:
+                if "r0" in L[ds.id]:
+                    r0 = float(L[ds.id]["r0"])
+                elif "r0" in G:
+                    r0 = float(G["r0"])
+                elif ds.sim.r0 is not None:
+                    r0 = float(ds.sim.r0)
+                else:
+                    raise ValueError(
+                        f"Dataset {ds.id}: r0 not provided in mode='sim' "
+                        "and dataset.sim.r0 is None."
+                    )
+
+            if mode == "map":
+                if all(k in G for k in ("A", "mu_c", "sigma_c", "sigma_b")):
+                    U0 = float(ds.U0_from_gaussian(
+                        A=G["A"],
+                        mu_c=G["mu_c"],
+                        sigma_c=G["sigma_c"],
+                        sigma_b=G["sigma_b"],
+                    ))
+                elif ds.sim.U0 is not None:
+                    U0 = float(ds.sim.U0)
+                else:
+                    raise ValueError(
+                        f"Dataset {ds.id}: U0 not provided and no global Gaussian coeffs "
+                        "found in mode='map'."
+                    )
+            else:
+                if "U0" in L[ds.id]:
+                    U0 = float(L[ds.id]["U0"])
+                elif "U0" in G:
+                    U0 = float(G["U0"])
+                elif ds.sim.U0 is not None:
+                    U0 = float(ds.sim.U0)
+                else:
+                    raise ValueError(
+                        f"Dataset {ds.id}: U0 not provided in mode='sim' "
+                        "and dataset.sim.U0 is None."
+                    )
+
+            save_dir = os.path.join(out_root, f"eval_{eval_id:03d}", ds.id)
+            os.makedirs(save_dir, exist_ok=True)
+
+            sim_params_record = {
+                "dataset_id": ds.id,
+                "eval_id": eval_id,
+                "k": G.get("k", ""),
+                "alpha": G.get("alpha", ""),
+                "A": G.get("A", ""),
+                "mu_c": G.get("mu_c", ""),
+                "mu_b": G.get("mu_b", ""),
+                "sigma_c": G.get("sigma_c", ""),
+                "sigma_b": G.get("sigma_b", ""),
+                "density": float(density),
+                "n": float(n),
+                "m": float(m),
+                "r0": float(r0),
+                "U0": float(U0),
+            }
+            param_path = os.path.join(save_dir, f"sim_params_{ds.id}.csv")
+            with open(param_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=list(sim_params_record.keys()))
+                writer.writeheader()
+                writer.writerow(sim_params_record)
+
+            plans.append({
+                "ok":       True,
+                "ds":       ds,
+                "save_dir": save_dir,
+                "n":        n,
+                "m":        m,
+                "density":  density,
+                "r0":       r0,
+                "U0":       U0,
+            })
+        except Exception as e:
+            total_loss += 1e9
+            try:
+                os.makedirs(out_root, exist_ok=True)
+                with open(os.path.join(out_root, f"error_{ds.id}.txt"), "a") as fh:
+                    fh.write(str(e) + "\n")
+            except Exception:
+                pass
+            iteration_data.append({
+                "iteration": eval_id,
+                "dataset_id": ds.id,
+                "loss": 1e9,
+                "k": G.get("k", ""),
+                "alpha": G.get("alpha", ""),
+                "A": G.get("A", ""),
+                "mu_c": G.get("mu_c", ""),
+                "mu_b": G.get("mu_b", ""),
+                "sigma_c": G.get("sigma_c", ""),
+                "sigma_b": G.get("sigma_b", ""),
+                "density": "ERROR",
+                "n": "ERROR",
+                "m": "ERROR",
+                "r0": "ERROR",
+                "U0": "ERROR",
+            })
+
+    # Phase B: build job specs for OK plans and submit them all.
+    job_specs = []
+    for plan in plans:
+        ds = plan["ds"]
+        run_kwargs = {
+            "density": float(plan["density"]),
+            "U_0":     float(plan["U0"]),
+            "r0":      float(plan["r0"]),
+            "n":       float(plan["n"]),
+            "m":       float(plan["m"]),
+        }
+        for k, v in (sim_defaults or {}).items():
+            run_kwargs.setdefault(k, v)
+
+        job_specs.append({
+            "name":  f"i{eval_id:02d}_d{int(ds.id[1:]):02d}",
+            "ds_id": ds.id,
+            "worker_config": {
+                "outdir":     plan["save_dir"],
+                "run_kwargs": run_kwargs,
+                "scattering": {"method": scattering_method,
+                               "kwargs": dict(scattering_kwargs or {})},
+                "loss": {
+                    "exp_path":          str(ds.exp_path),
+                    "trim_tail":         int(trim_tail),
+                    "datatype":          getattr(ds, "datatype", "sq"),
+                    "ffpath":            ffpath,
+                    "metric":            metric,
+                    "scattering_method": scattering_method,
+                    "q_min":             0.02,
+                    "q_max":             0.03,
+                },
+            },
+        })
+
+    finished_by_ds: Dict[str, Any] = {}
+    if job_specs:
+        pcfg = parallel_cfg or {}
+        cfg = LauncherConfig(
+            run_dir=Path(out_root) / f"eval_{eval_id:03d}" / "_jobs",
+            partition    =pcfg.get("partition", "gpu-a40"),
+            account      =pcfg.get("account",   "zeelab"),
+            gpus         =int(pcfg.get("gpus", 1)),
+            mem          =pcfg.get("mem",  "40G"),
+            time         =pcfg.get("time", "02:00:00"),
+            module_loads =list(pcfg.get("module_loads", [])),
+            venv_activate=pcfg.get("venv_activate", ""),
+            code_root    =pcfg.get("code_root", ""),
+            mc_dfm_root  =pcfg.get("mc_dfm_root", ""),
+            poll_interval=float(pcfg.get("poll_interval", 15.0)),
+            max_wait     =float(pcfg.get("max_wait", 4 * 3600)),
+        )
+        finished = submit_jobs(job_specs, cfg)
+        finished_by_ds = {j.ds_id: j for j in finished}
+
+    # Phase C: collect per-dataset loss; emit trajectory records.
+    for plan in plans:
+        ds  = plan["ds"]
+        job = finished_by_ds.get(ds.id)
+        if job is not None and job.done_status == "DONE":
+            loss = 1e9
+            try:
+                done_data = json.loads((Path(job.sim_dir) / "DONE").read_text())
+                loss = float(done_data["loss"])
+            except Exception as e:
+                try:
+                    with open(os.path.join(out_root, f"error_{ds.id}.txt"), "a") as fh:
+                        fh.write(f"DONE file unreadable: {e}\n")
+                except Exception:
+                    pass
+                loss = 1e9
+
+            total_loss += ds.weight * loss
+            iteration_data.append({
+                "iteration": eval_id,
+                "dataset_id": ds.id,
+                "loss": loss,
+                "k": G.get("k", ""),
+                "alpha": G.get("alpha", ""),
+                "A": G.get("A", ""),
+                "mu_c": G.get("mu_c", ""),
+                "mu_b": G.get("mu_b", ""),
+                "sigma_c": G.get("sigma_c", ""),
+                "sigma_b": G.get("sigma_b", ""),
+                "density": float(plan["density"]),
+                "n":       float(plan["n"]),
+                "m":       float(plan["m"]),
+                "r0":      float(plan["r0"]),
+                "U0":      float(plan["U0"]),
+            })
+        else:
+            total_loss += 1e9
+            reason = f"parallel job status={getattr(job, 'done_status', None)}"
+            try:
+                with open(os.path.join(out_root, f"error_{ds.id}.txt"), "a") as fh:
+                    fh.write(reason + "\n")
+            except Exception:
+                pass
+            iteration_data.append({
+                "iteration": eval_id,
+                "dataset_id": ds.id,
+                "loss": 1e9,
+                "k": G.get("k", ""),
+                "alpha": G.get("alpha", ""),
+                "A": G.get("A", ""),
+                "mu_c": G.get("mu_c", ""),
+                "mu_b": G.get("mu_b", ""),
+                "sigma_c": G.get("sigma_c", ""),
+                "sigma_b": G.get("sigma_b", ""),
+                "density": "ERROR",
+                "n": "ERROR",
+                "m": "ERROR",
+                "r0": "ERROR",
+                "U0": "ERROR",
+            })
+
+    return total_loss
+
+
 def make_global_objective(
     datasets: List[Any],
     ps: ParamSpace,
@@ -311,6 +597,8 @@ def make_global_objective(
     scattering_method: str = "saxsfft",
     scattering_kwargs: Dict[str, Any] = None,
     metric: str = "mse",
+    parallel: bool = False,
+    parallel_cfg: Dict[str, Any] = None,
 ):
     """
     Create an objective(x_unit) that:
@@ -374,6 +662,41 @@ def make_global_objective(
 
         total_loss = 0.0
 
+        # --- Parallel fast path: submit one sbatch GPU job per dataset ---
+        # All N simulations (+ SAXS conversion + loss computation) run
+        # concurrently on separate GPUs via DNA_digitwin/parallel/. The
+        # trajectory CSV block below is shared with the sequential path.
+        if parallel:
+            total_loss = _run_objective_parallel(
+                datasets=datasets,
+                eval_id=eval_id,
+                G=G,
+                L=L,
+                out_root=out_root,
+                ffpath=ffpath,
+                trim_tail=trim_tail,
+                sim_defaults=sim_defaults,
+                mode=mode,
+                scattering_method=scattering_method,
+                scattering_kwargs=scattering_kwargs,
+                metric=metric,
+                parallel_cfg=parallel_cfg or {},
+                iteration_data=objective._iteration_data,
+            )
+
+            if len(objective._iteration_data) > 0:
+                trajectory_path = os.path.join(out_root, "bo_trajectory.csv")
+                _write_iteration_block(
+                    filepath=trajectory_path,
+                    iteration=eval_id,
+                    total_loss=float(total_loss),
+                    records=objective._iteration_data,
+                )
+                objective._iteration_data = []
+
+            return torch.tensor([[total_loss]], dtype=torch.float64)
+
+        # --- Sequential path (original behavior, unchanged) ---
         for ds in datasets:
             try:
                 # ---- Shared n, m (always "sim" style) ----
