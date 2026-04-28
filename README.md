@@ -92,9 +92,31 @@ record and exposes the **mapping equations** that connect them:
   Gaussian in `(C_chol, b_bridge)`:
   `U0 = A · exp( -(C_chol-mu_c)²/(2σ_c²) - (b_bridge-mu_b)²/(2σ_b²) )`
 
-`datatype` is `"sq"` (experimental file is already S(q)) or `"iq"`
-(experimental file is I(q); a polydisperse sphere form factor at
-`ffpath` is divided out via `extract_exp_sq`).
+### `datatype` — S(q) vs I(q) input switch
+The `datatype` argument on `Dataset` (and the matching key in
+`Dataset.from_dict`) tells the objective how to interpret the file at
+`exp_path`:
+
+- `datatype="sq"` (default) — the file is already a structure factor
+  `[q, S(q)]`. It is loaded as-is by `Dataset.load_exp_curve` and fed
+  straight into the comparison metric. `ffpath` is unused on the
+  experimental side.
+- `datatype="iq"` — the file is an experimental scattering intensity
+  `[q, I(q)]`. The objective converts it to an effective S(q) on the
+  fly via `scattering.extract_exp_sq(...)`, which divides out the
+  polydisperse sphere form factor stored at `ffpath` (default:
+  `formfactors/sasmodels_sphere_fit.txt`) over the q-window
+  `[q_min=0.02, q_max=0.03]` Å⁻¹.
+
+Pick `"sq"` when you have already pre-processed your experimental
+SAXS into a structure factor (e.g. via `saxs-fft` or an external
+fitting tool); pick `"iq"` when you want the framework to handle the
+form-factor division itself. The simulated side always produces an
+S(q), so the choice only affects how the experimental curve is read.
+
+Use `trim_tail=N` on `make_global_objective` to drop the last `N`
+points of the loaded experimental curve before comparison (useful for
+noisy I(q) tails; set `0` for clean S(q) files).
 
 ### `ParamSpace` (`bo.py`)
 Declarative description of the BO search vector. Each parameter is
@@ -177,10 +199,23 @@ optimized over the unit cube. Returns `(best_x_phys, history)`.
 The script below mirrors the validated 9-sample test
 (`testing/digitwin_test/two_mapping_coeff/9_sample_test/multithread/`)
 and recovers two mapping coefficients (`k`, `A`) by globally fitting
-9 experimental conditions (3 bridge lengths × 3 cholesterol counts).
-All other mapping coefficients are frozen at their ground-truth
-defaults. Each BO iteration submits 9 GPU jobs in parallel through
-`DNA_digitwin/parallel/`; the master process runs on a CPU node.
+9 experimental conditions. All other mapping coefficients are frozen
+at their ground-truth defaults. Each BO iteration submits 9 GPU jobs
+in parallel through `DNA_digitwin/parallel/`; the master process runs
+on a CPU node.
+
+> **Note on candidates.** The `CANDIDATES` list below is just an
+> illustrative choice — `(L_bridge, C_chol)` pairs that span the two
+> experimental axes the chosen mapping coefficients (`k` from
+> `r0_sigma`, `A` from `U0_from_gaussian`) are sensitive to. For a
+> different training session you should pick candidates that
+> **(a)** vary the experimental inputs the coefficients you are
+> optimizing actually depend on (e.g. add a temperature/`C_NaCl`
+> sweep if those parameters enter the mapping you are training), and
+> **(b)** have matching experimental S(q) / I(q) curves available.
+> The number of candidates is also free to choose — fewer candidates
+> mean faster iterations but a less constrained fit; more candidates
+> mean stronger global constraints at higher per-iteration cost.
 
 ```python
 import os
@@ -198,29 +233,30 @@ import bo
 
 OUT_ROOT = "./Optimization_Results"
 
-BRIDGE_LENGTHS = [20.0, 40.0, 80.0]   # nt
-C_CHOL_VALUES  = [95.0, 110.0, 125.0] # molecules / siNP
-
-GROUND_TRUTH_ROOT = "/path/to/Sweep2/results"
-def gt_path(L_bridge, C_chol):
-    folder = f"chol_{int(C_chol):03d}_bridge_{int(L_bridge):03d}"
-    return os.path.join(GROUND_TRUTH_ROOT, folder,
-                        "S(q)_data", "average_structure_factor.npy")
+CANDIDATES = [
+    # (L_bridge [nt], C_chol [molecules/siNP], experimental S(q) file)
+    (20.0,  95.0, "/path/to/exp/d0_sq.npy"),
+    (40.0,  95.0, "/path/to/exp/d1_sq.npy"),
+    (80.0,  95.0, "/path/to/exp/d2_sq.npy"),
+    (20.0, 110.0, "/path/to/exp/d3_sq.npy"),
+    (40.0, 110.0, "/path/to/exp/d4_sq.npy"),
+    (80.0, 110.0, "/path/to/exp/d5_sq.npy"),
+    (20.0, 125.0, "/path/to/exp/d6_sq.npy"),
+    (40.0, 125.0, "/path/to/exp/d7_sq.npy"),
+    (80.0, 125.0, "/path/to/exp/d8_sq.npy"),
+]
 
 datasets = []
-idx = 0
-for C_chol in C_CHOL_VALUES:
-    for L_bridge in BRIDGE_LENGTHS:
-        ds = Dataset(
-            id       = f"d{idx}",
-            exp_path = gt_path(L_bridge, C_chol),
-            exp      = ExperimentalParams(L_bridge=L_bridge, C_chol=C_chol),
-            sim      = SimulationParams(),       # filled by mappings during BO
-            out_dir  = os.path.join(OUT_ROOT, f"d{idx}"),
-            datatype = "sq",                     # files are already S(q)
-        )
-        datasets.append(ds)
-        idx += 1
+for idx, (L_bridge, C_chol, exp_path) in enumerate(CANDIDATES):
+    ds = Dataset(
+        id       = f"d{idx}",
+        exp_path = exp_path,
+        exp      = ExperimentalParams(L_bridge=L_bridge, C_chol=C_chol),
+        sim      = SimulationParams(),       # filled by mappings during BO
+        out_dir  = os.path.join(OUT_ROOT, f"d{idx}"),
+        datatype = "sq",                     # set "iq" if files are I(q)
+    )
+    datasets.append(ds)
 
 FIXED = {
     "alpha":   3.0,  "n":  12.0, "m": 6.0,
