@@ -226,31 +226,50 @@ class Dataset:
         num = 2.0 * (self.exp.t_b + LC_ss * self.exp.L_poly) + LC_ds * (2.0 * self.exp.L_HBP + self.exp.L_bridge)
         return 1.0 + float(k) * (num / self.exp.d_si)
 
-    def U0_from_gaussian(self, A=2.0, mu_c=100.0, mu_b = 0.5, sigma_c=10.0, sigma_b=0.2):
+    def U0_from_gaussian(self, A=2.0, mu_c=100.0, mu_b=0.5,
+                         sigma_c=10.0, sigma_b=0.2, K_s=0.5):
         """
-        Compute U0 from a separable Gaussian in C_chol and b_bridge.
+        Compute U0 from a separable Gaussian in C_chol_eff and b_bridge.
 
         Mapping Function
         -------
-            U0 = A * exp( - ((C_chol - mu_c)^2) / (2*sigma_c^2)  - ((b_bridge - 0.5)^2) / (2*sigma_b^2) )
+            C_chol_eff = (C_NaCl * C_chol) / (C_NaCl + K_s * C_chol)
+            U0 = A * exp( - ((C_chol_eff - mu_c)^2) / (2*sigma_c^2)
+                          - ((b_bridge   - mu_b)^2) / (2*sigma_b^2) )
 
-        Defaults (your spec)
-        --------------------
-            default 2.0
-            default 100.0
-            default 10.0
-            default 0.2
+        The salt-modulated effective cholesterol count `C_chol_eff` couples
+        the surface DNA loading `C_chol` with the salt-screening capacity
+        `C_NaCl / K_s` via a harmonic mean: grafting is limited by whichever
+        resource is scarcer. When `C_NaCl + K_s * C_chol <= 0` (e.g. the
+        zero-salt edge case), `C_chol_eff` falls back to `0.0`.
+
+        Defaults
+        --------
+            A       = 2.0
+            mu_c    = 100.0
+            mu_b    = 0.5
+            sigma_c = 10.0
+            sigma_b = 0.2
+            K_s     = 0.5
 
         Parameters
         ----------
         A : float
             Amplitude of U0.
         mu_c : float
-            Center for C_chol (#/molecule).
+            Center for the salt-modulated effective cholesterol count
+            `C_chol_eff` (molecules/particle).
+        mu_b : float
+            Center for the bridge-loading ratio `b_bridge` (dimensionless).
         sigma_c : float
-            Std. dev. for C_chol term (same unit as C_chol); must be > 0.
+            Std. dev. for the C_chol_eff term (same unit as C_chol);
+            must be > 0.
         sigma_b : float
-            Std. dev. for bridge-loading term (dimensionless b_bridge); must be > 0.
+            Std. dev. for bridge-loading term (dimensionless b_bridge);
+            must be > 0.
+        K_s : float
+            Salt cost per grafted DNA strand (dimensionless ratio); controls
+            how strongly C_NaCl limits C_chol_eff relative to DNA loading.
 
         Returns
         -------
@@ -260,11 +279,15 @@ class Dataset:
         if sigma_c <= 0 or sigma_b <= 0:
             raise ValueError("sigma_c and sigma_b must be > 0.")
 
-        C_chol = float(self.exp.C_chol)
+        C_chol   = float(self.exp.C_chol)
+        C_NaCl   = float(self.exp.C_NaCl)
         b_bridge = float(self.exp.b_bridge)
 
-        term_c = ((C_chol - float(mu_c)) ** 2) / (2.0 * (float(sigma_c) ** 2))
-        term_b = ((b_bridge - float(mu_b)) ** 2) / (2.0 * (float(sigma_b) ** 2))
+        denom = C_NaCl + float(K_s) * C_chol
+        C_chol_eff = (C_NaCl * C_chol / denom) if denom > 0 else 0.0
+
+        term_c = ((C_chol_eff - float(mu_c)) ** 2) / (2.0 * (float(sigma_c) ** 2))
+        term_b = ((b_bridge   - float(mu_b)) ** 2) / (2.0 * (float(sigma_b) ** 2))
 
         return float(A) * np.exp(- (term_c + term_b))
 
@@ -273,21 +296,20 @@ class Dataset:
                                     alpha=3.0,
                                     k=0.76,
                                     A=2.0, mu_c=100.0, sigma_c=10.0,
-                                    mu_b=0.5, sigma_b=0.2):
+                                    mu_b=0.5, sigma_b=0.2,
+                                    K_s=0.5):
         """
         Fill self.sim.{density,r0,U0} from mappings if any of them is None.
         Does NOT overwrite fields that are already set.
         """
-        # density
         if getattr(self.sim, "density", None) is None:
             self.sim.density = self.rho_N(alpha=alpha)
-        # r0
         if getattr(self.sim, "r0", None) is None:
             self.sim.r0 = self.r0_sigma(k=k)
-        # U0
         if getattr(self.sim, "U0", None) is None:
             self.sim.U0 = self.U0_from_gaussian(A=A, mu_c=mu_c, sigma_c=sigma_c,
-                                                mu_b=mu_b, sigma_b=sigma_b)
+                                                mu_b=mu_b, sigma_b=sigma_b,
+                                                K_s=K_s)
     @classmethod
     def from_dict(cls, d):
         """
@@ -301,7 +323,8 @@ class Dataset:
             "alpha": 3.0,
             "k": 0.76,
             "A": 2.0, "mu_c": 100.0, "sigma_c": 10.0,
-            "mu_b": 0.5, "sigma_b": 0.2
+            "mu_b": 0.5, "sigma_b": 0.2,
+            "K_s": 0.5
             },
             "weight": 1.0,
             "out_dir": "Results/itr0"

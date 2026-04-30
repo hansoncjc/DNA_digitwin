@@ -64,7 +64,7 @@ _SIM_PARAMS = {"density", "r0", "U0"}
 _ALWAYS_OK_SIM = {"n", "m"}
 
 # Parameters that correspond to mapping coefficients
-_MAP_PARAMS = {"alpha", "k", "A", "mu_c", "sigma_c", "sigma_b", "mu_b"}
+_MAP_PARAMS = {"alpha", "k", "A", "mu_c", "sigma_c", "sigma_b", "mu_b", "K_s"}
 
 
 def _validate_param_mode(ps, mode: str) -> None:
@@ -385,6 +385,7 @@ def _run_objective_parallel(
                         mu_c=G["mu_c"],
                         sigma_c=G["sigma_c"],
                         sigma_b=G["sigma_b"],
+                        K_s=G.get("K_s", 0.5),
                     ))
                 elif ds.sim.U0 is not None:
                     U0 = float(ds.sim.U0)
@@ -419,6 +420,7 @@ def _run_objective_parallel(
                 "mu_b": G.get("mu_b", ""),
                 "sigma_c": G.get("sigma_c", ""),
                 "sigma_b": G.get("sigma_b", ""),
+                "K_s": G.get("K_s", ""),
                 "density": float(density),
                 "n": float(n),
                 "m": float(m),
@@ -460,6 +462,7 @@ def _run_objective_parallel(
                 "mu_b": G.get("mu_b", ""),
                 "sigma_c": G.get("sigma_c", ""),
                 "sigma_b": G.get("sigma_b", ""),
+                "K_s": G.get("K_s", ""),
                 "density": "ERROR",
                 "n": "ERROR",
                 "m": "ERROR",
@@ -551,6 +554,7 @@ def _run_objective_parallel(
                 "mu_b": G.get("mu_b", ""),
                 "sigma_c": G.get("sigma_c", ""),
                 "sigma_b": G.get("sigma_b", ""),
+                "K_s": G.get("K_s", ""),
                 "density": float(plan["density"]),
                 "n":       float(plan["n"]),
                 "m":       float(plan["m"]),
@@ -576,6 +580,7 @@ def _run_objective_parallel(
                 "mu_b": G.get("mu_b", ""),
                 "sigma_c": G.get("sigma_c", ""),
                 "sigma_b": G.get("sigma_b", ""),
+                "K_s": G.get("K_s", ""),
                 "density": "ERROR",
                 "n": "ERROR",
                 "m": "ERROR",
@@ -754,6 +759,7 @@ def make_global_objective(
                                 mu_c=G["mu_c"],
                                 sigma_c=G["sigma_c"],
                                 sigma_b=G["sigma_b"],
+                                K_s=G.get("K_s", 0.5),
                             )
                         )
                     elif ds.sim.U0 is not None:
@@ -793,6 +799,7 @@ def make_global_objective(
                     "mu_b": G.get("mu_b", ""),
                     "sigma_c": G.get("sigma_c", ""),
                     "sigma_b": G.get("sigma_b", ""),
+                    "K_s": G.get("K_s", ""),
                     # Simulation parameters
                     "density": float(density),
                     "n": float(n),
@@ -857,6 +864,7 @@ def make_global_objective(
                     "mu_b": G.get("mu_b", ""),
                     "sigma_c": G.get("sigma_c", ""),
                     "sigma_b": G.get("sigma_b", ""),
+                    "K_s": G.get("K_s", ""),
                     "density": float(density),
                     "n": float(n),
                     "m": float(m),
@@ -885,6 +893,7 @@ def make_global_objective(
                     "mu_b": G.get("mu_b", ""),
                     "sigma_c": G.get("sigma_c", ""),
                     "sigma_b": G.get("sigma_b", ""),
+                    "K_s": G.get("K_s", ""),
                     "density": "ERROR",
                     "n": "ERROR",
                     "m": "ERROR",

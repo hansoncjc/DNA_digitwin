@@ -9,9 +9,10 @@ ties them together with a small `Dataset` abstraction that carries
 inputs to simulation parameters. The BO loop can be told to either:
 
 - **`mode="map"`** – optimize *mapping coefficients* (`alpha`, `k`, `A`,
-  `mu_c`, `mu_b`, `sigma_c`, `sigma_b`) that translate experimental
-  inputs (`C_chol`, `b_bridge`, `L_bridge`, …) into simulation inputs
-  (`density`, `r0`, `U0`), shared across many experimental conditions, or
+  `mu_c`, `mu_b`, `sigma_c`, `sigma_b`, `K_s`) that translate
+  experimental inputs (`C_NaCl`, `C_chol`, `b_bridge`, `L_bridge`, …)
+  into simulation inputs (`density`, `r0`, `U0`), shared across many
+  experimental conditions, or
 - **`mode="sim"`** – optimize the simulation inputs themselves
   (`density`, `r0`, `U0`, `n`, `m`) directly, either globally or
   per-dataset.
@@ -88,9 +89,15 @@ record and exposes the **mapping equations** that connect them:
   the global `alpha`.
 - `r0_sigma(k, LC_ss=0.63, LC_ds=0.34)` → `r0` in units of σ:
   `r0/σ = 1 + k · ( 2(t_b + LC_ss·L_poly) + LC_ds·(2·L_HBP + L_bridge) ) / d_si`
-- `U0_from_gaussian(A, mu_c, mu_b, sigma_c, sigma_b)` → separable
-  Gaussian in `(C_chol, b_bridge)`:
-  `U0 = A · exp( -(C_chol-mu_c)²/(2σ_c²) - (b_bridge-mu_b)²/(2σ_b²) )`
+- `U0_from_gaussian(A, mu_c, mu_b, sigma_c, sigma_b, K_s)` → separable
+  Gaussian in `(C_chol_eff, b_bridge)` where the salt-modulated
+  effective cholesterol count couples `C_chol` with `C_NaCl` via a
+  harmonic mean (`K_s` controls how strongly salt limits effective
+  grafting; default `0.5`):
+  - `C_chol_eff = (C_NaCl · C_chol) / (C_NaCl + K_s · C_chol)`
+    (falls back to `0.0` when the denominator is non-positive, so
+    `C_NaCl = 0` correctly yields `U0 = 0`).
+  - `U0 = A · exp( -(C_chol_eff - mu_c)²/(2σ_c²) - (b_bridge - mu_b)²/(2σ_b²) )`
 
 ### `datatype` — S(q) vs I(q) input switch
 The `datatype` argument on `Dataset` (and the matching key in
@@ -145,7 +152,7 @@ Builds a callable `objective(x_unit, ffpath)` that, for one BO query:
    to `mode`:
    - `"map"`: applies the mapping equations using the optimized
      coefficients above (`alpha→density`, `k→r0`,
-     `A,mu_c,mu_b,sigma_c,sigma_b → U0`).
+     `A,mu_c,mu_b,sigma_c,sigma_b,K_s → U0`).
    - `"sim"`: takes `density, r0, U0` directly from the param space
      (local > global > `dataset.sim.*`).
 3. Runs `simulation.run_simulation(...)` (HOOMD).
@@ -262,6 +269,7 @@ FIXED = {
     "alpha":   3.0,  "n":  12.0, "m": 6.0,
     "mu_c":  100.0,  "mu_b": 0.5,
     "sigma_c": 10.0, "sigma_b": 0.2,
+    "K_s":     0.5,
 }
 
 param_cfg = {
