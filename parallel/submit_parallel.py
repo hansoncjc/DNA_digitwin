@@ -32,7 +32,7 @@ Per-job `spec` dict format::
             "scattering": {"method": "saxsfft", "kwargs": {...}},
             "loss":       {"exp_path", "trim_tail", "datatype",
                            "ffpath", "metric", "scattering_method",
-                           "q_min", "q_max"}
+                           "compare_q_range", "q_min", "q_max"}
         },
     }
 

@@ -155,13 +155,19 @@ def compare_to_exp(experimental_data, simulated_data, save_dir, metric='mse'):
     return mse
 
 
-def compare_to_exp_saxsfft(experimental_data, simulated_data, save_dir, metric='mse'):
+def compare_to_exp_saxsfft(
+    experimental_data,
+    simulated_data,
+    save_dir,
+    metric='mse',
+    q_range=(0.003, 0.06),
+):
     """
     Compare experimental and simulated S(q) using the wider q-range available
     from saxs-fft.
 
     Uses the same :func:`compare_saxs_curves` engine as :func:`compare_to_exp`,
-    but with a wider comparison window ``[0.001, 0.06]`` Å⁻¹.
+    but defaults to a wider comparison window ``[0.003, 0.06]`` Å⁻¹.
 
     Parameters
     ----------
@@ -171,14 +177,21 @@ def compare_to_exp_saxsfft(experimental_data, simulated_data, save_dir, metric='
         Simulated [q, S(q)] from saxs-fft.
     save_dir : str
         Directory for diagnostic plots.
+    q_range : tuple(float, float) or None
+        Optional (q_min, q_max) comparison window. Defaults to
+        ``[0.003, 0.06]`` Å⁻¹.
 
     Returns
     -------
     float
-        AP distance (loss) over ``[0.001, 0.06]`` Å⁻¹.
+        AP distance (loss) over ``q_range``.
     """
-    q = [0.001, 0.06]
-    mse, q_ref, I_exp_resampled, I_sim_resampled = compare_saxs_curves(experimental_data, simulated_data, q, metric=metric)
+    mse, q_ref, I_exp_resampled, I_sim_resampled = compare_saxs_curves(
+        experimental_data,
+        simulated_data,
+        q_range,
+        metric=metric,
+    )
     plt.rcParams.update({'font.size': 18})
     fig, ax = plt.subplots(figsize=(7, 6))
     ax.scatter(q_ref, I_exp_resampled, linewidth=0.5, label='Exp_data', color='k')

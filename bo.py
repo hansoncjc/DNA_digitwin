@@ -48,7 +48,7 @@ import numpy as np
 import torch
 from pathlib import Path
 from torch import tensor
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 import csv
 
 from simulation import run_simulation
@@ -315,6 +315,7 @@ def _run_objective_parallel(
     scattering_method: str,
     scattering_kwargs: Dict[str, Any],
     metric: str,
+    compare_q_range: Optional[Tuple[float, float]],
     parallel_cfg: Dict[str, Any],
     iteration_data: List[Dict[str, Any]],
 ) -> float:
@@ -499,6 +500,9 @@ def _run_objective_parallel(
                     "ffpath":            ffpath,
                     "metric":            metric,
                     "scattering_method": scattering_method,
+                    "compare_q_range": (
+                        list(compare_q_range) if compare_q_range is not None else None
+                    ),
                     "q_min":             0.02,
                     "q_max":             0.03,
                 },
@@ -602,6 +606,7 @@ def make_global_objective(
     scattering_method: str = "saxsfft",
     scattering_kwargs: Dict[str, Any] = None,
     metric: str = "mse",
+    compare_q_range: Optional[Tuple[float, float]] = (0.003, 0.06),
     parallel: bool = False,
     parallel_cfg: Dict[str, Any] = None,
 ):
@@ -640,6 +645,9 @@ def make_global_objective(
         number of points to drop from the end of the experimental intensity 
             curve returned by Dataset.load_exp_curve.
         If exp_path already points to a processed S(q), set trim_tail=0.
+    "compare_q_range":
+        q-range used for the final saxsfft loss comparison. This is distinct
+        from q_min/q_max used when extracting experimental S(q) from intensity.
     Exceptions during any dataset evaluation yield a large penalty to keep BO stable.
     """
     sim_defaults = {} if sim_defaults is None else dict(sim_defaults)
@@ -685,6 +693,7 @@ def make_global_objective(
                 scattering_method=scattering_method,
                 scattering_kwargs=scattering_kwargs,
                 metric=metric,
+                compare_q_range=compare_q_range,
                 parallel_cfg=parallel_cfg or {},
                 iteration_data=objective._iteration_data,
             )
@@ -847,7 +856,13 @@ def make_global_objective(
                         q_max=0.03,
                         normalize=False)
                 if scattering_method == "saxsfft":
-                    loss = float(compare_to_exp_saxsfft(exp_sq, sim_sq, save_dir, metric=metric))
+                    loss = float(compare_to_exp_saxsfft(
+                        exp_sq,
+                        sim_sq,
+                        save_dir,
+                        metric=metric,
+                        q_range=compare_q_range,
+                    ))
                 else:
                     loss = float(compare_to_exp(exp_sq, sim_sq, save_dir, metric=metric))
                 total_loss += ds.weight * loss
