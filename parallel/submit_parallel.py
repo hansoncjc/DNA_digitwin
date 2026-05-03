@@ -194,6 +194,25 @@ def sacct_final_state(job_id: str) -> str:
     return line.strip()
 
 
+# sacct states that mean "the job really did die." Anything else -- including
+# RUNNING, COMPLETING, PENDING, REQUEUED, RESIZING, SUSPENDED, COMPLETED, or an
+# empty string from a sacct that itself failed -- means the job is either still
+# alive or finished cleanly, and we must NOT stamp FAILED on it just because
+# squeue momentarily omitted it.
+_TERMINAL_BAD_SACCT = (
+    "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL",
+    "OUT_OF_MEMORY", "BOOT_FAIL", "DEADLINE", "PREEMPTED",
+)
+
+
+def _is_terminal_bad_sacct(state: str) -> bool:
+    """True iff sacct reports a terminal-bad state (e.g. FAILED, CANCELLED+)."""
+    if not state:
+        return False
+    root = state.split()[0].rstrip("+")
+    return root.startswith(_TERMINAL_BAD_SACCT)
+
+
 # ---------------------------------------------------------------------------
 # Flag-file inspection
 # ---------------------------------------------------------------------------
@@ -305,18 +324,27 @@ def poll_until_done(
             for job in jobs:
                 if job.slurm_id and job.done_status is None:
                     job.slurm_state = states.get(job.slurm_id, "")
-                    # Gone from squeue AND no flag file -> the job crashed
-                    # before worker.py could write one (e.g. OOM, GPU init,
-                    # SIGTERM after TIMEOUT). Write a FAILED flag on its
-                    # behalf so the caller sees a terminal state.
+                    # Gone from squeue AND no flag file -> the job *might*
+                    # have crashed before worker.py could write one (OOM,
+                    # GPU init failure, SIGTERM after TIMEOUT, ...). But
+                    # squeue also occasionally omits a job that is still
+                    # alive -- e.g. during the brief COMPLETING window or
+                    # under controller load -- so we must not stamp FAILED
+                    # on the strength of one empty squeue response. Confirm
+                    # with sacct: only declare FAILED when sacct actually
+                    # reports a terminal-bad state. Otherwise leave
+                    # done_status=None and let the next poll cycle decide
+                    # (inspect_flags() at the top of the loop will pick up
+                    # DONE if the worker writes it in the meantime).
                     if (not job.slurm_state
                             and not (job.sim_dir / "DONE").exists()
                             and not (job.sim_dir / "FAILED").exists()):
                         fs = sacct_final_state(job.slurm_id)
-                        job.done_status = "FAILED"
-                        (job.sim_dir / "FAILED").write_text(
-                            f"No flag file written. sacct state: {fs}\n"
-                        )
+                        if _is_terminal_bad_sacct(fs):
+                            job.done_status = "FAILED"
+                            (job.sim_dir / "FAILED").write_text(
+                                f"No flag file written. sacct state: {fs}\n"
+                            )
 
             # 3) Status line.
             n_done    = sum(1 for j in jobs if j.done_status == "DONE")
