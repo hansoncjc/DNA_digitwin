@@ -20,6 +20,16 @@ import hoomd.md
 # ---------------------------------------------------------------------------
 # Pair potential definitions
 # ---------------------------------------------------------------------------
+def vdw_potential(r, rmin, rmax, A):
+    '''
+    Van der Waals potential for monodisperse spheres.
+    Input A is hamaker constant.
+    Returns (U(r), F(r)). Pure function (no side effects).
+    '''
+    U = -(A/3)*(1/(r**2 - 4) + 1/(r**2) + 0.5*np.log((r**2 - 4)/(r**2))) 
+    F = (A/3)*((-2*r)/(r**2 - 4)**2 - 2/(r**3) + 4/(r**3 - 4*r)) 
+    return(U, F)
+
 
 def modified_LJ(r, rmin, rmax, U_0, n, m, r0):
     """
