@@ -121,19 +121,6 @@ def describe_training_config(ps, mode: str) -> str:
         lines.append("  [WARNING] map params present but will cause an error if used with mode='sim'.")
     return "\n".join(lines)
 
-# ------------------------- Nan Handling ------------------------- #
-def _sanitize_curve(arr: np.ndarray) -> np.ndarray:
-    arr = np.asarray(arr)
-    arr = arr[np.isfinite(arr).all(axis=1)]
-    q, I = arr[:, 0], arr[:, 1]
-    order = np.argsort(q)
-    q, I = q[order], I[order]
-    uq, idx = np.unique(q, return_index=True)  # remove duplicate q (interp1d hates these)
-    q, I = uq, I[idx]
-    I = np.clip(I, 1e-12, None)               # avoid log(0) downstream
-
-    return np.column_stack([q, I])
-
 # ------------------------- Parameter packing ------------------------- #
 class ParamSpace:
     """

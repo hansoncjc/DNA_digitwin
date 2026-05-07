@@ -16,6 +16,32 @@ from scipy.interpolate import interp1d
 from apdist.distances import AmplitudePhaseDistance
 
 
+def _sanitize_curve(arr: np.ndarray) -> np.ndarray:
+    """Make a (N, 2) curve [q, y] safe for interp1d.
+
+    Drops non-finite rows, sorts by q ascending, collapses duplicate q
+    (keeps the first occurrence), and clips the second column to a tiny
+    positive floor so log10 is safe downstream. Used by both the loss
+    code (compare_saxs_curves) and the I(q) -> S(q) extractor in
+    scattering.extract_exp_sq, where nearest-neighbor q snapping can
+    introduce duplicate q values.
+    """
+    arr = np.asarray(arr, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[1] < 2:
+        raise ValueError(f"Expected (N, 2+) array, got shape {arr.shape}")
+    arr = arr[:, :2]
+    arr = arr[np.isfinite(arr).all(axis=1)]
+    if arr.shape[0] == 0:
+        raise ValueError("Curve is empty after dropping non-finite rows.")
+    q, y = arr[:, 0], arr[:, 1]
+    order = np.argsort(q, kind="stable")
+    q, y = q[order], y[order]
+    uq, idx = np.unique(q, return_index=True)
+    q, y = uq, y[idx]
+    y = np.clip(y, 1e-12, None)
+    return np.column_stack([q, y])
+
+
 def compare_saxs_curves(exp_data, sim_data, q_range=None, scale_intensity=True, metric='mse'):
     """
     Compare two SAXS curves in log space.
@@ -51,6 +77,12 @@ def compare_saxs_curves(exp_data, sim_data, q_range=None, scale_intensity=True, 
     I_sim_scaled : (K,) ndarray
         Simulated intensity on q_ref after tail-mean scaling.
     """
+    # Sanitize: drop non-finite rows, sort, collapse duplicate q.
+    # Necessary because extract_exp_sq's nearest-neighbor q snapping can
+    # produce repeated q's, which makes interp1d return NaN/inf.
+    exp_data = _sanitize_curve(exp_data)
+    sim_data = _sanitize_curve(sim_data)
+
     # Extract q and I
     q_exp, I_exp = exp_data[:, 0], exp_data[:, 1]
     q_sim, I_sim = sim_data[:, 0], sim_data[:, 1]
