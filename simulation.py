@@ -2,9 +2,7 @@
 Simulation of DNA-mediated SiNP using HOOMD-blue.
 Supports two pair potentials selected via the `potential` argument of
 run_simulation():
-  - "modified_lj"  : n-m Lennard-Jones-like potential (original)
-  - "shifted_mie"  : shifted Mie potential with hard-core offset r0 and
-                     length-scale delta
+  - "vdw_es"  : vdw and screened electrostatics summed together.
 
 Table bounds (rmin, rmax) are derived analytically from the potential
 parameters rather than being hard-coded, so they remain valid across
@@ -15,12 +13,35 @@ import os, time
 import numpy as np
 import hoomd
 import hoomd.md
+from datetime import datetime
+from scipy.optimize import brentq
 
 
 # ---------------------------------------------------------------------------
 # Pair potential definitions
 # ---------------------------------------------------------------------------
-def vdw_potential(r, rmin, rmax, A):
+def hs_potential(r, rmin, rmax, dt):
+    '''
+    Hard-sphere-like potential using a quadratic form that goes to zero at r=2.
+    '''
+    U = 1./(4.*dt)*(2. - r)**2.
+    F = 1./(2.*dt)*(2. - r)
+    return(U, F)
+
+
+def screen_potential(r, deb_length, z, radius):
+    '''
+    Screened electrostatic repulsion for monodisperse spheres.
+    '''
+    charge = z * 4 * np.pi * 80 * 8.854e-12 * radius * (1 + radius/deb_length)
+    gamma = charge**2 / (4 * np.pi * 80 * 8.854e-12 * radius * (1 + radius/deb_length)**2 * 298 * 1.38e-23)
+
+    U = gamma*np.exp(-(radius/deb_length)*(r - 2))/r
+    F = gamma*np.exp(-(radius/deb_length)*(r - 2))*((radius/deb_length)/r + 1/(r**2))
+    return(U, F)
+
+
+def vdw_potential(r, A):
     '''
     Van der Waals potential for monodisperse spheres.
     Input A is hamaker constant.
@@ -31,73 +52,64 @@ def vdw_potential(r, rmin, rmax, A):
     return(U, F)
 
 
-def modified_LJ(r, rmin, rmax, U_0, n, m, r0):
+def vdw_es(r, rmin, rmax, A, deb_length, z, radius):
     """
-    n-m Lennard-Jones-like table potential (original).
-
-    .. math::
-        U(r) = \\frac{U_0}{n-m}\\left[m\\left(\\frac{r_0}{r}\\right)^n
-                - n\\left(\\frac{r_0}{r}\\right)^m\\right]
+    Combined van der Waals attraction and screened electrostatic
+    for monodisperse spheres.
 
     Returns (U(r), F(r)).  Pure function (no side effects).
     """
-    U = U_0 / (n - m) * (m * (r0 / r) ** n - n * (r0 / r) ** m)
-    F = U_0 * m * n * ((r0 / r) ** n - (r0 / r) ** m) / ((n - m) * r)
-    return U, F
-
-
-def shifted_mie(r, rmin, rmax, U_0, n, m, r0, delta):
-    """
-    Shifted Mie pair potential.
-
-    .. math::
-        U(r) = U_0 \\, C \\left[
-            \\left(\\frac{\\delta}{r - r_0}\\right)^n -
-            \\left(\\frac{\\delta}{r - r_0}\\right)^m
-        \\right]
-
-    with the standard Mie prefactor
-
-    .. math::
-        C = \\frac{n}{n-m}\\left(\\frac{n}{m}\\right)^{\\frac{m}{n-m}}
-
-    Parameters
-    ----------
-    r : array-like
-        Pair separation distances.
-    rmin, rmax : float
-        Table bounds (passed by HOOMD; not used in the math directly).
-    U_0 : float
-        Energy scale / well depth.
-    n, m : float
-        Repulsive and attractive exponents (n > m).
-    r0 : float
-        Hard-core shift origin; effective variable is xi = r - r0.
-        Must satisfy rmin > r0 to avoid the xi = 0 singularity.
-    delta : float
-        Length scale.  The potential minimum sits at
-        r_well = r0 + delta * (n/m)^(1/(n-m)).
-
-    Returns
-    -------
-    U : ndarray -- potential energy
-    F : ndarray -- force magnitude (-dU/dr, positive = repulsive)
-    """
-    C  = (n / (n - m)) * (n / m) ** (m / (n - m))
-    xi = r - r0
-    dn = (delta / xi) ** n
-    dm = (delta / xi) ** m
-    U  = U_0 * C * (dn - dm)
-    F  = U_0 * C * (n * dn - m * dm) / xi   # F = -dU/dr
-    return U, F
+    vdw_U, vdw_F = vdw_potential(r, A)
+    es_U, es_F = screen_potential(r, deb_length, z, radius)
+    return vdw_U + es_U, vdw_F + es_F
 
 
 # Registry: selector string -> (function, requires_delta)
 _POTENTIALS = {
-    "modified_lj" : (modified_LJ, False),
-    "shifted_mie" : (shifted_mie, True),
+    "vdw_es" : (vdw_es, False)
 }
 
+# ---------------------------------------------------------------------------
+# Table bounds helper functions
+# ---------------------------------------------------------------------------
+
+def U_vdw_es(r, A, deb_length, z, radius):
+    '''Helper to compute just the potential energy U(r) for root-finding.'''
+    U, _ = vdw_es(r, None, None, A, deb_length, z, radius)
+    return U
+
+def root_func(r, U_target, A, deb_length, z, radius):
+    '''Root function for solving r at which U_vdw_es(r) = U_target.'''
+    return U_vdw_es(r, A, deb_length, z, radius) - U_target
+
+def solve_r(U_target, r_low, r_high, A, deb_length, z, radius):
+    '''Solve for r such that U_vdw_es(r) = U_target using Brent's method.'''
+    return brentq(
+        root_func,
+        r_low,
+        r_high,
+        args=(U_target, A, deb_length, z, radius)
+    )
+
+def find_rmax_decay(
+    A,
+    deb_length,
+    z,
+    radius,
+    r_start=4.5,
+    r_end=10.0,
+    npts=2000,
+    eps_U=0.02,
+    eps_F=0.02):
+    r_grid = np.linspace(r_start, r_end, npts)
+
+    for r in r_grid:
+        U, F = vdw_es(r, None, None, A, deb_length, z, radius)
+
+        if (abs(U) < eps_U) and (abs(F) < eps_F):
+            return r
+
+    raise ValueError("No decay region found within search window")
 
 # ---------------------------------------------------------------------------
 # Physics-derived table bounds
@@ -105,40 +117,42 @@ _POTENTIALS = {
 
 def _compute_table_bounds(
     potential: str,
-    U_0: float,
-    n: float,
-    m: float,
-    r0: float,
+    A: float,
+    deb_length: float,
+    z: float,
+    radius: float,
     delta: float | None,
     *,
-    t_tol_lj: float = 0.02,
-    t_tol_mie: float = 4.7,
+    dt: float = 1e-4,
+    min_tol_vdw_es: float = -150., # Must be negative
+    max_tol_vdw_es: float = 0.02, # Must be positive
 ) -> tuple[float, float]:
     """
     Compute (rmin, rmax) analytically from the potential parameters.
 
     The strategy for both potentials is:
-      - rmin: place it on the repulsive side of the well minimum, far
-              enough from any singularity to keep forces finite and
-              table values well-defined.
+      - rmin: place it far enough from any singularity to keep forces
+              finite and table values well-defined.
       - rmax: solve for the separation at which the attractive tail
-              decays to the tolerance t_tol.  This guarantees the
+              decays to the tolerance t_tol. This guarantees the
               cutoff never truncates the well prematurely, regardless of
-              how (n, m, r0, delta) vary across a sweep.
+              how (A, deb_length, z, radius) vary across a sweep.
 
     Parameters
     ----------
-    potential : {"modified_lj", "shifted_mie"}
-    U_0 : float   -- energy scale / well depth
-    n, m : float  -- repulsive and attractive exponents (n > m > 0)
-    r0 : float    -- reference length (modified_lj) or hard-core shift (shifted_mie)
+    potential : {"vdw_es"}
+    A : float   -- Hamaker constant for VdW attraction (vdw_es)
+    deb_length : float  -- Debye length for screened electrostatics (vdw_es)
+    z : float  -- particle charge number for screened electrostatics (vdw_es)
+    radius : float  -- particle radius for screened electrostatics (vdw_es)
+    dt : float  -- time step for hard-sphere repulsion strength (vdw_es)
     delta : float -- length scale for shifted_mie; ignored for modified_lj
-    t_tol_lj : float
-        Tail-energy tolerance used as rmax cutoff for modified_lj.
-        rmax is where U_attr = t_tol_lj * (n/(n-m)).  Default 0.02.
-    t_tol_mie : float
-        Tail-energy tolerance used as rmax cutoff for shifted_mie.
-        rmax is where U_attr tail equals t_tol_mie.  Default 4.7.
+    max_tol_vdw_es : float
+        Tail-energy tolerance used as rmax cutoff for vdw_es.
+        rmax is where U = max_tol_vdw_es.  Default 0.02.
+    min_tol_vdw_es : float
+        Tail-energy tolerance used as rmin cutoff for vdw_es.
+        rmin is where U = min_tol_vdw_es.  Default -300.
 
     Returns
     -------
@@ -147,77 +161,32 @@ def _compute_table_bounds(
     Raises
     ------
     ValueError  -- if parameters would produce rmin >= rmax.
-
-    Notes
-    -----
-    modified_lj
-    -----------
-    The well minimum is exactly at r = r0.  rmin is fixed at 0.7 * r0
-    (repulsive side).  The attractive tail behaves asymptotically as:
-
-        U_attr(r) ~ U_0 * n/(n-m) * (r0/r)^m
-
-    Setting U_attr(rmax) = t_tol_lj * |U_0| and solving:
-
-        rmax = r0 * (n / ((n-m) * t_tol_lj))^(1/m)
-
-    shifted_mie
-    -----------
-    Let xi = r - r0.  The singularity is at xi = 0 (r = r0).
-    The Mie prefactor is C = n/(n-m) * (n/m)^(m/(n-m)).
-
-    rmin is fixed at r0 + 0.7 * delta (symmetric with modified_lj).
-
-    The attractive tail: U_attr ~ U_0 * C * (delta/xi)^m
-    Setting U_attr(xi_max) = t_tol_mie and solving directly:
-
-        xi_max = delta * (|U_0| * C / t_tol_mie)^(1/m)
-        rmax   = r0 + xi_max
     """
-    if potential == "modified_lj":
-        # rmin: fixed at 0.7 * r0 (repulsive side of minimum at r0)
-        rmin = 0.7 * r0
+    if potential == "vdw_es":
 
-        # rmax: tail decay to t_tol_lj
-        # U_attr(r) ~ U_0 * n/(n-m) * (r0/r)^m  => rmax = r0*(n/((n-m)*t_tol_lj))^(1/m)
-        prefactor_m = n / (n - m)        # coefficient of the attractive (r0/r)^m term
-        rmax = r0 * (prefactor_m / t_tol_lj) ** (1.0 / m)
+        # pick safe search brackets (important!)
+        rmin = solve_r(min_tol_vdw_es, r_low=2.001, r_high=3.0, A=A,
+                    deb_length=deb_length, z=z, radius=radius)
 
-    elif potential == "shifted_mie":
-        if delta is None:
-            raise ValueError("delta is required for shifted_mie bounds.")
-
-        C = (n / (n - m)) * (n / m) ** (m / (n - m))
-
-        # rmin: fixed at r0 + 0.7 * delta (repulsive side, symmetric with modified_lj)
-        rmin = r0 + 0.7 * delta
-
-        # rmax: attractive tail decay to t_tol_mie directly
-        # U_attr(xi) ~ U_0*C*(delta/xi)^m  => xi_max = delta*(|U_0|*C/t_tol_mie)^(1/m)
-        xi_max = delta * (abs(U_0) * C / t_tol_mie) ** (1.0 / m)
-        rmax_raw = r0 + xi_max
-        # Sanity cap: rmax should not exceed half the box length,
-        # and realistically the tail is negligible beyond ~5*delta from r0
-        rmax_physical = r0 + 5.0 * delta
-        if rmax_raw > rmax_physical:
-            import warnings
-            warnings.warn(
-                f"Computed rmax ({rmax_raw:.3f}) exceeds physical cap "
-                f"({rmax_physical:.3f}). Clamping. Consider increasing t_tol_mie.",
-                RuntimeWarning
-            )
-            rmax = rmax_physical
-        else:
-            rmax = rmax_raw
-
+        # --- rmax now decay-based (NO root solving) ---
+        rmax = find_rmax_decay(
+            A=A,
+            deb_length=deb_length,
+            z=z,
+            radius=radius,
+            r_start=rmin + 1.0,
+            r_end=15.0,
+            eps_U=max_tol_vdw_es,
+            eps_F=max_tol_vdw_es
+        )
     else:
         raise ValueError(f"Unknown potential: {potential!r}")
 
     if rmin >= rmax:
         raise ValueError(
             f"Computed rmin ({rmin:.4f}) >= rmax ({rmax:.4f}) for "
-            f"potential={potential!r}, n={n}, m={m}, r0={r0}, delta={delta}.  "
-            f"Check that n > m > 0 and tolerance parameters are reasonable."
+            f"potential={potential!r}, A={A}, deb_length={deb_length}, z={z}, radius={radius}.  "
+            f"Check that tolerance and bracket parameters are reasonable."
         )
 
     return rmin, rmax
@@ -228,24 +197,24 @@ def _compute_table_bounds(
 # ---------------------------------------------------------------------------
 
 def run_simulation(
-    density: float,
-    U_0: float,
-    r0: float,
-    n: float,
-    m: float,
+    phi: float,
+    A: float,
+    deb_length: float,
+    z: float,
     outdir: str,
     *,
-    potential: str = "modified_lj",
+    potential: str = "vdw_es",
     delta: float | None = None,
-    N: int = 5000,
-    dt: float = 1e-3,
-    steps: int = 15_000_000,
+    radius: float = 1E-8,
+    N: int = 8000,
+    dt: float = 1e-4,
+    steps: int = 20_000_000,
     kT: float = 1.0,
-    t_tol_lj: float = 0.02,
-    t_tol_mie: float = 4.7,
+    max_tol_vdw_es: float = 0.02, # Must be positive
+    min_tol_vdw_es: float = -150., # Must be negative
     init_offset: float = 0.1,
     device: str = "gpu",   # "cpu" also works on HOOMD 2.x
-    seed: int = 42,
+    seed: int = datetime.now().microsecond,
     plot: bool = True
 ) -> dict:
     """
@@ -253,37 +222,36 @@ def run_simulation(
 
     Parameters
     ----------
-    density : float
-        Number density (N / box_volume).
-    U_0 : float
-        Energy scale / well depth.
-    r0 : float
-        Reference length.
-        - modified_lj : equilibrium distance scale; well minimum is at r = r0.
-        - shifted_mie : hard-core shift origin; effective variable is xi = r - r0.
-    n, m : float
-        Repulsive and attractive exponents (n > m > 0).
+    phi : float
+        Volume fraction (particle_volume / box_volume).
+    A : float
+        Hamaker constant (kT's).
+    deb_length : float
+        Debye length.
+    z : float
+        Particle zeta potential (V).
+    radius : float
+        Particle radius (m).
     outdir : str
         Directory to write artifacts (gsd, csv).
-    potential : {"modified_lj", "shifted_mie"}
-        Selects the pair potential.  Default is ``"modified_lj"``.
+    potential : {"vdw_es"}
+        Selects the pair potential.  Default is ``"vdw_es"``.
     delta : float, optional
         Length-scale parameter required by ``"shifted_mie"``.
-        Ignored when ``potential="modified_lj"``.
     N, dt, steps, kT : see defaults
-    t_tol_lj : float
-        Tail-energy tolerance for rmax (modified_lj).  rmax is where the
-        attractive tail falls to t_tol_lj * |U_0|.  Default 0.02.
-    t_tol_mie : float
-        Tail-energy tolerance for rmax (shifted_mie).  rmax is where the
-        attractive tail falls to t_tol_mie.  Default 4.7.
+    max_tol_vdw_es : float
+        Tail-energy tolerance for rmax (vdw_es).  rmax is where the
+        attractive tail falls to max_tol_vdw_es.  Default 0.02.
+    min_tol_vdw_es : float
+        Tail-energy tolerance for rmin (vdw_es).  rmin is where the
+        attractive tail falls to min_tol_vdw_es.  Default -300.
     init_offset : float
         Added to rmin to set the minimum distance between particles during
         random initialization. Default 0.1.
     device : {"gpu","cpu"}
         HOOMD context device mode.
     seed : int
-        Langevin thermostat seed.
+        Integrator seed
     plot : bool
         Controls whether potential and energy plots are generated.
 
@@ -311,18 +279,18 @@ def run_simulation(
 
     # --- Analytically derived table bounds ---
     rmin, rmax = _compute_table_bounds(
-        potential, U_0, n, m, r0, delta,
-        t_tol_lj=t_tol_lj, t_tol_mie=t_tol_mie
+        potential, A, deb_length, z, radius, delta,
+        max_tol_vdw_es=max_tol_vdw_es, min_tol_vdw_es=min_tol_vdw_es
     )
     print(f"Table bounds: rmin={rmin:.4f}, rmax={rmax:.4f} "
-          f"(t_tol_lj={t_tol_lj}, t_tol_mie={t_tol_mie})")
+          f"(min_tol_vdw_es={min_tol_vdw_es}, max_tol_vdw_es={max_tol_vdw_es})")
 
     # --- HOOMD context ---
     mode_flag = "--mode=gpu" if device == "gpu" else "--mode=cpu"
     hoomd.context.initialize(mode_flag)
 
     # --- Derived params & box ---
-    volume = N / density
+    volume = 4 * N * np.pi / (3 * phi)  # from N, phi, and particle volume
     L = volume ** (1.0 / 3.0)  # cubic box from density.
 
     # --- Generate non-overlapping initial positions (same strategy) ---
@@ -355,6 +323,7 @@ def run_simulation(
         rng = np.random.default_rng()
         rng.shuffle(grid)
         return grid[:N].tolist()
+
     positions = generate_positions(N, L, rmin=rmin, offset=init_offset)
 
     # --- Snapshot and system init ---
@@ -363,44 +332,53 @@ def run_simulation(
     )
     for i, pos in enumerate(positions):
         snapshot.particles.position[i] = pos
-        snapshot.particles.diameter[i] = 1.0
+        snapshot.particles.diameter[i] = 2.0
     hoomd.init.read_snapshot(snapshot)
 
     # --- Pair potential via table ---
     width = 1000
     nl = hoomd.md.nlist.cell()
-    table = hoomd.md.pair.table(width=width, nlist=nl)
+    table_combined = hoomd.md.pair.table(width=width, nlist=nl)
+    table_hs = hoomd.md.pair.table(width=width, nlist=nl)
 
     # Build coefficient dict; add delta only for shifted_mie.
-    coeff = dict(U_0=U_0, n=n, m=m, r0=r0)
+    coeff = dict(A=A, deb_length=deb_length, z=z, radius=radius)
     extra_coeff = {}
     if potential == "shifted_mie":
         coeff["delta"] = delta
         extra_coeff["delta"] = delta
 
-    table.pair_coeff.set(
+    table_combined.pair_coeff.set(
         'A', 'A',
         rmin=rmin, rmax=rmax,
         func=pot_fn,
         coeff=coeff
     )
 
+    table_hs.pair_coeff.set(
+        'A', 'A',
+        rmin=0.0, rmax=2.0,
+        func=hs_potential,
+        coeff=dict(dt=dt)
+    )
+
     # --- Generate Potential Plot ---
     if plot:
         out_png = os.path.join(outdir, "potential_plot.png")
-        plot_pair_potential(rmin, rmax, width, U_0, n, m, r0, out_png,
-                            pot_fn, extra_coeff=extra_coeff)
+        plot_pair_potential(rmin, rmax, width, A, deb_length,
+                            z, radius, out_png, pot_fn,
+                            extra_coeff=extra_coeff)
 
     # --- Integrator ---
     group_all = hoomd.group.all()
     hoomd.md.integrate.mode_standard(dt=dt)
-    langevin = hoomd.md.integrate.langevin(group=group_all, kT=kT, seed=seed)
-    langevin.set_gamma('A', gamma=1.0)
+    bd = hoomd.md.integrate.brownian(group=group_all, kT=kT, seed=seed)
+    bd.set_gamma('A', gamma=1.0)
 
     # --- Outputs: GSD + energy CSV ---
     ts = time.localtime()
     timestamp = f"{ts.tm_year:02d}{ts.tm_mon:02d}{ts.tm_mday:02d}{ts.tm_hour:02d}{ts.tm_min:02d}{ts.tm_sec:02d}"
-    gsd_path = os.path.join(outdir, f"DNA_assembly_{timestamp}.gsd")
+    gsd_path = os.path.join(outdir, f"AuNP_assembly_{timestamp}.gsd")
     hoomd.dump.gsd(filename=gsd_path, period=50000, group=group_all, overwrite=True)
 
     energy_csv = os.path.join(outdir, "potential_energy.csv")
@@ -412,14 +390,14 @@ def run_simulation(
     )
 
     # --- Run ---
-    print(f"Running {steps} steps with {N} spheres at density {density:.3f} "
+    print(f"Running {steps} steps with {N} spheres at phi {phi:.3f} "
           f"using potential='{potential}'")
     hoomd.run(steps)
 
     # --- Generate Potential Energy Plot ---
     if plot:
         plot_energy(energy_csv, os.path.join(outdir, "potential_energy_plot.png"))
-        print("Simulation complete. Plots Generated.")
+        print(f"Simulation complete. Plots Generated. rmin={rmin:.4f}, rmax={rmax:.4f}")
     else:
         print("Simulation complete.")
 
@@ -441,18 +419,19 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
-def plot_pair_potential(rmin, rmax, width, U_0, n, m, r0, out_png,
-                        potential_fn, extra_coeff=None):
+def plot_pair_potential(rmin, rmax, width, A, deb_length,
+                        z, radius, out_png, potential_fn,
+                        extra_coeff=None):
     """Plot U(r) for any potential that follows the HOOMD table-function API.
 
     extra_coeff : dict, optional
         Additional keyword arguments forwarded to potential_fn beyond the
-        standard (r, rmin, rmax, U_0, n, m, r0) signature (e.g. ``delta``).
+        standard (r, rmin, rmax, A, deb_length, z, radius) signature (e.g. ``delta``).
     """
     extra_coeff = extra_coeff or {}
     r_vals = np.linspace(rmin, rmax, width)
-    U, _ = potential_fn(r_vals, rmin, rmax, U_0, n, m, r0, **extra_coeff)
-    label = f"n={n}, m={m}, r0={r0}, U0={U_0}"
+    U, _ = potential_fn(r_vals, rmin, rmax, A, deb_length, z, radius, **extra_coeff)
+    label = f"A={A}, deb_length={deb_length}, z={z}, radius={radius}"
     if extra_coeff:
         label += ", " + ", ".join(f"{k}={v}" for k, v in extra_coeff.items())
     plt.figure(figsize=(6, 4))
