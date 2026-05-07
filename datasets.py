@@ -2,6 +2,9 @@
 import numpy as np
 from pathlib import Path
 
+# Floor on C_chol_eff denominator (same units as C_NaCl, K_s*C_chol) to avoid 0/0 when C_NaCl=C_chol=0.
+_CHOL_EFF_EPS = 1e-6
+
 class ExperimentalParams:
     """
     Holds experimental inputs (flat, explicit) and lightweight helpers.
@@ -233,15 +236,17 @@ class Dataset:
 
         Mapping Function
         -------
-            C_chol_eff = (C_NaCl * C_chol) / (C_NaCl + K_s * C_chol)
+            sat        = C_NaCl / (C_NaCl + K_s * C_chol + eps)
+            C_chol_eff = (1 + sat) * C_chol
             U0 = A * exp( - ((C_chol_eff - mu_c)^2) / (2*sigma_c^2)
                           - ((b_bridge   - mu_b)^2) / (2*sigma_b^2) )
 
-        The salt-modulated effective cholesterol count `C_chol_eff` couples
-        the surface DNA loading `C_chol` with the salt-screening capacity
-        `C_NaCl / K_s` via a harmonic mean: grafting is limited by whichever
-        resource is scarcer. When `C_NaCl + K_s * C_chol <= 0` (e.g. the
-        zero-salt edge case), `C_chol_eff` falls back to `0.0`.
+        where ``eps`` is ``_CHOL_EFF_EPS`` (1e-6), matching concentration units.
+
+        At ``C_NaCl = 0`` and ``C_chol > 0``, ``sat = 0`` so ``C_chol_eff = C_chol``
+        (no salt does not force zero effective cholesterol). At large salt,
+        ``sat -> 1`` and ``C_chol_eff -> 2 * C_chol``. ``K_s`` scales the
+        crossover in the denominator. When ``C_chol = C_NaCl = 0``, ``C_chol_eff = 0``.
 
         Defaults
         --------
@@ -268,8 +273,8 @@ class Dataset:
             Std. dev. for bridge-loading term (dimensionless b_bridge);
             must be > 0.
         K_s : float
-            Salt cost per grafted DNA strand (dimensionless ratio); controls
-            how strongly C_NaCl limits C_chol_eff relative to DNA loading.
+            Couples salt and cholesterol in the saturating term (same units as
+            ``C_NaCl / C_chol`` if both are in consistent concentration units).
 
         Returns
         -------
@@ -283,8 +288,9 @@ class Dataset:
         C_NaCl   = float(self.exp.C_NaCl)
         b_bridge = float(self.exp.b_bridge)
 
-        denom = C_NaCl + float(K_s) * C_chol
-        C_chol_eff = (C_NaCl * C_chol / denom) if denom > 0 else 0.0
+        denom = C_NaCl + float(K_s) * C_chol + _CHOL_EFF_EPS
+        sat = C_NaCl / denom
+        C_chol_eff = (1.0 + sat) * C_chol
 
         term_c = ((C_chol_eff - float(mu_c)) ** 2) / (2.0 * (float(sigma_c) ** 2))
         term_b = ((b_bridge   - float(mu_b)) ** 2) / (2.0 * (float(sigma_b) ** 2))
