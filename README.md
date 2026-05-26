@@ -91,12 +91,13 @@ record and exposes the **mapping equations** that connect them:
   `r0/σ = 1 + k · ( 2(t_b + LC_ss·L_poly) + LC_ds·(2·L_HBP + L_bridge) ) / d_si`
 - `U0_from_gaussian(A, mu_c, mu_b, sigma_c, sigma_b, K_s)` → separable
   Gaussian in `(C_chol_eff, b_bridge)` where the salt-modulated
-  effective cholesterol count couples `C_chol` with `C_NaCl` via a
-  harmonic mean (`K_s` controls how strongly salt limits effective
-  grafting; default `0.5`):
-  - `C_chol_eff = (C_NaCl · C_chol) / (C_NaCl + K_s · C_chol)`
-    (falls back to `0.0` when the denominator is non-positive, so
-    `C_NaCl = 0` correctly yields `U0 = 0`).
+  effective cholesterol uses a saturating term plus unity (`K_s` couples
+  salt and cholesterol in the denominator; default `0.5`). Let
+  `ε = 10⁻⁶` (same units as concentrations, avoids `0/0` when
+  `C_NaCl = C_chol = 0`):
+  - `sat = C_NaCl / (C_NaCl + K_s · C_chol + ε)`
+  - `C_chol_eff = (1 + sat) · C_chol`  
+    (`C_NaCl = 0` gives `C_chol_eff = C_chol`; large salt gives `C_chol_eff → 2·C_chol`.)
   - `U0 = A · exp( -(C_chol_eff - mu_c)²/(2σ_c²) - (b_bridge - mu_b)²/(2σ_b²) )`
 
 ### `datatype` — S(q) vs I(q) input switch

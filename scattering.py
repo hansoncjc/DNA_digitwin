@@ -414,8 +414,13 @@ def extract_exp_sq(
     Returns
     -------
     sq : (M, 2) ndarray
-        Effective [q, S(q)] over the chosen q-range.
+        Effective [q, S(q)] over the chosen q-range. Sanitized so q is
+        strictly increasing with no duplicates (calculate_structure_factor's
+        nearest-neighbor q snap can otherwise produce duplicate q values
+        that break downstream interp1d).
     """
+    from metrics import _sanitize_curve
+
     sphere_polydisperse = np.loadtxt(ffpath, skiprows=1)
     sq = calculate_structure_factor(
         sphere_polydisperse,
@@ -424,4 +429,4 @@ def extract_exp_sq(
         q_max,
         plot = False,
     )
-    return sq
+    return _sanitize_curve(sq)
