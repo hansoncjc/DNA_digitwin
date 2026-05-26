@@ -29,15 +29,15 @@ def hs_potential(r, rmin, rmax, dt):
     return(U, F)
 
 
-def screen_potential(r, deb_length, z, radius):
+def screen_potential(r, debye_length, z, radius):
     '''
     Screened electrostatic repulsion for monodisperse spheres.
     '''
-    charge = z * 4 * np.pi * 80 * 8.854e-12 * radius * (1 + radius/deb_length)
-    gamma = charge**2 / (4 * np.pi * 80 * 8.854e-12 * radius * (1 + radius/deb_length)**2 * 298 * 1.38e-23)
+    charge = z * 4 * np.pi * 80 * 8.854e-12 * radius * (1 + radius/debye_length)
+    gamma = charge**2 / (4 * np.pi * 80 * 8.854e-12 * radius * (1 + radius/debye_length)**2 * 298 * 1.38e-23)
 
-    U = gamma*np.exp(-(radius/deb_length)*(r - 2))/r
-    F = gamma*np.exp(-(radius/deb_length)*(r - 2))*((radius/deb_length)/r + 1/(r**2))
+    U = gamma*np.exp(-(radius/debye_length)*(r - 2))/r
+    F = gamma*np.exp(-(radius/debye_length)*(r - 2))*((radius/debye_length)/r + 1/(r**2))
     return(U, F)
 
 
@@ -52,7 +52,7 @@ def vdw_potential(r, A):
     return(U, F)
 
 
-def vdw_es(r, rmin, rmax, A, deb_length, z, radius):
+def vdw_es(r, rmin, rmax, A, debye_length, z, radius):
     """
     Combined van der Waals attraction and screened electrostatic
     for monodisperse spheres.
@@ -60,7 +60,7 @@ def vdw_es(r, rmin, rmax, A, deb_length, z, radius):
     Returns (U(r), F(r)).  Pure function (no side effects).
     """
     vdw_U, vdw_F = vdw_potential(r, A)
-    es_U, es_F = screen_potential(r, deb_length, z, radius)
+    es_U, es_F = screen_potential(r, debye_length, z, radius)
     return vdw_U + es_U, vdw_F + es_F
 
 
@@ -73,43 +73,46 @@ _POTENTIALS = {
 # Table bounds helper functions
 # ---------------------------------------------------------------------------
 
-def U_vdw_es(r, A, deb_length, z, radius):
+def U_vdw_es(r, A, debye_length, z, radius):
     '''Helper to compute just the potential energy U(r) for root-finding.'''
-    U, _ = vdw_es(r, None, None, A, deb_length, z, radius)
+    U, _ = vdw_es(r, None, None, A, debye_length, z, radius)
     return U
 
-def root_func(r, U_target, A, deb_length, z, radius):
+def root_func(r, U_target, A, debye_length, z, radius):
     '''Root function for solving r at which U_vdw_es(r) = U_target.'''
-    return U_vdw_es(r, A, deb_length, z, radius) - U_target
+    return U_vdw_es(r, A, debye_length, z, radius) - U_target
 
-def solve_r(U_target, r_low, r_high, A, deb_length, z, radius):
+def solve_r(U_target, r_low, r_high, A, debye_length, z, radius):
     '''Solve for r such that U_vdw_es(r) = U_target using Brent's method.'''
     return brentq(
         root_func,
         r_low,
         r_high,
-        args=(U_target, A, deb_length, z, radius)
+        args=(U_target, A, debye_length, z, radius)
     )
 
 def find_rmax_decay(
     A,
-    deb_length,
+    debye_length,
     z,
     radius,
-    r_start=4.5,
-    r_end=10.0,
+    r_start=3.0,
+    r_end=15.0,
     npts=2000,
     eps_U=0.02,
     eps_F=0.02):
     r_grid = np.linspace(r_start, r_end, npts)
+    '''Returns rmax=15.0 if not found in the decay region'''
 
     for r in r_grid:
-        U, F = vdw_es(r, None, None, A, deb_length, z, radius)
+        U, F = vdw_es(r, None, None, A, debye_length, z, radius)
 
         if (abs(U) < eps_U) and (abs(F) < eps_F):
             return r
 
-    raise ValueError("No decay region found within search window")
+    # raise ValueError("No decay region found within search window")
+
+    return r_end
 
 # ---------------------------------------------------------------------------
 # Physics-derived table bounds
@@ -118,12 +121,13 @@ def find_rmax_decay(
 def _compute_table_bounds(
     potential: str,
     A: float,
-    deb_length: float,
+    debye_length: float,
     z: float,
     radius: float,
     delta: float | None,
     *,
     dt: float = 1e-4,
+    r_end: float = 60.0,
     min_tol_vdw_es: float = -150., # Must be negative
     max_tol_vdw_es: float = 0.02, # Must be positive
 ) -> tuple[float, float]:
@@ -136,13 +140,13 @@ def _compute_table_bounds(
       - rmax: solve for the separation at which the attractive tail
               decays to the tolerance t_tol. This guarantees the
               cutoff never truncates the well prematurely, regardless of
-              how (A, deb_length, z, radius) vary across a sweep.
+              how (A, debye_length, z, radius) vary across a sweep.
 
     Parameters
     ----------
     potential : {"vdw_es"}
     A : float   -- Hamaker constant for VdW attraction (vdw_es)
-    deb_length : float  -- Debye length for screened electrostatics (vdw_es)
+    debye_length : float  -- Debye length for screened electrostatics (vdw_es)
     z : float  -- particle charge number for screened electrostatics (vdw_es)
     radius : float  -- particle radius for screened electrostatics (vdw_es)
     dt : float  -- time step for hard-sphere repulsion strength (vdw_es)
@@ -165,17 +169,17 @@ def _compute_table_bounds(
     if potential == "vdw_es":
 
         # pick safe search brackets (important!)
-        rmin = solve_r(min_tol_vdw_es, r_low=2.001, r_high=3.0, A=A,
-                    deb_length=deb_length, z=z, radius=radius)
+        rmin = solve_r(min_tol_vdw_es, r_low=2.0001, r_high=4.0, A=A,
+                    debye_length=debye_length, z=z, radius=radius)
 
         # --- rmax now decay-based (NO root solving) ---
         rmax = find_rmax_decay(
             A=A,
-            deb_length=deb_length,
+            debye_length=debye_length,
             z=z,
             radius=radius,
-            r_start=rmin + 1.0,
-            r_end=15.0,
+            r_start=rmin,
+            r_end=r_end,
             eps_U=max_tol_vdw_es,
             eps_F=max_tol_vdw_es
         )
@@ -185,7 +189,7 @@ def _compute_table_bounds(
     if rmin >= rmax:
         raise ValueError(
             f"Computed rmin ({rmin:.4f}) >= rmax ({rmax:.4f}) for "
-            f"potential={potential!r}, A={A}, deb_length={deb_length}, z={z}, radius={radius}.  "
+            f"potential={potential!r}, A={A}, debye_length={debye_length}, z={z}, radius={radius}.  "
             f"Check that tolerance and bracket parameters are reasonable."
         )
 
@@ -199,8 +203,8 @@ def _compute_table_bounds(
 def run_simulation(
     phi: float,
     A: float,
-    deb_length: float,
-    z: float,
+    debye_length: float,
+    zeta_potential: float,
     outdir: str,
     *,
     potential: str = "vdw_es",
@@ -226,7 +230,7 @@ def run_simulation(
         Volume fraction (particle_volume / box_volume).
     A : float
         Hamaker constant (kT's).
-    deb_length : float
+    debye_length : float
         Debye length.
     z : float
         Particle zeta potential (V).
@@ -277,9 +281,14 @@ def run_simulation(
 
     os.makedirs(outdir, exist_ok=True)
 
+    # --- Derived params & box ---
+    volume = 4 * N * np.pi / (3 * phi)  # from N, phi, and particle volume
+    L = volume ** (1.0 / 3.0)  # cubic box from density.
+    # r_cut_max = 0.49 * L
+
     # --- Analytically derived table bounds ---
     rmin, rmax = _compute_table_bounds(
-        potential, A, deb_length, z, radius, delta,
+        potential, A, debye_length, zeta_potential, radius, delta,
         max_tol_vdw_es=max_tol_vdw_es, min_tol_vdw_es=min_tol_vdw_es
     )
     print(f"Table bounds: rmin={rmin:.4f}, rmax={rmax:.4f} "
@@ -288,10 +297,6 @@ def run_simulation(
     # --- HOOMD context ---
     mode_flag = "--mode=gpu" if device == "gpu" else "--mode=cpu"
     hoomd.context.initialize(mode_flag)
-
-    # --- Derived params & box ---
-    volume = 4 * N * np.pi / (3 * phi)  # from N, phi, and particle volume
-    L = volume ** (1.0 / 3.0)  # cubic box from density.
 
     # --- Generate non-overlapping initial positions (same strategy) ---
     def generate_positions(N, L, rmin, offset=0.1):
@@ -342,7 +347,7 @@ def run_simulation(
     table_hs = hoomd.md.pair.table(width=width, nlist=nl)
 
     # Build coefficient dict; add delta only for shifted_mie.
-    coeff = dict(A=A, deb_length=deb_length, z=z, radius=radius)
+    coeff = dict(A=A, debye_length=debye_length, z=zeta_potential, radius=radius)
     extra_coeff = {}
     if potential == "shifted_mie":
         coeff["delta"] = delta
@@ -365,8 +370,8 @@ def run_simulation(
     # --- Generate Potential Plot ---
     if plot:
         out_png = os.path.join(outdir, "potential_plot.png")
-        plot_pair_potential(rmin, rmax, width, A, deb_length,
-                            z, radius, out_png, pot_fn,
+        plot_pair_potential(rmin, rmax, width, A, debye_length,
+                            zeta_potential, radius, out_png, pot_fn,
                             extra_coeff=extra_coeff)
 
     # --- Integrator ---
@@ -419,19 +424,19 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
-def plot_pair_potential(rmin, rmax, width, A, deb_length,
+def plot_pair_potential(rmin, rmax, width, A, debye_length,
                         z, radius, out_png, potential_fn,
                         extra_coeff=None):
     """Plot U(r) for any potential that follows the HOOMD table-function API.
 
     extra_coeff : dict, optional
         Additional keyword arguments forwarded to potential_fn beyond the
-        standard (r, rmin, rmax, A, deb_length, z, radius) signature (e.g. ``delta``).
+        standard (r, rmin, rmax, A, debye_length, z, radius) signature (e.g. ``delta``).
     """
     extra_coeff = extra_coeff or {}
     r_vals = np.linspace(rmin, rmax, width)
-    U, _ = potential_fn(r_vals, rmin, rmax, A, deb_length, z, radius, **extra_coeff)
-    label = f"A={A}, deb_length={deb_length}, z={z}, radius={radius}"
+    U, _ = potential_fn(r_vals, rmin, rmax, A, debye_length, z, radius, **extra_coeff)
+    label = f"A={A}, debye_length={debye_length}, z={z}, radius={radius}"
     if extra_coeff:
         label += ", " + ", ".join(f"{k}={v}" for k, v in extra_coeff.items())
     plt.figure(figsize=(6, 4))

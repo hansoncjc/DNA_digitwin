@@ -9,39 +9,30 @@ class ExperimentalParams:
     """
     Holds experimental inputs (flat, explicit) and lightweight helpers.
 
-    Stock / mixing (units)
+    Stock / mixing (units), NOT GONNA USE THESE RIGHT NOW
     ----------------------
-    C_stock : float
-        Silica stock concentration (mg/mL). Default: 60.0
-    V_stock : float
-        Volume of stock solution added (mL). Default: 0.333
+    C_stock_au : float
+        Gold stock concentration (M). Default: 1E-9
+    V_stock_au : float
+        Volume of stock solution added (uL). Default: 800
     V_total : float
-        Final total volume (mL). Default: 10.0
-    rho_si : float
-        Silica density (g/cm^3). Default: 2.2   (used by Dataset.rho_N; converted to mg/mL)
+        Final total volume (uL). Default: 1000.0
+    rho_au : float
+        Gold density (g/cm^3). Default: 19.32
 
     Solution chemistry / sequence
     -----------------------------
     C_NaCl : float
         NaCl concentration (mM). Default: 10.0
-    C_chol : float
-        DNA–cholesterol count per siNP (molecules/particle). Default: 100.0
-    b_bridge : float
-        Bridge concentration ratio respective to Chol concentration(dimensionless), where C_bridge = b_bridge * C_chol.
-        Default: 0.5 (tunable).
-    L_poly : float
-        Length of ssDNA spacer (nt). Default: 10.0
-    L_bridge : float or None
-        Length of DNA bridge (nt). No default; set when used in mappings.
-    L_HBP : float
-        Length of hybridizing base pairs (bp). Default: 18.0
+    C_AuNP : float
+        AuNP concentration (M). Default: 8E-10
 
     Geometry
     --------
-    d_si : float
-        Silica NP diameter (nm). Default: 24.6
-    t_b : float
-        Lipid bilayer thickness (nm). Default: 3.6
+    r_au : float
+        Gold NP radius (nm). Default: 10.0
+    t_c : float
+        Citrate layer thickness (nm). Default: 0.5
 
     Optional context
     ----------------
@@ -50,58 +41,33 @@ class ExperimentalParams:
     """
 
     def __init__(self,
-                 C_stock=60.0, V_stock=0.333, V_total=10.0, rho_si=2.2,
-                 C_NaCl=10.0, C_chol=100.0, b_bridge=0.5,
-                 L_poly=10.0, L_bridge=None, L_HBP=18.0,
-                 d_si=24.6, t_b=3.6, dna_coverage = None,
+                 C_NaCl=10.0, C_AuNP=8E-10,
+                 r_au=10.0, t_c=0.5,
                  temperature_C=None, extra=None):
-        # Stock / mixing
-        self.C_stock = C_stock
-        self.V_stock = V_stock
-        self.V_total = V_total
-        self.rho_si  = rho_si
 
         # Solution chemistry / sequence
         self.C_NaCl   = C_NaCl
-        self.C_chol   = C_chol
-        self.b_bridge = b_bridge  # C_bridge = b_bridge * C_chol
-        self.L_poly   = L_poly
-        self.L_bridge = L_bridge  # may be None; required by r0 mapping
-        self.L_HBP    = L_HBP
+        self.C_AuNP   = C_AuNP
 
         # Geometry
-        self.d_si = d_si
-        self.t_b  = t_b
+        self.r_au = r_au
+        self.t_c  = t_c
 
         # Optional context
-        self.dna_coverage  = dna_coverage
         self.temperature_C = temperature_C
         self.extra = {} if extra is None else extra
-
-    @property
-    def C_bridge(self):
-        """
-        Generative bridge concentration (molecules/siNP).
-
-        Returns
-        -------
-        float
-            C_bridge = b_bridge * C_chol
-        """
-        return self.b_bridge * self.C_chol
 
 
 class SimulationParams:
     """
     Holds simulation parameters (shared and sample-specific).
     """
-    def __init__(self, density=None, n=12.0, m=6.0, U0=None, r0=None,
-                 N=None, steps=None, dt=None, kT=None):
-        self.density = density
-        self.n = n
-        self.m = m
-        self.U0 = U0
-        self.r0 = r0
+    def __init__(self, phi=0.01, A=None, debye_length=None,
+                 z=None, N=None, steps=None, dt=None, kT=None):
+        self.phi = phi
+        self.A = A
+        self.debye_length = debye_length
+        self.z = z
         self.N = N
         self.steps = steps
         self.dt = dt
@@ -121,7 +87,7 @@ class Dataset:
     exp : ExperimentalParams or None
         If None, defaults are used.
     sim : SimulationParams or None
-        If None, defaults are used (n=12, m=6).
+        If None, defaults are used.
     weight : float
         Loss weight for this dataset in global aggregation. Default: 1.0
     out_dir : str or pathlib.Path or None
@@ -131,12 +97,10 @@ class Dataset:
     -------
     load_exp_curve(trim_tail=0) -> np.ndarray
         Lazy-load the experimental [q, I] and optionally drop last `trim_tail` rows.
-    rho_N(alpha=1.0) -> float
-        Number density = alpha * theoretical_base, with theoretical_base computed here.
-    r0_sigma(k=0.76, LC_ss=0.63, LC_ds=0.34) -> float
-        Map experimental geometry/sequence to r0/σ using your formula.
-    U0_from_gaussian(A, B, C) -> float
-        U0 = A * exp(-((x - B)^2)/(2*C^2)), where x = C_NaCl + C_chol + C_bridge.
+    deb_length(w1=1.0, w2=0.0) -> float
+        Compute debye length from C_NaCl using the formula: w1 * base + w2, where base is the theoretical debye length.
+    z(w3=-0.01, w4=0.025) -> float
+        Compute zeta potential from C_NaCl using the formula: z = w3 * C_NaCl + w4
     """
 
     def __init__(self, id, exp_path, exp=None, sim=None, weight=1.0, out_dir=None, datatype="sq"):
@@ -177,141 +141,58 @@ class Dataset:
             return arr[:-trim_tail]
         return arr
 
-    def rho_N(self, alpha=3.0):
+    def deb_length(self, w1 = 1.0, w2 = 0.0):
         """
-        Compute simulation number density as alpha * theoretical_base.
+        Compute simulation debye length as w1 * theoretical_base + w2.
 
         Theoretical base is computed here (not in ExperimentalParams):
-            base = (6/pi) * (C_stock / (rho_si * 1000)) * (V_stock / V_total)
+            base = (((80.0 * 8.85E-12 * 8.314 * 298.15)**0.5) / 96485) * (2 * C_NaCl)**(-0.5)
 
         Parameters
         ----------
-        alpha : float, default 3.0
-            Global coefficient to be fitted in Stage 1. Default value is 3.0. 
+        w1 : float, default 1.0
+            Global coefficient to be fitted in Stage 1. Default value is 1.0.
+        w2 : float, default 0.0
+            Global coefficient to be fitted in Stage 1. Default value is 0.0.
 
         Returns
         -------
         float
-            density = alpha * base
+            debye length = w1 * base + w2
         """
-        rho_si_mg_per_ml = self.exp.rho_si * 1000.0  # g/cm^3 → mg/mL
-        base = (6.0 / np.pi) * (
-            (self.exp.C_stock / rho_si_mg_per_ml) * (self.exp.V_stock / self.exp.V_total)
-        )
-        return float(alpha) * float(base)
+        base = (((80.0 * 8.854E-12 * 8.314 * 298)**0.5) / 96485) * (2 * self.exp.C_NaCl)**(-0.5)
+        return float(w1) * float(base) + float(w2)
 
-    def r0_sigma(self, k=0.76, LC_ss=0.63, LC_ds=0.34):
+    def z(self, w3 = -0.001, w4 = 0.045):
         """
-        Compute r0 in units of σ from experimental geometry/sequence.
+        Compute zeta potential in units of V from NaCl concentration.
 
         Formula
         -------
-            r0/σ = 1 + k * ( 2*(t_b + LC_ss*L_poly) + LC_ds*(2*L_HBP + L_bridge) ) / d_si
+            z = w3 * C_NaCl + w4  
 
         Defaults
         --------
-        k     = 0.76        (dimensionless; fitted in Stage 2)
-        LC_ss = 0.63 nm/nt  (contour length per nt of ssDNA)
-        LC_ds = 0.34 nm/bp  (contour length per bp of dsDNA)
+        w3 = -0.01       (V/mM; fitted in Stage 1) CHANGE TO 1
+        w4 = 0.025       (V; fitted in Stage 1) CHANGE TO 0
 
         Returns
         -------
         float
-            r0 in σ units.
-
-        Raises
-        ------
-        ValueError
-            If L_bridge is None (required by the formula).
+            zeta potential in V.
         """
-        if self.exp.L_bridge is None:
-            raise ValueError("L_bridge is required to compute r0 but is None.")
-        num = 2.0 * (self.exp.t_b + LC_ss * self.exp.L_poly) + LC_ds * (2.0 * self.exp.L_HBP + self.exp.L_bridge)
-        return 1.0 + float(k) * (num / self.exp.d_si)
+        return float(w3) * float(self.exp.C_NaCl) + float(w4)
 
-    def U0_from_gaussian(self, A=2.0, mu_c=100.0, mu_b=0.5,
-                         sigma_c=10.0, sigma_b=0.2, K_s=0.5):
+
+    def _autofill_sim_from_default(self, *, w1=1.0, w2=0.0, w3=-0.01, w4=0.025):
         """
-        Compute U0 from a separable Gaussian in C_chol_eff and b_bridge.
-
-        Mapping Function
-        -------
-            sat        = C_NaCl / (C_NaCl + K_s * C_chol + eps)
-            C_chol_eff = (1 + sat) * C_chol
-            U0 = A * exp( - ((C_chol_eff - mu_c)^2) / (2*sigma_c^2)
-                          - ((b_bridge   - mu_b)^2) / (2*sigma_b^2) )
-
-        where ``eps`` is ``_CHOL_EFF_EPS`` (1e-6), matching concentration units.
-
-        At ``C_NaCl = 0`` and ``C_chol > 0``, ``sat = 0`` so ``C_chol_eff = C_chol``
-        (no salt does not force zero effective cholesterol). At large salt,
-        ``sat -> 1`` and ``C_chol_eff -> 2 * C_chol``. ``K_s`` scales the
-        crossover in the denominator. When ``C_chol = C_NaCl = 0``, ``C_chol_eff = 0``.
-
-        Defaults
-        --------
-            A       = 2.0
-            mu_c    = 100.0
-            mu_b    = 0.5
-            sigma_c = 10.0
-            sigma_b = 0.2
-            K_s     = 0.5
-
-        Parameters
-        ----------
-        A : float
-            Amplitude of U0.
-        mu_c : float
-            Center for the salt-modulated effective cholesterol count
-            `C_chol_eff` (molecules/particle).
-        mu_b : float
-            Center for the bridge-loading ratio `b_bridge` (dimensionless).
-        sigma_c : float
-            Std. dev. for the C_chol_eff term (same unit as C_chol);
-            must be > 0.
-        sigma_b : float
-            Std. dev. for bridge-loading term (dimensionless b_bridge);
-            must be > 0.
-        K_s : float
-            Couples salt and cholesterol in the saturating term (same units as
-            ``C_NaCl / C_chol`` if both are in consistent concentration units).
-
-        Returns
-        -------
-        float
-            U0 value.
-        """
-        if sigma_c <= 0 or sigma_b <= 0:
-            raise ValueError("sigma_c and sigma_b must be > 0.")
-
-        C_chol   = float(self.exp.C_chol)
-        C_NaCl   = float(self.exp.C_NaCl)
-        b_bridge = float(self.exp.b_bridge)
-
-        denom = C_NaCl + float(K_s) * C_chol + _CHOL_EFF_EPS
-        sat = C_NaCl / denom
-        C_chol_eff = (1.0 + sat) * C_chol
-
-        term_c = ((C_chol_eff - float(mu_c)) ** 2) / (2.0 * (float(sigma_c) ** 2))
-        term_b = ((b_bridge   - float(mu_b)) ** 2) / (2.0 * (float(sigma_b) ** 2))
-
-        return float(A) * np.exp(- (term_c + term_b))
-
-    def _autofill_sim_from_default(self,
-                                    *,
-                                    alpha=3.0,
-                                    k=0.76,
-                                    A=2.0, mu_c=100.0, sigma_c=10.0,
-                                    mu_b=0.5, sigma_b=0.2,
-                                    K_s=0.5):
-        """
-        Fill self.sim.{density,r0,U0} from mappings if any of them is None.
+        Fill self.sim.{debye_length,zeta_potential} from mappings if any of them is None.
         Does NOT overwrite fields that are already set.
         """
-        if getattr(self.sim, "density", None) is None:
-            self.sim.density = self.rho_N(alpha=alpha)
-        if getattr(self.sim, "r0", None) is None:
-            self.sim.r0 = self.r0_sigma(k=k)
+        if getattr(self.sim, "debye_length", None) is None:
+            self.sim.debye_length = self.deb_length(w1=w1, w2=w2)
+        if getattr(self.sim, "zeta_potential", None) is None:
+            self.sim.zeta_potential = self.z(w3=w3, w4=w4)
         if getattr(self.sim, "U0", None) is None:
             self.sim.U0 = self.U0_from_gaussian(A=A, mu_c=mu_c, sigma_c=sigma_c,
                                                 mu_b=mu_b, sigma_b=sigma_b,
@@ -326,11 +207,10 @@ class Dataset:
             "experimental": { ... ExperimentalParams ... },
             "simulation":   { ... SimulationParams ... }   # optional/partial
             "mapping": {                                  # optional overrides for auto-fill
-            "alpha": 3.0,
-            "k": 0.76,
-            "A": 2.0, "mu_c": 100.0, "sigma_c": 10.0,
-            "mu_b": 0.5, "sigma_b": 0.2,
-            "K_s": 0.5
+            "w1": 1.0,
+            "w2": 0.0,
+            "w3": -0.01,
+            "w4": 0.025
             },
             "weight": 1.0,
             "out_dir": "Results/itr0"

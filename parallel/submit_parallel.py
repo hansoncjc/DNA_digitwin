@@ -137,8 +137,10 @@ echo "python: $(which python3)"
 echo "PYTHONPATH: ${{PYTHONPATH:-<unset>}}"
 nvidia-smi --query-gpu=name,memory.total --format=csv || true
 
+set +e
 python3 {WORKER_PATH} {job.config_path}
 EXIT_CODE=$?
+set -e
 
 echo "=========================================="
 echo "End:       $(date)"
@@ -342,6 +344,7 @@ def poll_until_done(
                         fs = sacct_final_state(job.slurm_id)
                         if _is_terminal_bad_sacct(fs):
                             job.done_status = "FAILED"
+                            (job.sim_dir / "RUNNING").unlink(missing_ok=True)
                             (job.sim_dir / "FAILED").write_text(
                                 f"No flag file written. sacct state: {fs}\n"
                             )

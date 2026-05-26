@@ -1,11 +1,10 @@
 """
 Per-job worker for parallel BO evaluations.
 
-Reads a JSON config describing one dataset's evaluation, runs the full
-pipeline end-to-end on a single GPU node:
+Reads a JSON config describing one dataset's evaluation, then runs the
+pipeline in isolated subprocess stages:
 
-    simulation.run_simulation -> scattering.convert_to_SAXS[_fft]
-    -> metrics.compare_to_exp[_saxsfft]
+    simulation_stage.py -> analysis_stage.py
 
 and writes a `DONE` flag (JSON) into `outdir` containing the loss plus
 diagnostic metadata. If any stage raises, a `FAILED` flag is written
@@ -57,19 +56,17 @@ import time
 import traceback
 from pathlib import Path
 
-import numpy as np
+import subprocess
+from collections import deque
 
-# Make sure DNA_digitwin/ is importable even if PYTHONPATH is unset for some
-# reason (sbatch scripts normally export it, but this is a safety net).
 _THIS_DIR = Path(__file__).resolve().parent          # .../DNA_digitwin/parallel
 _PARENT   = _THIS_DIR.parent                         # .../DNA_digitwin
 for p in (_PARENT, _THIS_DIR):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from simulation import run_simulation                            # noqa: E402
-from scattering  import convert_to_SAXS, convert_to_SAXS_fft, extract_exp_sq  # noqa: E402
-from metrics     import compare_to_exp, compare_to_exp_saxsfft  # noqa: E402
+SIM_STAGE = _THIS_DIR / "simulation_stage.py"
+ANALYSIS_STAGE = _THIS_DIR / "analysis_stage.py"
 
 
 # ---------------------------------------------------------------------------
@@ -81,101 +78,133 @@ def _write_flag(outdir: Path, name: str, text: str = "") -> None:
 
 
 def _clear_flags(outdir: Path) -> None:
-    for name in ("RUNNING", "DONE", "FAILED"):
+    for name in (
+        "RUNNING",
+        "DONE",
+        "FAILED",
+        "SIM_DONE.json",
+        "SIM_FAILED.json",
+        "ANALYSIS_DONE.json",
+        "ANALYSIS_FAILED.json",
+    ):
         p = outdir / name
         if p.exists():
             p.unlink()
 
 
 # ---------------------------------------------------------------------------
-# Pipeline helpers (mirror the sequential body in bo.make_global_objective)
+# Stage orchestration
 # ---------------------------------------------------------------------------
 
-_SQ_CANDIDATES = (
-    "S(q)_data/average_structure_factor.npy",
-    "scattering_data/average_structure_factor.npy",
-    "S(q)_/average_structure_factor.npy",
-    "S(q)/average_structure_factor.npy",
-)
+def _run_stage(name: str, args: list[str], *, tail_lines: int = 200) -> tuple[int, str]:
+    """
+    Run a subprocess while streaming its merged stdout/stderr to our stdout.
 
-
-def _locate_sim_sq(save_dir: Path) -> Path:
-    for rel in _SQ_CANDIDATES:
-        p = save_dir / rel
-        if p.exists():
-            return p
-    raise FileNotFoundError(
-        f"Missing simulated S(q); tried {[str(save_dir / r) for r in _SQ_CANDIDATES]}"
+    Returns the exit code plus a bounded output tail for FAILED diagnostics.
+    """
+    print(f"[worker] starting {name}: {' '.join(args)}", flush=True)
+    proc = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
     )
+    tail = deque(maxlen=tail_lines)
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+        tail.append(line)
+    rc = proc.wait()
+    print(f"[worker] {name} exit_code={rc}", flush=True)
+    return rc, "".join(tail)
 
 
-def _load_exp_curve(exp_path: str, trim_tail: int) -> np.ndarray:
-    """
-    Same semantics as Dataset.load_exp_curve (but without needing a
-    Dataset instance inside the worker).
-    """
-    if trim_tail < 0:
-        raise ValueError("trim_tail must be >= 0")
-    arr = np.load(exp_path)
-    if arr.ndim != 2 or arr.shape[1] < 2:
-        raise ValueError(f"Expected (N, 2+) array in {exp_path}, got {arr.shape}")
-    arr = arr[:, :2].astype(np.float64, copy=False)
-    if trim_tail and arr.shape[0] > trim_tail:
-        arr = arr[:-trim_tail]
-    return arr
+def _read_json(path: Path) -> dict:
+    return json.loads(path.read_text())
 
 
-def _run_pipeline(cfg: dict, save_dir: Path) -> dict:
-    """
-    Execute sim -> SAXS conversion -> compare-to-exp. Returns a dict
-    {"loss": float, "sim_result": dict} on success; raises on failure.
-    """
-    # 1) Simulation
-    sim_result = run_simulation(outdir=str(save_dir), **cfg["run_kwargs"])
+def _load_stage_failure(path: Path) -> str:
+    if not path.exists():
+        return ""
+    try:
+        data = _read_json(path)
+        return str(data.get("traceback", json.dumps(data, indent=2)))
+    except Exception:
+        return path.read_text(errors="replace")
 
-    # 2) Sim -> S(q)
-    scat = cfg.get("scattering", {}) or {}
-    method = scat.get("method", "saxsfft")
-    sc_kw  = dict(scat.get("kwargs", {}) or {})
-    if method == "saxsfft":
-        convert_to_SAXS_fft(str(save_dir), **sc_kw)
-    else:
-        convert_to_SAXS(str(save_dir), **sc_kw)
 
-    # 3) Compare to experiment
-    loss_cfg     = cfg["loss"]
-    sim_sq_path  = _locate_sim_sq(save_dir)
-    sim_sq       = np.load(sim_sq_path)
+def _format_failure(
+    *,
+    dt: float,
+    host: str,
+    stage: str,
+    rc: int,
+    tail: str,
+    detail: str = "",
+) -> str:
+    parts = [
+        f"run_time_seconds={dt:.1f}",
+        f"host={host}",
+        f"stage={stage}",
+        f"exit_code={rc}",
+        "",
+    ]
+    if detail:
+        parts.extend(["stage_detail:", detail, ""])
+    if tail:
+        parts.extend(["subprocess_output_tail:", tail])
+    return "\n".join(parts)
 
-    exp_data = _load_exp_curve(loss_cfg["exp_path"],
-                               int(loss_cfg.get("trim_tail", 0)))
-    datatype = loss_cfg.get("datatype", "sq")
-    if datatype == "sq":
-        exp_sq = exp_data
-    else:
-        exp_sq = extract_exp_sq(
-            exp_scattering=exp_data,
-            ffpath=loss_cfg["ffpath"],
-            q_min=float(loss_cfg.get("q_min", 0.02)),
-            q_max=float(loss_cfg.get("q_max", 0.03)),
-            normalize=False,
+
+def _run_pipeline(config_path: Path, outdir: Path) -> dict:
+    sim_done_path = outdir / "SIM_DONE.json"
+    analysis_done_path = outdir / "ANALYSIS_DONE.json"
+
+    sim_rc, sim_tail = _run_stage(
+        "simulation_stage",
+        [sys.executable, str(SIM_STAGE), str(config_path)],
+    )
+    if sim_rc != 0 and not sim_done_path.exists():
+        detail = _load_stage_failure(outdir / "SIM_FAILED.json")
+        raise RuntimeError(_format_failure(
+            dt=0.0,
+            host=os.uname().nodename,
+            stage="simulation_stage",
+            rc=sim_rc,
+            tail=sim_tail,
+            detail=detail,
+        ))
+    if sim_rc != 0 and sim_done_path.exists():
+        print(
+            "[worker] simulation_stage returned nonzero after writing "
+            "SIM_DONE.json; continuing with analysis",
+            flush=True,
         )
 
-    compare_method = loss_cfg.get("scattering_method", method)
-    metric         = loss_cfg.get("metric", "mse")
-    compare_q_range = loss_cfg.get("compare_q_range", (0.003, 0.06))
-    if compare_method == "saxsfft":
-        loss = float(compare_to_exp_saxsfft(
-            exp_sq,
-            sim_sq,
-            str(save_dir),
-            metric=metric,
-            q_range=compare_q_range,
+    analysis_rc, analysis_tail = _run_stage(
+        "analysis_stage",
+        [sys.executable, str(ANALYSIS_STAGE), str(config_path), str(sim_done_path)],
+    )
+    if analysis_rc != 0 or not analysis_done_path.exists():
+        detail = _load_stage_failure(outdir / "ANALYSIS_FAILED.json")
+        raise RuntimeError(_format_failure(
+            dt=0.0,
+            host=os.uname().nodename,
+            stage="analysis_stage",
+            rc=analysis_rc,
+            tail=analysis_tail,
+            detail=detail,
         ))
-    else:
-        loss = float(compare_to_exp(exp_sq, sim_sq, str(save_dir), metric=metric))
 
-    return {"loss": loss, "sim_result": sim_result}
+    sim_done = _read_json(sim_done_path)
+    analysis_done = _read_json(analysis_done_path)
+    return {
+        "loss": float(analysis_done["loss"]),
+        "sim_result": sim_done.get("result", {}),
+        "sim_stage": sim_done,
+        "analysis_stage": analysis_done,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +216,8 @@ def main(argv):
         print(f"usage: {argv[0]} <config.json>", file=sys.stderr)
         return 2
 
-    cfg    = json.loads(Path(argv[1]).read_text())
+    config_path = Path(argv[1])
+    cfg    = json.loads(config_path.read_text())
     outdir = Path(cfg["outdir"])
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -201,7 +231,7 @@ def main(argv):
 
     t0 = time.time()
     try:
-        out = _run_pipeline(cfg, outdir)
+        out = _run_pipeline(config_path, outdir)
         dt  = time.time() - t0
 
         sim_result = out["sim_result"]
@@ -215,6 +245,8 @@ def main(argv):
             "host":             host,
             "loss":             float(out["loss"]),
             "result":           stringified,
+            "simulation_stage":  out.get("sim_stage", {}),
+            "analysis_stage":    out.get("analysis_stage", {}),
         }
         _write_flag(outdir, "DONE", json.dumps(summary, indent=2))
         (outdir / "RUNNING").unlink(missing_ok=True)
@@ -223,10 +255,11 @@ def main(argv):
     except Exception:
         dt = time.time() - t0
         tb = traceback.format_exc()
+        message = str(sys.exc_info()[1])
         _write_flag(
             outdir,
             "FAILED",
-            f"run_time_seconds={dt:.1f}\nhost={host}\n\n{tb}",
+            f"run_time_seconds={dt:.1f}\nhost={host}\n\n{message}\n\n{tb}",
         )
         (outdir / "RUNNING").unlink(missing_ok=True)
         print(f"[worker] FAILED after {dt:.1f}s -> {outdir}\n{tb}", file=sys.stderr)

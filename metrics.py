@@ -97,11 +97,22 @@ def compare_saxs_curves(exp_data, sim_data, q_range=None, scale_intensity=True, 
         q_min_common = max(q_min_common, q_min_user)
         q_max_common = min(q_max_common, q_max_user)
 
+    if not np.isfinite(q_min_common) or not np.isfinite(q_max_common) or q_min_common >= q_max_common:
+        raise ValueError(
+            f"No valid overlapping q-range for comparison: "
+            f"q_min={q_min_common}, q_max={q_max_common}."
+        )
+
     # Truncate both curves
     mask_exp = (q_exp >= q_min_common) & (q_exp <= q_max_common)
     mask_sim = (q_sim >= q_min_common) & (q_sim <= q_max_common)
     q_exp_crop, I_exp_crop = q_exp[mask_exp], I_exp[mask_exp]
     q_sim_crop, I_sim_crop = q_sim[mask_sim], I_sim[mask_sim]
+    if len(q_exp_crop) < 2 or len(q_sim_crop) < 2:
+        raise ValueError(
+            f"Not enough points in overlapping q-range for comparison: "
+            f"experimental={len(q_exp_crop)}, simulated={len(q_sim_crop)}."
+        )
 
     # Resample both curves onto a shared log-spaced q-grid
     n_points = min(len(q_exp_crop), len(q_sim_crop))
@@ -123,7 +134,16 @@ def compare_saxs_curves(exp_data, sim_data, q_range=None, scale_intensity=True, 
     I_sim_resampled = np.clip(I_sim_resampled, eps, None)
 
     # Tail-based scaling used in the original code (mean over last ~5 points)
-    scale_factor = np.mean(I_exp_resampled[-6:-1]) / np.mean(I_sim_resampled[-6:-1])
+    exp_tail_mean = np.mean(I_exp_resampled[-6:-1])
+    sim_tail_mean = np.mean(I_sim_resampled[-6:-1])
+    if (not np.isfinite(exp_tail_mean)
+            or not np.isfinite(sim_tail_mean)
+            or sim_tail_mean == 0):
+        raise ValueError(
+            "Invalid tail means during curve scaling: "
+            f"experimental={exp_tail_mean}, simulated={sim_tail_mean}."
+        )
+    scale_factor = exp_tail_mean / sim_tail_mean
     I_sim_scaled = I_sim_resampled * scale_factor
 
     # Distance evaluation
@@ -140,6 +160,9 @@ def compare_saxs_curves(exp_data, sim_data, q_range=None, scale_intensity=True, 
         distance = np.mean((log_I_exp - log_I_sim)**2)
     else:
         raise ValueError(f"Unknown metric chosen: {metric}")
+
+    if not np.isfinite(distance):
+        raise ValueError(f"Non-finite {metric} distance computed: {distance}.")
 
     return distance, q_ref, I_exp_resampled, I_sim_scaled
 

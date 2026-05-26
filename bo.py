@@ -17,15 +17,13 @@ Minimal usage (Stage 1: globals only)
 -------------------------------------
 param_cfg = {
     "global": {
-        "alpha":   {"bounds": (0.2, 5.0),   "init": 1.0},    # density coeff
-        "n":       {"bounds": (6.0, 20.0),  "init": 12.0},
-        "m":       {"bounds": (4.0, 12.0),  "init": 6.0},
+        "phi":   {"bounds": (0.008, 1.2),   "init": 0.01},    # volume fraction
+        "A":     {"bounds": (80.0, 100.0),    "init": 90.0},     # Hamaker constant
         # Optional global mapping coeffs you want to learn in Stage 1 as well:
-        # "k":       {"bounds": (0.5, 1.2),   "init": 0.76},  # r0 mapping coeff
-        # "A":       {"bounds": (1.0, 20.0),  "init": 2.0},
-        # "mu_c":    {"bounds": (40.0, 200.0),"init": 100.0},
-        # "sigma_c": {"bounds": (5.0, 25.0),  "init": 15.0},
-        # "sigma_b": {"bounds": (0.05, 0.5),  "init": 0.1},
+        # "w1":      {"bounds": (0.1, 10.0),   "init": 1.0},
+        # "w2":      {"bounds": (0.0, 1E-8),   "init": 0.0},
+        # "w3":      {"bounds": (-0.1, -0.001), "init": -0.01},
+        # "w4":      {"bounds": (-0.1, 0.1),   "init": 0.025},
     },
     "local": {
         # leave empty in Stage 1 (or put "U0"/"r0" here for Stage 2 refinements)
@@ -44,6 +42,7 @@ print("Best params (physical):", ps.decode(best))
 
 import os
 import json
+import re
 import numpy as np
 import torch
 from pathlib import Path
@@ -58,23 +57,23 @@ from metrics import compare_to_exp, compare_to_exp_saxsfft
 # ------------------------- Modes & param types ------------------------- #
 
 # Parameters that correspond to direct simulation inputs
-_SIM_PARAMS = {"density", "r0", "U0"}
+_SIM_PARAMS = {"debye_length", "zeta_potential"}
 
 # Parameters that don't correpond to modes
-_ALWAYS_OK_SIM = {"n", "m"}
+_ALWAYS_OK_SIM = {"A", "phi"}
 
 # Parameters that correspond to mapping coefficients
-_MAP_PARAMS = {"alpha", "k", "A", "mu_c", "sigma_c", "sigma_b", "mu_b", "K_s"}
+_MAP_PARAMS = {"w1", "w2", "w3", "w4"}
 
 
 def _validate_param_mode(ps, mode: str) -> None:
     """
     Ensure that the ParamSpace configuration is consistent with the chosen mode.
 
-    mode = "map": only mapping parameters (alpha, k, A, ...) are allowed.
-    mode = "sim": only direct simulation parameters (density, r0, U0, ...) are allowed.
+    mode = "map": only mapping parameters (w1, w2, w3, w4) are allowed.
+    mode = "sim": only direct simulation parameters (debye_length, zeta_potential) are allowed.
 
-    n and m are always treated as *simulation* parameters and are allowed in both modes.
+    A and phi are always treated as *simulation* parameters and are allowed in both modes.
     """
     if mode not in ("map", "sim"):
         raise ValueError(f"Unknown mode '{mode}'. Expected 'map' or 'sim'.")
@@ -129,16 +128,15 @@ class ParamSpace:
     param_cfg schema:
         {
           "global": {
-             "alpha":   {"bounds": (0.2, 5.0),  "init": 1.0},
-             "n":       {"bounds": (6.0, 20.0), "init": 12.0},
-             "m":       {"bounds": (4.0, 12.0), "init": 6.0},
+             "phi":   {"bounds": (0.008, 0.012),  "init": 0.01},
+             "A":       {"bounds": (80.0, 100.0), "init": 90.0},
              # You can also "freeze" any param:
              # "k": {"bounds": (0.5,1.2), "init": 0.76, "fixed": 0.76}
           },
           "local": {
              # example for Stage 2:
-             # "U0": {"bounds": (0.1, 150.0), "init": 50.0},
-             # "r0": {"bounds": (2.0, 2.5),   "init": 2.2},
+             # "debye_length": {"bounds": (0.0, 1E-8), "init": 1E-9},
+             # "zeta_potential": {"bounds": (-0.1, 0.1),   "init": 0.025},
           }
         }
 
@@ -245,6 +243,79 @@ class ParamSpace:
 
 # ------------------------- Objective factory ------------------------- #
 
+def _parse_mem_to_gib(mem: Any) -> float:
+    """
+    Parse Slurm-style memory strings into GiB.
+
+    Examples: "10G", "40G", "160GB", "2048M", "1T".
+    Numeric values are treated as GiB.
+    """
+    if isinstance(mem, (int, float)):
+        return float(mem)
+    if mem is None:
+        raise ValueError("Memory value is required for saxsfft preflight.")
+
+    text = str(mem).strip().lower()
+    match = re.fullmatch(r"([0-9]*\.?[0-9]+)\s*([kmgt]?i?b?|[kmgt])?", text)
+    if match is None:
+        raise ValueError(f"Could not parse memory value {mem!r}. Use strings like '40G' or '160GB'.")
+
+    value = float(match.group(1))
+    unit = (match.group(2) or "g").lower()
+    if unit in ("", "g", "gb", "gib"):
+        return value
+    if unit in ("m", "mb", "mib"):
+        return value / 1024.0
+    if unit in ("t", "tb", "tib"):
+        return value * 1024.0
+    if unit in ("k", "kb", "kib"):
+        return value / (1024.0 * 1024.0)
+    raise ValueError(f"Unsupported memory unit in {mem!r}.")
+
+
+def _saxsfft_dtype_bytes(scattering_kwargs: Optional[Dict[str, Any]]) -> int:
+    dtype = (scattering_kwargs or {}).get("dtype")
+    if dtype is None:
+        return 8
+
+    dtype_text = str(dtype).lower()
+    if "float32" in dtype_text or dtype_text in ("single", "fp32"):
+        return 4
+    if "float16" in dtype_text or "bfloat16" in dtype_text or dtype_text in ("half", "fp16", "bf16"):
+        return 2
+    return 8
+
+
+def _estimate_saxsfft_memory_gib(scattering_kwargs: Optional[Dict[str, Any]]) -> float:
+    kwargs = scattering_kwargs or {}
+    n_grid = int(kwargs.get("N_grid", 300))
+    if n_grid <= 0:
+        raise ValueError(f"saxsfft N_grid must be positive, got {n_grid}.")
+
+    bytes_per_value = _saxsfft_dtype_bytes(kwargs)
+    return (n_grid ** 3) * bytes_per_value * 12 * 1.25 / (1024.0 ** 3)
+
+
+def _validate_saxsfft_memory(
+    scattering_method: str,
+    scattering_kwargs: Optional[Dict[str, Any]],
+    parallel_cfg: Optional[Dict[str, Any]],
+) -> None:
+    if scattering_method != "saxsfft":
+        return
+
+    kwargs = scattering_kwargs or {}
+    n_grid = int(kwargs.get("N_grid", 300))
+    estimated_gib = _estimate_saxsfft_memory_gib(kwargs)
+    requested_gib = _parse_mem_to_gib((parallel_cfg or {}).get("mem", "40G"))
+
+    if requested_gib < estimated_gib:
+        raise RuntimeError(
+            f"saxsfft N_grid={n_grid} estimated ~{estimated_gib:.1f} GiB/job, "
+            f"but parallel_cfg mem is {requested_gib:.1f} GiB. Lower N_grid or "
+            "request more memory."
+        )
+
 def _write_iteration_block(filepath: str, iteration: int, total_loss: float, records: List[Dict[str, Any]]):
     """
     Append one iteration block to the global trajectory CSV.
@@ -264,7 +335,7 @@ def _write_iteration_block(filepath: str, iteration: int, total_loss: float, rec
     Format
     ------
     # Iteration N,total_loss,<value>
-    iteration,dataset_id,loss,k,alpha,A,mu_c,mu_b,sigma_c,sigma_b,density,n,m,r0,U0
+    iteration,dataset_id,loss,k,alpha,A,mu_c,mu_b,sigma_c,sigma_b,debye_length,n,m,r0,U0
     N,d0,loss_val,k_val,...
     N,d1,loss_val,k_val,...
     <blank line>
@@ -317,6 +388,8 @@ def _run_objective_parallel(
     """
     from parallel import LauncherConfig, submit_jobs  # lazy import
 
+    _validate_saxsfft_memory(scattering_method, scattering_kwargs, parallel_cfg)
+
     total_loss = 0.0
     plans: List[Dict[str, Any]] = []
 
@@ -324,48 +397,49 @@ def _run_objective_parallel(
     # the sequential path; write per-dataset `sim_params_<id>.csv`.
     for ds in datasets:
         try:
-            n = float(G["n"]) if "n" in G else float(ds.sim.n)
-            m = float(G["m"]) if "m" in G else float(ds.sim.m)
+            phi = float(G["phi"]) if "phi" in G else float(ds.sim.phi)
+            A = float(G["A"]) if "A" in G else float(ds.sim.A)
 
             if mode == "map":
-                alpha = float(G.get("alpha", 1.0))
-                density = ds.rho_N(alpha=alpha)
+                w1 = float(G.get("w1", 1.0))
+                w2 = float(G.get("w2", 0.0))
+                debye_length = ds.deb_length(w1=w1, w2=w2)
             else:
-                if "density" in L[ds.id]:
-                    density = float(L[ds.id]["density"])
-                elif "density" in G:
-                    density = float(G["density"])
-                elif ds.sim.density is not None:
-                    density = float(ds.sim.density)
+                if "debye_length" in L[ds.id]:
+                    debye_length = float(L[ds.id]["debye_length"])
+                elif "debye_length" in G:
+                    debye_length = float(G["debye_length"])
+                elif ds.sim.debye_length is not None:
+                    debye_length = float(ds.sim.debye_length)
                 else:
                     raise ValueError(
-                        f"Dataset {ds.id}: density not provided in mode='sim' "
-                        "and dataset.sim.density is None."
+                        f"Dataset {ds.id}: debye_length not provided in mode='sim' "
+                        "and dataset.sim.debye_length is None."
                     )
 
             if mode == "map":
-                if "k" in G:
-                    r0 = float(ds.r0_sigma(k=float(G["k"])))
-                elif ds.sim.r0 is not None:
-                    r0 = float(ds.sim.r0)
+                if "w3" in G and "w4" in G:
+                    zeta_potential = float(ds.z(w3=float(G["w3"]), w4=float(G["w4"])))
+                elif ds.sim.zeta_potential is not None:
+                    zeta_potential = float(ds.sim.zeta_potential)
                 else:
                     raise ValueError(
-                        f"Dataset {ds.id}: r0 not provided and no mapping coeff 'k' "
+                        f"Dataset {ds.id}: zeta potential not provided and no mapping coeff 'w3' or 'w4' "
                         "found in mode='map'."
                     )
             else:
-                if "r0" in L[ds.id]:
-                    r0 = float(L[ds.id]["r0"])
-                elif "r0" in G:
-                    r0 = float(G["r0"])
-                elif ds.sim.r0 is not None:
-                    r0 = float(ds.sim.r0)
+                if "zeta_potential" in L[ds.id]:
+                    zeta_potential = float(L[ds.id]["zeta_potential"])
+                elif "zeta_potential" in G:
+                    zeta_potential = float(G["zeta_potential"])
+                elif ds.sim.zeta_potential is not None:
+                    zeta_potential = float(ds.sim.zeta_potential)
                 else:
                     raise ValueError(
-                        f"Dataset {ds.id}: r0 not provided in mode='sim' "
-                        "and dataset.sim.r0 is None."
+                        f"Dataset {ds.id}: zeta potential not provided in mode='sim' "
+                        "and dataset.sim.zeta_potential is None."
                     )
-
+            '''
             if mode == "map":
                 if all(k in G for k in ("A", "mu_c", "sigma_c", "sigma_b")):
                     U0 = float(ds.U0_from_gaussian(
@@ -394,26 +468,21 @@ def _run_objective_parallel(
                         f"Dataset {ds.id}: U0 not provided in mode='sim' "
                         "and dataset.sim.U0 is None."
                     )
-
+            '''
             save_dir = os.path.join(out_root, f"eval_{eval_id:03d}", ds.id)
             os.makedirs(save_dir, exist_ok=True)
 
             sim_params_record = {
                 "dataset_id": ds.id,
                 "eval_id": eval_id,
-                "k": G.get("k", ""),
-                "alpha": G.get("alpha", ""),
-                "A": G.get("A", ""),
-                "mu_c": G.get("mu_c", ""),
-                "mu_b": G.get("mu_b", ""),
-                "sigma_c": G.get("sigma_c", ""),
-                "sigma_b": G.get("sigma_b", ""),
-                "K_s": G.get("K_s", ""),
-                "density": float(density),
-                "n": float(n),
-                "m": float(m),
-                "r0": float(r0),
-                "U0": float(U0),
+                "w1": G.get("w1", ""),
+                "w2": G.get("w2", ""),
+                "w3": G.get("w3", ""),
+                "w4": G.get("w4", ""),
+                "phi": float(phi),
+                "A": float(A),
+                "debye_length": float(debye_length),
+                "zeta_potential": float(zeta_potential),
             }
             param_path = os.path.join(save_dir, f"sim_params_{ds.id}.csv")
             with open(param_path, "w", newline="") as f:
@@ -425,11 +494,10 @@ def _run_objective_parallel(
                 "ok":       True,
                 "ds":       ds,
                 "save_dir": save_dir,
-                "n":        n,
-                "m":        m,
-                "density":  density,
-                "r0":       r0,
-                "U0":       U0,
+                "phi":      phi,
+                "A":        A,
+                "debye_length":  debye_length,
+                "zeta_potential": zeta_potential,
             })
         except Exception as e:
             total_loss += 1e9
@@ -443,19 +511,14 @@ def _run_objective_parallel(
                 "iteration": eval_id,
                 "dataset_id": ds.id,
                 "loss": 1e9,
-                "k": G.get("k", ""),
-                "alpha": G.get("alpha", ""),
-                "A": G.get("A", ""),
-                "mu_c": G.get("mu_c", ""),
-                "mu_b": G.get("mu_b", ""),
-                "sigma_c": G.get("sigma_c", ""),
-                "sigma_b": G.get("sigma_b", ""),
-                "K_s": G.get("K_s", ""),
-                "density": "ERROR",
-                "n": "ERROR",
-                "m": "ERROR",
-                "r0": "ERROR",
-                "U0": "ERROR",
+                "w1": G.get("w1", ""),
+                "w2": G.get("w2", ""),
+                "w3": G.get("w3", ""),
+                "w4": G.get("w4", ""),
+                "phi": "ERROR",
+                "A": "ERROR",
+                "debye_length": "ERROR",
+                "zeta_potential": "ERROR",
             })
 
     # Phase B: build job specs for OK plans and submit them all.
@@ -463,11 +526,10 @@ def _run_objective_parallel(
     for plan in plans:
         ds = plan["ds"]
         run_kwargs = {
-            "density": float(plan["density"]),
-            "U_0":     float(plan["U0"]),
-            "r0":      float(plan["r0"]),
-            "n":       float(plan["n"]),
-            "m":       float(plan["m"]),
+            "debye_length":   float(plan["debye_length"]),
+            "zeta_potential": float(plan["zeta_potential"]),
+            "A":              float(plan["A"]),
+            "phi":            float(plan["phi"]),
         }
         for k, v in (sim_defaults or {}).items():
             run_kwargs.setdefault(k, v)
@@ -538,19 +600,14 @@ def _run_objective_parallel(
                 "iteration": eval_id,
                 "dataset_id": ds.id,
                 "loss": loss,
-                "k": G.get("k", ""),
-                "alpha": G.get("alpha", ""),
-                "A": G.get("A", ""),
-                "mu_c": G.get("mu_c", ""),
-                "mu_b": G.get("mu_b", ""),
-                "sigma_c": G.get("sigma_c", ""),
-                "sigma_b": G.get("sigma_b", ""),
-                "K_s": G.get("K_s", ""),
-                "density": float(plan["density"]),
-                "n":       float(plan["n"]),
-                "m":       float(plan["m"]),
-                "r0":      float(plan["r0"]),
-                "U0":      float(plan["U0"]),
+                "w1": G.get("w1", ""),
+                "w2": G.get("w2", ""),
+                "w3": G.get("w3", ""),
+                "w4": G.get("w4", ""),
+                "debye_length":   float(plan["debye_length"]),
+                "zeta_potential": float(plan["zeta_potential"]),
+                "A":              float(plan["A"]),
+                "phi":            float(plan["phi"]),
             })
         else:
             total_loss += 1e9
@@ -564,19 +621,14 @@ def _run_objective_parallel(
                 "iteration": eval_id,
                 "dataset_id": ds.id,
                 "loss": 1e9,
-                "k": G.get("k", ""),
-                "alpha": G.get("alpha", ""),
-                "A": G.get("A", ""),
-                "mu_c": G.get("mu_c", ""),
-                "mu_b": G.get("mu_b", ""),
-                "sigma_c": G.get("sigma_c", ""),
-                "sigma_b": G.get("sigma_b", ""),
-                "K_s": G.get("K_s", ""),
-                "density": "ERROR",
-                "n": "ERROR",
-                "m": "ERROR",
-                "r0": "ERROR",
-                "U0": "ERROR",
+                "w1": G.get("w1", ""),
+                "w2": G.get("w2", ""),
+                "w3": G.get("w3", ""),
+                "w4": G.get("w4", ""),
+                "debye_length":   "ERROR",
+                "zeta_potential": "ERROR",
+                "A":              "ERROR",
+                "phi":            "ERROR",
             })
 
     return total_loss
@@ -605,14 +657,14 @@ def make_global_objective(
 
     Policy / defaults
     -----------------
-    - density = alpha * dataset.exp.theoretical_base (computed via dataset.rho_N(alpha))
-    - n, m: taken from GLOBALs if present; otherwise fall back to dataset.sim.n / m.
-    - r0:
-        * if LOCAL "r0" present for a dataset, use it,
-        * else if GLOBAL "k" present, use dataset.r0_sigma(k),
-        * else if dataset.sim.r0 is set, use it,
+    - debye_length = w1 * dataset.exp.theoretical_base (computed via dataset.deb_length(w1,w2))
+    - A, phi: taken from GLOBALs if present; otherwise fall back to dataset.sim.A / phi.
+    - zeta_potential:
+        * if LOCAL "zeta_potential" present for a dataset, use it,
+        * else if GLOBAL "w3,w4" present, use dataset.z(w3,w4),
+        * else if dataset.sim.zeta_potential is set, use it,
         * else raise.
-    - U0:
+    - U0: NOT IN USE
         * if LOCAL "U0" present for a dataset, use it,
         * else if GLOBAL ("A","mu_c","sigma_c","sigma_b") present, use dataset.U0_from_gaussian(...),
         * else if dataset.sim.U0 is set, use it,
@@ -620,13 +672,12 @@ def make_global_objective(
     mode: default to be "map"
     ----
     "map" (default):
-        density, r0, U0 are computed via dataset mappings
-        (alpha → density, k → r0, A/mu_c/sigma_* → U0).
-        Direct sim params (density/r0/U0) are not allowed in ParamSpace.
+        debye_length, zeta_potential are computed via dataset mappings
+        Direct sim params (debye_length/zeta_potential) are not allowed in ParamSpace.
     "sim":
-        density, r0, U0 are taken directly from ParamSpace (global/local),
+        debye_length, zeta_potential are taken directly from ParamSpace (global/local),
         or fall back to dataset.sim.* if not optimized.
-        Mapping params (alpha/k/A/...) are not allowed in ParamSpace.
+        Mapping params (w1/w2/w3/w4) are not allowed in ParamSpace.
 
     "trim_tail":
         number of points to drop from the end of the experimental intensity 
@@ -700,52 +751,53 @@ def make_global_objective(
         # --- Sequential path (original behavior, unchanged) ---
         for ds in datasets:
             try:
-                # ---- Shared n, m (always "sim" style) ----
-                n = float(G["n"]) if "n" in G else float(ds.sim.n)
-                m = float(G["m"]) if "m" in G else float(ds.sim.m)
+                # ---- Shared A, phi (always "sim" style) ----
+                A = float(G["A"]) if "A" in G else float(ds.sim.A)
+                phi = float(G["phi"]) if "phi" in G else float(ds.sim.phi)
 
-                # ---- density ----
+                # ---- debye_length ----
                 if mode == "map":
-                    alpha = float(G.get("alpha", 1.0))
-                    density = ds.rho_N(alpha=alpha)
+                    w1 = float(G.get("w1", 1.0))
+                    w2 = float(G.get("w2", 0.0))
+                    debye_length = ds.deb_length(w1=w1, w2=w2)
                 else:  # mode == "sim"
                     # Prefer local, then global, then dataset.sim
-                    if "density" in L[ds.id]:
-                        density = float(L[ds.id]["density"])
-                    elif "density" in G:
-                        density = float(G["density"])
-                    elif ds.sim.density is not None:
-                        density = float(ds.sim.density)
+                    if "debye_length" in L[ds.id]:
+                        debye_length = float(L[ds.id]["debye_length"])
+                    elif "debye_length" in G:
+                        debye_length = float(G["debye_length"])
+                    elif ds.sim.debye_length is not None:
+                        debye_length = float(ds.sim.debye_length)
                     else:
                         raise ValueError(
-                            f"Dataset {ds.id}: density not provided in mode='sim' "
-                            "and dataset.sim.density is None."
+                            f"Dataset {ds.id}: debye_length not provided in mode='sim' "
+                            "and dataset.sim.debye_length is None."
                         )
 
-                # ---- r0 ----
+                # ---- zeta_potential ----
                 if mode == "map":
-                    if "k" in G:
-                        r0 = float(ds.r0_sigma(k=float(G["k"])))
-                    elif ds.sim.r0 is not None:
-                        r0 = float(ds.sim.r0)
+                    if "w3" in G and "w4" in G:
+                        zeta_potential = float(ds.z(w3=float(G["w3"]), w4=float(G["w4"])))
+                    elif ds.sim.zeta_potential is not None:
+                        zeta_potential = float(ds.sim.zeta_potential)
                     else:
                         raise ValueError(
-                            f"Dataset {ds.id}: r0 not provided and no mapping coeff 'k' found "
+                            f"Dataset {ds.id}: zeta_potential not provided and no mapping coeff 'w3' or 'w4' found "
                             "in mode='map'."
                         )
                 else:  # mode == "sim"
-                    if "r0" in L[ds.id]:
-                        r0 = float(L[ds.id]["r0"])
-                    elif "r0" in G:
-                        r0 = float(G["r0"])
-                    elif ds.sim.r0 is not None:
-                        r0 = float(ds.sim.r0)
+                    if "zeta_potential" in L[ds.id]:
+                        zeta_potential = float(L[ds.id]["zeta_potential"])
+                    elif "zeta_potential" in G:
+                        zeta_potential = float(G["zeta_potential"])
+                    elif ds.sim.zeta_potential is not None:
+                        zeta_potential = float(ds.sim.zeta_potential)
                     else:
                         raise ValueError(
-                            f"Dataset {ds.id}: r0 not provided in mode='sim' "
-                            "and dataset.sim.r0 is None."
+                            f"Dataset {ds.id}: zeta_potential not provided in mode='sim' "
+                            "and dataset.sim.zeta_potential is None."
                         )
-
+                '''
                 # ---- U0 ----
                 if mode == "map":
                     if all(k in G for k in ("A", "mu_c", "sigma_c", "sigma_b")):
@@ -777,7 +829,7 @@ def make_global_objective(
                             f"Dataset {ds.id}: U0 not provided in mode='sim' "
                             "and dataset.sim.U0 is None."
                         )
-
+                '''
                 # ---- Output directory ----
                 # New structure: eval_XXX/d0/, eval_XXX/d1/, etc.
                 # (Groups all datasets from same iteration together)
@@ -788,20 +840,15 @@ def make_global_objective(
                     "dataset_id": ds.id,
                     "eval_id": eval_id,
                     # Mapping coefficients (saved regardless of mode)
-                    "k": G.get("k", ""),
-                    "alpha": G.get("alpha", ""),
-                    "A": G.get("A", ""),
-                    "mu_c": G.get("mu_c", ""),
-                    "mu_b": G.get("mu_b", ""),
-                    "sigma_c": G.get("sigma_c", ""),
-                    "sigma_b": G.get("sigma_b", ""),
-                    "K_s": G.get("K_s", ""),
+                    "w1": G.get("w1", ""),
+                    "w2": G.get("w2", ""),
+                    "w3": G.get("w3", ""),
+                    "w4": G.get("w4", ""),
                     # Simulation parameters
-                    "density": float(density),
-                    "n": float(n),
-                    "m": float(m),
-                    "r0": float(r0),
-                    "U0": float(U0),
+                    "debye_length": float(debye_length),
+                    "zeta_potential": float(zeta_potential),
+                    "A": float(A),
+                    "phi": float(phi),
                 }
                 param_path = os.path.join(save_dir, f"sim_params_{ds.id}.csv")
                 with open(param_path, "w", newline="") as f:
@@ -809,16 +856,19 @@ def make_global_objective(
                     writer.writeheader()
                     writer.writerow(sim_params_record)
                 # ---- 1) Simulation ----
-                _ = run_simulation(
-                    density=density, U_0=U0, r0=r0, n=n, m=m, outdir=save_dir, **sim_defaults
+                sim_result = run_simulation(
+                    phi=phi, A=A, debye_length=debye_length, zeta_potential=zeta_potential, outdir=save_dir, **sim_defaults
                 )
 
                 # ---- 2) Sim → S(q) ----
                 _sc_kw = dict(scattering_kwargs) if scattering_kwargs else {}
+                gsd_path = sim_result.get("gsd_path") if isinstance(sim_result, dict) else None
+                if not gsd_path:
+                    raise ValueError("run_simulation did not return a 'gsd_path'")
                 if scattering_method == "saxsfft":
-                    convert_to_SAXS_fft(save_dir, **_sc_kw)
+                    convert_to_SAXS_fft(save_dir, path=gsd_path, **_sc_kw)
                 else:
-                    convert_to_SAXS(save_dir, **_sc_kw)
+                    convert_to_SAXS(save_dir, path=gsd_path, **_sc_kw)
 
                 # ---- 3) Compare to experiment ----
                 cand_paths = [
@@ -859,19 +909,14 @@ def make_global_objective(
                     "iteration": eval_id,
                     "dataset_id": ds.id,
                     "loss": loss,
-                    "k": G.get("k", ""),
-                    "alpha": G.get("alpha", ""),
-                    "A": G.get("A", ""),
-                    "mu_c": G.get("mu_c", ""),
-                    "mu_b": G.get("mu_b", ""),
-                    "sigma_c": G.get("sigma_c", ""),
-                    "sigma_b": G.get("sigma_b", ""),
-                    "K_s": G.get("K_s", ""),
-                    "density": float(density),
-                    "n": float(n),
-                    "m": float(m),
-                    "r0": float(r0),
-                    "U0": float(U0),
+                    "w1": G.get("w1", ""),
+                    "w2": G.get("w2", ""),
+                    "w3": G.get("w3", ""),
+                    "w4": G.get("w4", ""),
+                    "debye_length": float(debye_length),
+                    "zeta_potential": float(zeta_potential),
+                    "A": float(A),
+                    "phi": float(phi),
                 }
                 objective._iteration_data.append(trajectory_record)
 
@@ -888,19 +933,14 @@ def make_global_objective(
                     "iteration": eval_id,
                     "dataset_id": ds.id,
                     "loss": 1e9,
-                    "k": G.get("k", ""),
-                    "alpha": G.get("alpha", ""),
-                    "A": G.get("A", ""),
-                    "mu_c": G.get("mu_c", ""),
-                    "mu_b": G.get("mu_b", ""),
-                    "sigma_c": G.get("sigma_c", ""),
-                    "sigma_b": G.get("sigma_b", ""),
-                    "K_s": G.get("K_s", ""),
-                    "density": "ERROR",
-                    "n": "ERROR",
-                    "m": "ERROR",
-                    "r0": "ERROR",
-                    "U0": "ERROR",
+                    "w1": G.get("w1", ""),
+                    "w2": G.get("w2", ""),
+                    "w3": G.get("w3", ""),
+                    "w4": G.get("w4", ""),
+                    "debye_length": "ERROR",
+                    "zeta_potential": "ERROR",
+                    "A": "ERROR",
+                    "phi": "ERROR",
                 }
                 objective._iteration_data.append(trajectory_record)
 
@@ -948,10 +988,18 @@ def run_bo(
     # Initial design (1 point at provided init)
     x_unit = ps.init_unit().to(dtype).unsqueeze(0)  # (1,d)
     y = -objective_fn(x_unit, ffpath = ffpath)  # maximize EI on negative loss
+    initial_loss = -float(y.item())
+    if (not np.isfinite(initial_loss)) or initial_loss >= 1e9:
+        raise RuntimeError(
+            "Initial BO evaluation failed with only penalty loss "
+            f"({initial_loss:g}). Check Optimization_Results/error_*.txt, "
+            "per-dataset FAILED files, and Slurm worker logs before fitting "
+            "the GP model."
+        )
     train_x = x_unit.clone()
     train_y = y.clone()
 
-    history = [-float(y.item())]  # store the actual loss
+    history = [initial_loss]  # store the actual loss
 
     from botorch.models import SingleTaskGP
     from botorch.fit import fit_gpytorch_mll
