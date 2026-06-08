@@ -248,8 +248,12 @@ def inspect_flags(job: Job) -> None:
 def make_run_dir(path: Path, clean: bool) -> None:
     if path.exists() and clean:
         shutil.rmtree(path)
-    (path / "configs").mkdir(parents=True, exist_ok=True)
-    (path / "jobs").mkdir(parents=True, exist_ok=True)
+    configs_dir = path / "configs"
+    jobs_dir = path / "jobs"
+    if not configs_dir.exists():
+        configs_dir.mkdir(parents=True)
+    if not jobs_dir.exists():
+        jobs_dir.mkdir(parents=True)
 
 
 def prepare_jobs(cfg: LauncherConfig, job_specs: Iterable[dict]) -> List[Job]:
@@ -266,7 +270,8 @@ def prepare_jobs(cfg: LauncherConfig, job_specs: Iterable[dict]) -> List[Job]:
         ds_id = str(spec.get("ds_id", name))
         worker_cfg = dict(spec["worker_config"])
         sim_dir = Path(worker_cfg["outdir"])
-        sim_dir.mkdir(parents=True, exist_ok=True)
+        if not sim_dir.exists():
+            sim_dir.mkdir(parents=True)
 
         job = Job(
             idx=i,

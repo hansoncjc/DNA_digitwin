@@ -189,7 +189,8 @@ def main(argv):
 
     cfg    = json.loads(Path(argv[1]).read_text())
     outdir = Path(cfg["outdir"])
-    outdir.mkdir(parents=True, exist_ok=True)
+    if not outdir.exists():
+        outdir.mkdir(parents=True)
 
     host = os.uname().nodename
     _clear_flags(outdir)

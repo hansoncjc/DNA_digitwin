@@ -647,6 +647,7 @@ def make_global_objective(
         # ffpath: path to polydispersed sphere formfactor
         if not hasattr(objective, "_eval_id"):
             objective._eval_id = 0
+        if not hasattr(objective, "_iteration_data"):
             objective._iteration_data = []  # Track data for global CSV
         eval_id = objective._eval_id
         objective._eval_id += 1
@@ -930,12 +931,25 @@ def run_bo(
     ffpath: str,
     n_iters: int = 20,
     seed: int = 0,
+    warm_start: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
 ):
     """
     Run a BoTorch loop over the parameter space defined by ParamSpace.
 
     Minimizes the provided objective (sum of losses). Returns:
         best_x_phys (1D torch tensor), history (list of floats)
+
+    Parameters
+    ----------
+    warm_start
+        If given, skip the initial ``init_unit`` evaluation and start the GP
+        from these tensors instead. Use this to resume after a crash without
+        re-evaluating completed BO steps. Expected shapes: ``train_x`` is
+        ``(n, d)`` in the **unit** cube (same convention as ``ParamSpace``),
+        ``train_y`` is ``(n, 1)`` with values ``-total_loss`` (same sign as
+        internal ``train_y`` in the cold-start path). The caller must align
+        ``objective_fn``'s evaluation counter (e.g. ``objective._eval_id``) with
+        ``n`` so the next Slurm/eval folder index does not collide.
 
     Notes
     -----
@@ -945,13 +959,27 @@ def run_bo(
     torch.manual_seed(seed)
     dtype = torch.float64
 
-    # Initial design (1 point at provided init)
-    x_unit = ps.init_unit().to(dtype).unsqueeze(0)  # (1,d)
-    y = -objective_fn(x_unit, ffpath = ffpath)  # maximize EI on negative loss
-    train_x = x_unit.clone()
-    train_y = y.clone()
+    if warm_start is not None:
+        train_x, train_y = warm_start
+        train_x = train_x.to(dtype=dtype)
+        train_y = train_y.to(dtype=dtype)
+        if train_x.ndim == 1:
+            train_x = train_x.unsqueeze(0)
+        if train_y.ndim == 1:
+            train_y = train_y.unsqueeze(-1)
+        if train_x.shape[0] != train_y.shape[0]:
+            raise ValueError("warm_start: train_x and train_y must have the same leading size")
+        if train_y.shape[-1] != 1:
+            train_y = train_y.reshape(train_x.shape[0], 1)
+        history = [-float(train_y[i, 0].item()) for i in range(train_x.shape[0])]
+    else:
+        # Initial design (1 point at provided init)
+        x_unit = ps.init_unit().to(dtype).unsqueeze(0)  # (1,d)
+        y = -objective_fn(x_unit, ffpath = ffpath)  # maximize EI on negative loss
+        train_x = x_unit.clone()
+        train_y = y.clone()
 
-    history = [-float(y.item())]  # store the actual loss
+        history = [-float(y.item())]  # store the actual loss
 
     from botorch.models import SingleTaskGP
     from botorch.fit import fit_gpytorch_mll
