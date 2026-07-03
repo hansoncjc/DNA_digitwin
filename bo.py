@@ -1227,6 +1227,7 @@ def run_bo(
     dtype = torch.float64
 
     from botorch.models import SingleTaskGP
+    from botorch.models.transforms.outcome import Standardize
     from botorch.fit import fit_gpytorch_mll
     from botorch.acquisition.logei import qLogExpectedImprovement
     from botorch.optim import optimize_acqf
@@ -1244,7 +1245,13 @@ def run_bo(
             return None
 
     def _optimize_candidate(train_x, train_y):
-        gp = SingleTaskGP(train_x, train_y)
+        # Raw train_y (e.g. -total_loss) is on an arbitrary scale (mean ~ -14,
+        # std ~ 1 in this run), which trips BoTorch's InputDataWarning on every
+        # refit and can hurt GP hyperparameter fitting. Standardize(m=1)
+        # z-scores the targets internally (and un-standardizes the posterior
+        # automatically), silencing the warning and improving numerical
+        # conditioning.
+        gp = SingleTaskGP(train_x, train_y, outcome_transform=Standardize(m=1))
         mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
         fit_gpytorch_mll(mll)
         acq = qLogExpectedImprovement(model=gp, best_f=train_y.max())
