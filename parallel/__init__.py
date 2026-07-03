@@ -8,6 +8,8 @@ from .submit_parallel import (  # noqa: F401
     Job,
     LauncherConfig,
     submit_jobs,
+    submit_jobs_with_retry,
+    clear_job_flags,
     prepare_jobs,
     submit_all,
     poll_until_done,

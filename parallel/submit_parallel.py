@@ -99,6 +99,16 @@ class LauncherConfig:
 # Script + config generation
 # ---------------------------------------------------------------------------
 
+def _bash_dquote(s: str) -> str:
+    """Double-quote a string for safe use in bash / #SBATCH directives."""
+    return '"' + (
+        s.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("$", "\\$")
+        .replace("`", "\\`")
+    ) + '"'
+
+
 def build_sbatch_script(job: Job, cfg: LauncherConfig) -> str:
     module_lines = "\n".join(f"module load {m}" for m in cfg.module_loads)
     venv_line    = f"source {cfg.venv_activate}" if cfg.venv_activate else ""
@@ -109,6 +119,10 @@ def build_sbatch_script(job: Job, cfg: LauncherConfig) -> str:
         if pp_parts else ""
     )
 
+    out_path = _bash_dquote(str(job.out_path))
+    cfg_path = _bash_dquote(str(job.config_path))
+    worker_path = _bash_dquote(str(WORKER_PATH))
+
     return f"""#!/bin/bash
 #SBATCH -J {job.name}
 #SBATCH -A {cfg.account}
@@ -116,8 +130,8 @@ def build_sbatch_script(job: Job, cfg: LauncherConfig) -> str:
 #SBATCH -G {cfg.gpus}
 #SBATCH --time={cfg.time}
 #SBATCH --mem={cfg.mem}
-#SBATCH -o {job.out_path}
-#SBATCH -e {job.out_path}
+#SBATCH -o {out_path}
+#SBATCH -e {out_path}
 
 set -euo pipefail
 
@@ -137,7 +151,7 @@ echo "python: $(which python3)"
 echo "PYTHONPATH: ${{PYTHONPATH:-<unset>}}"
 nvidia-smi --query-gpu=name,memory.total --format=csv || true
 
-python3 {WORKER_PATH} {job.config_path}
+python3 {worker_path} {cfg_path}
 EXIT_CODE=$?
 
 echo "=========================================="
@@ -416,6 +430,87 @@ def write_summary(jobs: List[Job], cfg: LauncherConfig) -> None:
             f"run time={t}"
         )
     print("===============================================\n")
+
+
+def clear_job_flags(sim_dir: Path) -> None:
+    """Remove worker terminal flags so a job can be retried in the same sim_dir."""
+    for name in ("DONE", "FAILED", "RUNNING"):
+        flag = sim_dir / name
+        if flag.exists():
+            flag.unlink()
+
+
+def submit_jobs_with_retry(
+    job_specs: Iterable[dict],
+    cfg: LauncherConfig,
+    *,
+    max_job_retries: int = 1,
+    clean: bool = True,
+    poll_interval: Optional[float] = None,
+    max_wait: Optional[float] = None,
+) -> List[Job]:
+    """
+    Submit jobs, then re-submit any that did not reach DONE up to ``max_job_retries``.
+
+    Retries use the same ``worker_config`` (same coefficients / sim_dir) but a
+    fresh sbatch under ``<run_dir>/retry_<n>/``.
+    """
+    specs = list(job_specs)
+    spec_by_ds = {str(s.get("ds_id", s["name"])): s for s in specs}
+
+    jobs = submit_jobs(
+        specs, cfg, clean=clean,
+        poll_interval=poll_interval, max_wait=max_wait,
+    )
+
+    for attempt in range(max_job_retries):
+        failed = [j for j in jobs if j.done_status != "DONE"]
+        if not failed:
+            return jobs
+
+        retry_specs = []
+        for job in failed:
+            clear_job_flags(job.sim_dir)
+            base_spec = spec_by_ds.get(job.ds_id)
+            if base_spec is None:
+                continue
+            retry_specs.append({
+                **base_spec,
+                "name": f"{base_spec['name']}_r{attempt + 1}",
+            })
+
+        if not retry_specs:
+            return jobs
+
+        print(
+            f"[launcher] retry {attempt + 1}/{max_job_retries}: "
+            f"resubmitting {len(retry_specs)} failed job(s)"
+        )
+        retry_cfg = LauncherConfig(
+            run_dir=cfg.run_dir / f"retry_{attempt + 1}",
+            partition=cfg.partition,
+            account=cfg.account,
+            gpus=cfg.gpus,
+            mem=cfg.mem,
+            time=cfg.time,
+            module_loads=list(cfg.module_loads),
+            venv_activate=cfg.venv_activate,
+            code_root=cfg.code_root,
+            mc_dfm_root=cfg.mc_dfm_root,
+            poll_interval=cfg.poll_interval,
+            max_wait=cfg.max_wait,
+        )
+        retry_jobs = submit_jobs(
+            retry_specs, retry_cfg, clean=True,
+            poll_interval=poll_interval, max_wait=max_wait,
+        )
+
+        by_ds = {j.ds_id: j for j in jobs}
+        for rj in retry_jobs:
+            by_ds[rj.ds_id] = rj
+        jobs = [by_ds[str(s.get("ds_id", s["name"]))] for s in specs]
+
+    return jobs
 
 
 # ---------------------------------------------------------------------------

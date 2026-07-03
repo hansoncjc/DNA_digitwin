@@ -47,13 +47,21 @@ import json
 import numpy as np
 import torch
 from pathlib import Path
-from torch import tensor
 from typing import Dict, List, Tuple, Any, Optional
 import csv
 
 from simulation import run_simulation
 from scattering import convert_to_SAXS, convert_to_SAXS_fft, extract_exp_sq
 from metrics import compare_to_exp, compare_to_exp_saxsfft
+
+# ------------------------- Evaluation failures ------------------------- #
+
+class EvaluationFailed(Exception):
+    """Raised when a BO objective evaluation fails after GPU job retry."""
+
+
+DEFAULT_MAX_JOB_RETRIES = 1
+DEFAULT_MAX_ACQ_ATTEMPTS = 5
 
 # ------------------------- Modes & param types ------------------------- #
 
@@ -289,6 +297,62 @@ def _write_iteration_block(filepath: str, iteration: int, total_loss: float, rec
         writer.writerow([])
 
 
+def _write_failed_iteration_block(
+    filepath: str,
+    iteration: int,
+    records: List[Dict[str, Any]],
+    reason: str = "",
+):
+    """Append a trajectory block for a failed evaluation (not used by the GP)."""
+    write_header = not os.path.exists(filepath)
+    with open(filepath, "a", newline="") as f:
+        writer = csv.writer(f)
+        if write_header:
+            writer.writerow([
+                "iteration", "dataset_id", "loss", "k", "alpha", "A", "mu_c",
+                "mu_b", "sigma_c", "sigma_b", "K_s", "density", "n", "m", "r0", "U0",
+            ])
+        writer.writerow([f"# Iteration {iteration}", "EVALUATION", "FAILED", reason])
+        if records:
+            writer.writerows([
+                [r.get(c, "") for c in (
+                    "iteration", "dataset_id", "loss", "k", "alpha", "A", "mu_c",
+                    "mu_b", "sigma_c", "sigma_b", "K_s", "density", "n", "m", "r0", "U0",
+                )]
+                for r in records
+            ])
+
+
+def _failed_trajectory_record(eval_id, ds_id, G, plan=None, reason="FAILED"):
+    rec = {
+        "iteration": eval_id,
+        "dataset_id": ds_id,
+        "loss": reason,
+        "k": G.get("k", ""),
+        "alpha": G.get("alpha", ""),
+        "A": G.get("A", ""),
+        "mu_c": G.get("mu_c", ""),
+        "mu_b": G.get("mu_b", ""),
+        "sigma_c": G.get("sigma_c", ""),
+        "sigma_b": G.get("sigma_b", ""),
+        "K_s": G.get("K_s", ""),
+        "density": "ERROR",
+        "n": "ERROR",
+        "m": "ERROR",
+        "r0": "ERROR",
+        "U0": "ERROR",
+    }
+    if plan is not None:
+        rec.update({
+            "density": float(plan["density"]),
+            "n": float(plan["n"]),
+            "m": float(plan["m"]),
+            "r0": float(plan["r0"]),
+            "U0": float(plan["U0"]),
+        })
+    return rec
+
+
 def _run_objective_parallel(
     datasets: List[Any],
     eval_id: int,
@@ -315,10 +379,11 @@ def _run_objective_parallel(
     the caller can write the trajectory CSV block exactly as in the
     sequential path.
     """
-    from parallel import LauncherConfig, submit_jobs  # lazy import
+    from parallel import LauncherConfig, submit_jobs_with_retry  # lazy import
 
     total_loss = 0.0
     plans: List[Dict[str, Any]] = []
+    phase_a_failed: List[str] = []
 
     # Phase A: resolve per-dataset sim params with the same precedence as
     # the sequential path; write per-dataset `sim_params_<id>.csv`.
@@ -432,31 +497,24 @@ def _run_objective_parallel(
                 "U0":       U0,
             })
         except Exception as e:
-            total_loss += 1e9
+            phase_a_failed.append(ds.id)
             try:
                 os.makedirs(out_root, exist_ok=True)
                 with open(os.path.join(out_root, f"error_{ds.id}.txt"), "a") as fh:
                     fh.write(str(e) + "\n")
             except Exception:
                 pass
-            iteration_data.append({
-                "iteration": eval_id,
-                "dataset_id": ds.id,
-                "loss": 1e9,
-                "k": G.get("k", ""),
-                "alpha": G.get("alpha", ""),
-                "A": G.get("A", ""),
-                "mu_c": G.get("mu_c", ""),
-                "mu_b": G.get("mu_b", ""),
-                "sigma_c": G.get("sigma_c", ""),
-                "sigma_b": G.get("sigma_b", ""),
-                "K_s": G.get("K_s", ""),
-                "density": "ERROR",
-                "n": "ERROR",
-                "m": "ERROR",
-                "r0": "ERROR",
-                "U0": "ERROR",
-            })
+            iteration_data.append(_failed_trajectory_record(eval_id, ds.id, G))
+
+    if phase_a_failed:
+        reason = f"param resolution failed for {phase_a_failed}"
+        _write_failed_iteration_block(
+            os.path.join(out_root, "bo_trajectory.csv"),
+            eval_id,
+            iteration_data,
+            reason=reason,
+        )
+        raise EvaluationFailed(reason)
 
     # Phase B: build job specs for OK plans and submit them all.
     job_specs = []
@@ -513,25 +571,37 @@ def _run_objective_parallel(
             poll_interval=float(pcfg.get("poll_interval", 15.0)),
             max_wait     =float(pcfg.get("max_wait", 4 * 3600)),
         )
-        finished = submit_jobs(job_specs, cfg)
+        finished = submit_jobs_with_retry(
+            job_specs,
+            cfg,
+            max_job_retries=int(pcfg.get("max_job_retries", DEFAULT_MAX_JOB_RETRIES)),
+            clean=True,
+            poll_interval=pcfg.get("poll_interval"),
+            max_wait=pcfg.get("max_wait"),
+        )
         finished_by_ds = {j.ds_id: j for j in finished}
 
+    eval_failed = False
     # Phase C: collect per-dataset loss; emit trajectory records.
     for plan in plans:
         ds  = plan["ds"]
         job = finished_by_ds.get(ds.id)
         if job is not None and job.done_status == "DONE":
-            loss = 1e9
+            loss = None
             try:
                 done_data = json.loads((Path(job.sim_dir) / "DONE").read_text())
                 loss = float(done_data["loss"])
             except Exception as e:
+                eval_failed = True
                 try:
                     with open(os.path.join(out_root, f"error_{ds.id}.txt"), "a") as fh:
                         fh.write(f"DONE file unreadable: {e}\n")
                 except Exception:
                     pass
-                loss = 1e9
+                iteration_data.append(
+                    _failed_trajectory_record(eval_id, ds.id, G, plan=plan)
+                )
+                continue
 
             total_loss += ds.weight * loss
             iteration_data.append({
@@ -553,31 +623,26 @@ def _run_objective_parallel(
                 "U0":      float(plan["U0"]),
             })
         else:
-            total_loss += 1e9
+            eval_failed = True
             reason = f"parallel job status={getattr(job, 'done_status', None)}"
             try:
                 with open(os.path.join(out_root, f"error_{ds.id}.txt"), "a") as fh:
                     fh.write(reason + "\n")
             except Exception:
                 pass
-            iteration_data.append({
-                "iteration": eval_id,
-                "dataset_id": ds.id,
-                "loss": 1e9,
-                "k": G.get("k", ""),
-                "alpha": G.get("alpha", ""),
-                "A": G.get("A", ""),
-                "mu_c": G.get("mu_c", ""),
-                "mu_b": G.get("mu_b", ""),
-                "sigma_c": G.get("sigma_c", ""),
-                "sigma_b": G.get("sigma_b", ""),
-                "K_s": G.get("K_s", ""),
-                "density": "ERROR",
-                "n": "ERROR",
-                "m": "ERROR",
-                "r0": "ERROR",
-                "U0": "ERROR",
-            })
+            iteration_data.append(
+                _failed_trajectory_record(eval_id, ds.id, G, plan=plan)
+            )
+
+    if eval_failed:
+        reason = f"one or more parallel jobs failed for eval_id={eval_id}"
+        _write_failed_iteration_block(
+            os.path.join(out_root, "bo_trajectory.csv"),
+            eval_id,
+            iteration_data,
+            reason=reason,
+        )
+        raise EvaluationFailed(reason)
 
     return total_loss
 
@@ -635,7 +700,9 @@ def make_global_objective(
     "compare_q_range":
         q-range used for the final saxsfft loss comparison. This is distinct
         from q_min/q_max used when extracting experimental S(q) from intensity.
-    Exceptions during any dataset evaluation yield a large penalty to keep BO stable.
+    Failed evaluations (after GPU job retry) raise ``EvaluationFailed``; they are
+    logged to ``bo_trajectory.csv`` but not fed to the GP. ``run_bo`` re-acquires
+    a new candidate instead.
     """
     sim_defaults = {} if sim_defaults is None else dict(sim_defaults)
 
@@ -643,6 +710,7 @@ def make_global_objective(
     _validate_param_mode(ps, mode)
 
     def objective(x_unit: torch.Tensor, ffpath: str) -> torch.Tensor:
+        objective._eval_failed = False
         # assign a unique id to this BO evaluation
         # ffpath: path to polydispersed sphere formfactor
         if not hasattr(objective, "_eval_id"):
@@ -668,23 +736,28 @@ def make_global_objective(
         # concurrently on separate GPUs via DNA_digitwin/parallel/. The
         # trajectory CSV block below is shared with the sequential path.
         if parallel:
-            total_loss = _run_objective_parallel(
-                datasets=datasets,
-                eval_id=eval_id,
-                G=G,
-                L=L,
-                out_root=out_root,
-                ffpath=ffpath,
-                trim_tail=trim_tail,
-                sim_defaults=sim_defaults,
-                mode=mode,
-                scattering_method=scattering_method,
-                scattering_kwargs=scattering_kwargs,
-                metric=metric,
-                compare_q_range=compare_q_range,
-                parallel_cfg=parallel_cfg or {},
-                iteration_data=objective._iteration_data,
-            )
+            try:
+                total_loss = _run_objective_parallel(
+                    datasets=datasets,
+                    eval_id=eval_id,
+                    G=G,
+                    L=L,
+                    out_root=out_root,
+                    ffpath=ffpath,
+                    trim_tail=trim_tail,
+                    sim_defaults=sim_defaults,
+                    mode=mode,
+                    scattering_method=scattering_method,
+                    scattering_kwargs=scattering_kwargs,
+                    metric=metric,
+                    compare_q_range=compare_q_range,
+                    parallel_cfg=parallel_cfg or {},
+                    iteration_data=objective._iteration_data,
+                )
+            except EvaluationFailed as exc:
+                objective._eval_failed = True
+                print(f"[bo] evaluation {eval_id} failed: {exc}")
+                raise
 
             if len(objective._iteration_data) > 0:
                 trajectory_path = os.path.join(out_root, "bo_trajectory.csv")
@@ -699,6 +772,7 @@ def make_global_objective(
             return torch.tensor([[total_loss]], dtype=torch.float64)
 
         # --- Sequential path (original behavior, unchanged) ---
+        eval_failed = False
         for ds in datasets:
             try:
                 # ---- Shared n, m (always "sim" style) ----
@@ -877,33 +951,28 @@ def make_global_objective(
                 objective._iteration_data.append(trajectory_record)
 
             except Exception as e:
-                total_loss += 1e9
+                eval_failed = True
                 try:
                     with open(os.path.join(out_root, f"error_{ds.id}.txt"), "a") as fh:
                         fh.write(str(e) + "\n")
                 except Exception:
                     pass
 
-                # Still track failed dataset in trajectory with error marker
-                trajectory_record = {
-                    "iteration": eval_id,
-                    "dataset_id": ds.id,
-                    "loss": 1e9,
-                    "k": G.get("k", ""),
-                    "alpha": G.get("alpha", ""),
-                    "A": G.get("A", ""),
-                    "mu_c": G.get("mu_c", ""),
-                    "mu_b": G.get("mu_b", ""),
-                    "sigma_c": G.get("sigma_c", ""),
-                    "sigma_b": G.get("sigma_b", ""),
-                    "K_s": G.get("K_s", ""),
-                    "density": "ERROR",
-                    "n": "ERROR",
-                    "m": "ERROR",
-                    "r0": "ERROR",
-                    "U0": "ERROR",
-                }
+                trajectory_record = _failed_trajectory_record(eval_id, ds.id, G)
                 objective._iteration_data.append(trajectory_record)
+
+        if eval_failed:
+            reason = f"sequential evaluation failed for eval_id={eval_id}"
+            if len(objective._iteration_data) > 0:
+                _write_failed_iteration_block(
+                    os.path.join(out_root, "bo_trajectory.csv"),
+                    eval_id,
+                    objective._iteration_data,
+                    reason=reason,
+                )
+                objective._iteration_data = []
+            objective._eval_failed = True
+            raise EvaluationFailed(reason)
 
         # Write iteration block to global trajectory CSV
         if len(objective._iteration_data) > 0:
@@ -920,7 +989,198 @@ def make_global_objective(
         # Return as a 1-element tensor (BoTorch expects a tensor)
         return torch.tensor([[total_loss]], dtype=torch.float64)
 
+    objective._eval_failed = False
     return objective
+
+
+# ------------------------- Warm start from trajectory ------------------------- #
+
+def remaining_bo_iters(n_iters: int, n_successful: int) -> int:
+    """
+    Acquisition steps left when resuming BO.
+
+    Cold start runs one initial eval plus ``n_iters`` acquisitions (``n_iters + 1``
+    evaluations total). ``n_successful`` is the number of successful evaluations
+    already recorded (including the initial point).
+    """
+    if n_successful <= 0:
+        return n_iters
+    return max(0, n_iters - (n_successful - 1))
+
+
+def load_warm_start_from_trajectory(
+    trajectory_path: os.PathLike,
+    ps: ParamSpace,
+    *,
+    loss_penalty_threshold: float = 1e8,
+    m_rel: bool = False,
+) -> Optional[Tuple[torch.Tensor, torch.Tensor, int]]:
+    """
+    Build ``run_bo`` warm-start tensors from ``bo_trajectory.csv``.
+
+    Returns ``(train_x, train_y, next_eval_id)`` or ``None`` if no successful
+    iterations are found. Failed blocks (penalty loss, ERROR rows, EVALUATION
+    FAILED headers) are skipped for the GP but still advance ``next_eval_id`` so
+    eval folder indices do not collide with prior attempts.
+
+    Parameters
+    ----------
+    m_rel
+        If True, reconstruct ``m_rel`` from trajectory ``m`` and ``n`` via
+        ``m_rel = (m - 3) / (n - 4)`` (``ParamSpaceConstrainedNM`` convention).
+    """
+    path = Path(trajectory_path)
+    if not path.is_file():
+        return None
+
+    successful: List[Tuple[int, float, Dict[str, str]]] = []
+    max_eval_id = -1
+    pending_iter: Optional[int] = None
+    pending_loss: Optional[float] = None
+    header: Optional[Dict[str, int]] = None
+
+    with open(path, newline="") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if not row:
+                pending_iter = None
+                pending_loss = None
+                header = None
+                continue
+
+            if row[0].startswith("# Iteration"):
+                try:
+                    iter_num = int(row[0].split()[-1])
+                except ValueError:
+                    pending_iter = None
+                    pending_loss = None
+                    continue
+
+                max_eval_id = max(max_eval_id, iter_num)
+                pending_iter = None
+                pending_loss = None
+
+                if len(row) >= 3 and row[1] == "total_loss":
+                    try:
+                        total_loss = float(row[2])
+                    except ValueError:
+                        continue
+                    if total_loss >= loss_penalty_threshold:
+                        continue
+                    pending_iter = iter_num
+                    pending_loss = total_loss
+                continue
+
+            if row[0] == "iteration" and len(row) > 1 and row[1] == "dataset_id":
+                header = {name: idx for idx, name in enumerate(row)}
+                continue
+
+            if pending_iter is None or pending_loss is None or header is None:
+                continue
+
+            if str(row[0]) != str(pending_iter):
+                continue
+
+            rec = {name: row[idx] for name, idx in header.items() if idx < len(row)}
+            if rec.get("loss") in ("ERROR", "FAILED") or rec.get("n") == "ERROR":
+                pending_iter = None
+                pending_loss = None
+                continue
+
+            successful.append((pending_iter, pending_loss, rec))
+            pending_iter = None
+            pending_loss = None
+
+    if not successful:
+        return None
+
+    successful.sort(key=lambda item: item[0])
+    x_rows: List[torch.Tensor] = []
+    y_rows: List[float] = []
+
+    for _iter_num, total_loss, rec in successful:
+        n_val = float(rec["n"])
+        m_val = float(rec["m"])
+        phys_vals: List[float] = []
+        for name in ps._names:
+            if name == "m_rel":
+                if not m_rel:
+                    raise ValueError(
+                        "ParamSpace uses m_rel but load_warm_start_from_trajectory "
+                        "was called with m_rel=False"
+                    )
+                span = n_val - 4.0
+                if span <= 0.0:
+                    raise ValueError(
+                        f"Cannot reconstruct m_rel from trajectory n={n_val}"
+                    )
+                phys_vals.append((m_val - 3.0) / span)
+            else:
+                phys_vals.append(float(rec[name]))
+
+        x_phys = torch.tensor(phys_vals, dtype=torch.float64)
+        x_rows.append(ps.phys_to_unit(x_phys))
+        y_rows.append(-float(total_loss))
+
+    train_x = torch.stack(x_rows)
+    train_y = torch.tensor(y_rows, dtype=torch.float64).reshape(-1, 1)
+    next_eval_id = max_eval_id + 1
+    return train_x, train_y, next_eval_id
+
+
+def run_bo_resumable(
+    objective_fn,
+    ps: ParamSpace,
+    ffpath: str,
+    out_root: str,
+    n_iters: int = 20,
+    seed: int = 0,
+    *,
+    m_rel: bool = False,
+    max_acq_attempts: int = DEFAULT_MAX_ACQ_ATTEMPTS,
+) -> Tuple[torch.Tensor, List[float]]:
+    """
+    Run ``run_bo``, resuming from ``<out_root>/bo_trajectory.csv`` when present.
+
+    Sets ``objective_fn._eval_id`` so the next eval folder index does not collide
+    with prior attempts (including failed iterations).
+    """
+    trajectory_path = os.path.join(out_root, "bo_trajectory.csv")
+    warm = load_warm_start_from_trajectory(trajectory_path, ps, m_rel=m_rel)
+
+    warm_start = None
+    remaining = n_iters
+    if warm is not None:
+        train_x, train_y, next_eval_id = warm
+        warm_start = (train_x, train_y)
+        objective_fn._eval_id = next_eval_id
+        remaining = remaining_bo_iters(n_iters, train_x.shape[0])
+        print(
+            f"[warm start] loaded {train_x.shape[0]} successful eval(s) from "
+            f"{trajectory_path}"
+        )
+        print(
+            f"[warm start] next eval_id={next_eval_id}, "
+            f"remaining BO iterations={remaining}"
+        )
+
+        if remaining == 0:
+            y = train_y.squeeze(-1).detach().cpu().numpy()
+            history = [-float(v) for v in y]
+            best_idx = int(np.argmin(history))
+            best_x_phys = ps.unit_to_phys(train_x[best_idx])
+            print("[warm start] target iteration count already reached; skipping run_bo")
+            return best_x_phys, history
+
+    return run_bo(
+        objective_fn=objective_fn,
+        ps=ps,
+        ffpath=ffpath,
+        n_iters=remaining,
+        seed=seed,
+        warm_start=warm_start,
+        max_acq_attempts=max_acq_attempts,
+    )
 
 
 # ------------------------- BO runner ------------------------- #
@@ -932,6 +1192,7 @@ def run_bo(
     n_iters: int = 20,
     seed: int = 0,
     warm_start: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    max_acq_attempts: int = DEFAULT_MAX_ACQ_ATTEMPTS,
 ):
     """
     Run a BoTorch loop over the parameter space defined by ParamSpace.
@@ -951,13 +1212,50 @@ def run_bo(
         ``objective_fn``'s evaluation counter (e.g. ``objective._eval_id``) with
         ``n`` so the next Slurm/eval folder index does not collide.
 
+    max_acq_attempts
+        When a candidate evaluation fails after GPU job retry, re-run acquisition
+        and try a new candidate up to this many times per completed iteration.
+        Failed evaluations are not added to the GP.
+
     Notes
     -----
     - Uses SingleTaskGP + qLogExpectedImprovement (maximize EI on -loss).
     - Works in UNIT cube; ParamSpace handles scaling to physical.
+    - Only successful evaluations count toward ``n_iters``.
     """
     torch.manual_seed(seed)
     dtype = torch.float64
+
+    from botorch.models import SingleTaskGP
+    from botorch.fit import fit_gpytorch_mll
+    from botorch.acquisition.logei import qLogExpectedImprovement
+    from botorch.optim import optimize_acqf
+    from gpytorch.mlls.exact_marginal_log_likelihood import ExactMarginalLogLikelihood
+
+    lb, ub = ps.bounds_unit()
+
+    def _evaluate_unit(x_unit: torch.Tensor) -> Optional[torch.Tensor]:
+        """Return -loss tensor on success, or None if evaluation failed."""
+        if x_unit.ndim == 1:
+            x_unit = x_unit.unsqueeze(0)
+        try:
+            return -objective_fn(x_unit, ffpath=ffpath)
+        except EvaluationFailed:
+            return None
+
+    def _optimize_candidate(train_x, train_y):
+        gp = SingleTaskGP(train_x, train_y)
+        mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+        fit_gpytorch_mll(mll)
+        acq = qLogExpectedImprovement(model=gp, best_f=train_y.max())
+        cand, _ = optimize_acqf(
+            acq_function=acq,
+            bounds=torch.stack([lb, ub]).to(dtype),
+            q=1,
+            num_restarts=5,
+            raw_samples=64,
+        )
+        return cand
 
     if warm_start is not None:
         train_x, train_y = warm_start
@@ -973,46 +1271,49 @@ def run_bo(
             train_y = train_y.reshape(train_x.shape[0], 1)
         history = [-float(train_y[i, 0].item()) for i in range(train_x.shape[0])]
     else:
-        # Initial design (1 point at provided init)
-        x_unit = ps.init_unit().to(dtype).unsqueeze(0)  # (1,d)
-        y = -objective_fn(x_unit, ffpath = ffpath)  # maximize EI on negative loss
+        x_unit = ps.init_unit().to(dtype).unsqueeze(0)
+        y = None
+        for attempt in range(max_acq_attempts):
+            if attempt > 0:
+                print(
+                    f"[bo] initial evaluation failed; retry {attempt + 1}/{max_acq_attempts}"
+                )
+            y = _evaluate_unit(x_unit)
+            if y is not None:
+                break
+        if y is None:
+            raise RuntimeError(
+                f"Initial evaluation failed after {max_acq_attempts} attempt(s)"
+            )
         train_x = x_unit.clone()
         train_y = y.clone()
+        history = [-float(y.item())]
 
-        history = [-float(y.item())]  # store the actual loss
+    completed = 0
+    while completed < n_iters:
+        cand = None
+        y_new = None
+        for attempt in range(max_acq_attempts):
+            if attempt > 0:
+                print(
+                    f"[bo] iteration {completed + 1}/{n_iters}: "
+                    f"re-acquiring after failure ({attempt + 1}/{max_acq_attempts})"
+                )
+            cand = _optimize_candidate(train_x, train_y)
+            y_new = _evaluate_unit(cand)
+            if y_new is not None:
+                break
 
-    from botorch.models import SingleTaskGP
-    from botorch.fit import fit_gpytorch_mll
-    from botorch.acquisition.logei import qLogExpectedImprovement
-    from botorch.optim import optimize_acqf
-    from gpytorch.mlls.exact_marginal_log_likelihood import ExactMarginalLogLikelihood
+        if y_new is None or cand is None:
+            raise RuntimeError(
+                f"BO stopped at {completed}/{n_iters} successful iterations: "
+                f"no successful evaluation after {max_acq_attempts} acquisition attempt(s)"
+            )
 
-    lb, ub = ps.bounds_unit()
-
-    for _ in range(n_iters):
-        # Fit GP
-        gp = SingleTaskGP(train_x, train_y)
-        mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
-        fit_gpytorch_mll(mll)
-
-        # Acquisition
-        acq = qLogExpectedImprovement(model=gp, best_f=train_y.max())
-
-        # Optimize acquisition over unit cube
-        cand, _ = optimize_acqf(
-            acq_function=acq,
-            bounds=torch.stack([lb, ub]).to(dtype),
-            q=1,
-            num_restarts=5,
-            raw_samples=64,
-        )
-
-        # Evaluate objective at candidate
-        y_new = -objective_fn(cand, ffpath = ffpath)  # negative loss for maximization
         train_x = torch.cat([train_x, cand], dim=0)
         train_y = torch.cat([train_y, y_new], dim=0)
-
         history.append(-float(y_new.item()))
+        completed += 1
 
     # Best observed (lowest loss)
     best_idx = int(torch.argmax(train_y))  # since train_y = -loss
