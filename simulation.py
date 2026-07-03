@@ -236,7 +236,8 @@ def run_simulation(
     init_offset: float = 0.1,
     device: str = "gpu",   # "cpu" also works on HOOMD 2.x
     seed: int = 42,
-    plot: bool = True
+    plot: bool = True,
+    rmax: float | None = None,
 ) -> dict:
     """
     Run a HOOMD simulation of N spheres with a selectable pair potential.
@@ -244,7 +245,8 @@ def run_simulation(
     Parameters
     ----------
     density : float
-        Number density (N / box_volume).
+        Number density N/V in units of particles/σ³ (particle diameter σ=1).
+        This is **not** volume fraction φ; φ = (π/6) × density for unit spheres.
     U_0 : float
         Energy scale / well depth.
     r0 : float
@@ -276,6 +278,9 @@ def run_simulation(
         Langevin thermostat seed.
     plot : bool
         Controls whether potential and energy plots are generated.
+    rmax : float, optional
+        If set, use this value as the pair-potential table cutoff instead of
+        the analytically derived rmax from ``_compute_table_bounds``.
 
     Returns
     -------
@@ -300,20 +305,31 @@ def run_simulation(
     os.makedirs(outdir, exist_ok=True)
 
     # --- Analytically derived table bounds ---
-    rmin, rmax = _compute_table_bounds(
+    rmin, rmax_auto = _compute_table_bounds(
         potential, U_0, n, m, r0, delta,
         t_tol_lj=t_tol_lj, t_tol_mie=t_tol_mie
     )
+    if rmax is not None:
+        rmax = float(rmax)
+        if rmax <= rmin:
+            raise ValueError(
+                f"Fixed rmax ({rmax:.4f}) must exceed rmin ({rmin:.4f})."
+            )
+    else:
+        rmax = rmax_auto
     print(f"Table bounds: rmin={rmin:.4f}, rmax={rmax:.4f} "
-          f"(t_tol_lj={t_tol_lj}, t_tol_mie={t_tol_mie})")
+          f"(t_tol_lj={t_tol_lj}, t_tol_mie={t_tol_mie}"
+          f"{', rmax fixed' if rmax != rmax_auto else ''})"
+          )
 
     # --- HOOMD context ---
     mode_flag = "--mode=gpu" if device == "gpu" else "--mode=cpu"
     hoomd.context.initialize(mode_flag)
 
     # --- Derived params & box ---
+    # density is number density ρ = N/V in particles/σ³ (σ = particle diameter).
     volume = N / density
-    L = volume ** (1.0 / 3.0)  # cubic box from density.
+    L = volume ** (1.0 / 3.0)  # cubic box side length
 
     # --- Generate non-overlapping initial positions (same strategy) ---
     def generate_positions(N, L, rmin, offset=0.1):
@@ -402,8 +418,8 @@ def run_simulation(
     )
 
     # --- Run ---
-    print(f"Running {steps} steps with {N} spheres at density {density:.3f} "
-          f"using potential='{potential}'")
+    print(f"Running {steps} steps with {N} spheres at number density "
+          f"{density:.6g} particles/σ³ using potential='{potential}'")
     hoomd.run(steps)
 
     # --- Generate Potential Energy Plot ---
