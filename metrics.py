@@ -49,9 +49,10 @@ def compare_saxs_curves(exp_data, sim_data, q_range=None, scale_intensity=True, 
     Steps
     -----
     1) Determine the common overlap in q (optionally further restricted by q_range).
-    2) Resample the denser curve onto the sparser one via linear interp1d.
+    2) Resample both curves onto a shared physical q-grid via linear interp1d.
     3) Scale the simulated intensity by the ratio of tail means ([-6:-1]).
-    4) Compute Amplitude–Phase Distance (AP) on log10 intensities.
+    4) Compute Amplitude–Phase Distance (AP) on log10 intensities using a
+       normalized parameter domain [0, 1].
 
     Parameters
     ----------
@@ -71,7 +72,8 @@ def compare_saxs_curves(exp_data, sim_data, q_range=None, scale_intensity=True, 
     d_ap : float
         AP distance (da + dp) between log10(I_exp) and log10(I_sim_scaled).
     q_ref : (K,) ndarray
-        q-grid used for the comparison (the shorter curve after cropping).
+        Physical q-grid used for interpolation, comparison output, and plotting.
+        It is distinct from APDist's normalized parameter domain.
     I_exp_resampled : (K,) ndarray
         Experimental intensity on q_ref (resampled if needed).
     I_sim_scaled : (K,) ndarray
@@ -131,9 +133,10 @@ def compare_saxs_curves(exp_data, sim_data, q_range=None, scale_intensity=True, 
     log_I_sim = np.log10(I_sim_scaled)
     
     if metric == 'apdist':
-        # AP distance on log10 intensities (same as original)
-        q_AP = np.linspace(q_ref[0], q_ref[-1], len(q_ref))
-        da, dp = AmplitudePhaseDistance(q_AP, log_I_exp, log_I_sim)
+        # q_ref remains the physical q-grid. APDist requires its independent
+        # function parameter domain to be mapped to [0, 1].
+        t_ap = np.linspace(0.0, 1.0, len(q_ref))
+        da, dp = AmplitudePhaseDistance(t_ap, log_I_exp, log_I_sim)
         distance = da + dp
     elif metric == 'mse':
         # Mean Squared Error on log10 intensities
