@@ -113,6 +113,21 @@ def build_sbatch_script(job: Job, cfg: LauncherConfig) -> str:
     module_lines = "\n".join(f"module load {m}" for m in cfg.module_loads)
     venv_line    = f"source {cfg.venv_activate}" if cfg.venv_activate else ""
 
+    # Fail fast (with a clear message) if a cuda module was requested but
+    # `module load` didn't actually add a cuda dir to LD_LIBRARY_PATH -- e.g.
+    # if the module is missing/broken on this node -- instead of limping on
+    # to a confusing `ImportError: libcufft.so...` deep inside hoomd.
+    has_cuda_module = any("cuda" in m.lower() for m in cfg.module_loads)
+    cuda_check_lines = (
+        '\nif [[ "${LD_LIBRARY_PATH:-}" != *cuda* ]]; then\n'
+        '    echo "FATAL: cuda module load did not add a cuda dir to '
+        'LD_LIBRARY_PATH (got: ${LD_LIBRARY_PATH:-<empty>}). '
+        'Module system may be broken on this node." >&2\n'
+        "    exit 97\n"
+        "fi"
+        if has_cuda_module else ""
+    )
+
     pp_parts = [p for p in (cfg.code_root, cfg.mc_dfm_root) if p]
     pythonpath_line = (
         f'export PYTHONPATH="{":".join(pp_parts)}:${{PYTHONPATH:-}}"'
@@ -133,7 +148,7 @@ def build_sbatch_script(job: Job, cfg: LauncherConfig) -> str:
 #SBATCH -o {out_path}
 #SBATCH -e {out_path}
 
-set -euo pipefail
+set -eo pipefail
 
 echo "=========================================="
 echo "Job:       {job.name}"
@@ -143,7 +158,19 @@ echo "Start:     $(date)"
 echo "Config:    {job.config_path}"
 echo "=========================================="
 
+# Some cluster nodes start batch jobs with vars like LD_LIBRARY_PATH /
+# LD_PRELOAD completely unset. Lmod's own bash init script reads several
+# such vars without a `:-` fallback; under `set -u` ("nounset") this throws
+# "unbound variable" inside a failed command substitution that `eval`s to
+# an empty string, so `module load ...` silently becomes a no-op (exits 0
+# but never touches LD_LIBRARY_PATH). Since Lmod isn't nounset-safe, disable
+# `set -u` only around module loads rather than pre-defining every var it
+# might touch.
+set +u
 {module_lines}
+set -u
+echo "LD_LIBRARY_PATH after module load: ${{LD_LIBRARY_PATH:-<unset>}}"
+{cuda_check_lines}
 {venv_line}
 {pythonpath_line}
 
