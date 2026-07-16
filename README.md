@@ -9,10 +9,9 @@ ties them together with a small `Dataset` abstraction that carries
 inputs to simulation parameters. The BO loop can be told to either:
 
 - **`mode="map"`** – optimize *mapping coefficients* (`alpha`, `k`, `A`,
-  `mu_c`, `mu_b`, `sigma_c`, `sigma_b`, `K_s`) that translate
-  experimental inputs (`C_NaCl`, `C_chol`, `b_bridge`, `L_bridge`, …)
-  into simulation inputs (`density`, `r0`, `U0`), shared across many
-  experimental conditions, or
+  `mu_c`, `sigma_c`, `K_s`) that translate experimental inputs
+  (`C_NaCl`, `C_chol`, `L_bridge`, …) into simulation inputs
+  (`density`, `r0`, `U0`), shared across many experimental conditions, or
 - **`mode="sim"`** – optimize the simulation inputs themselves
   (`density`, `r0`, `U0`, `n`, `m`) directly, either globally or
   per-dataset.
@@ -89,19 +88,21 @@ record and exposes the **mapping equations** that connect them:
   the global `alpha`.
 - `r0_sigma(k, LC_ss=0.63, LC_ds=0.34)` → `r0` in units of σ:
   `r0/σ = 1 + k · ( 2(t_b + LC_ss·L_poly) + LC_ds·(2·L_HBP + L_bridge) ) / d_si`
-- `U0_from_gaussian(A, mu_c, mu_b, sigma_c, sigma_b, K_s)` → separable
-  Gaussian in `(C_chol, b_bridge)` multiplied by a **monotonic linear
-  salt prefactor**. `K_s` is the salt-response slope `k_s` (units 1/mM,
-  default `0.05`); salt and cholesterol are decoupled:
+- `U0_from_gaussian(A, mu_c, sigma_c, K_s)` → **1D** Gaussian in
+  `C_chol` multiplied by a **monotonic linear salt prefactor**.
+  `K_s` is the salt-response slope `k_s` (units 1/mM, default `0.05`);
+  salt and cholesterol are decoupled. The former `b_bridge` Gaussian
+  term has been removed (always ≡ 1 under fixed `b_bridge = 0.5`):
   - `S = 1 + K_s · C_NaCl`  
     (`C_NaCl = 0` gives `S = 1`, i.e. full cholesterol-driven well;
     more salt only raises `U0`, never collapses it → no re-entrant
     high-salt dispersion.)
-  - `U0 = A · S · exp( -(C_chol - mu_c)²/(2σ_c²) - (b_bridge - mu_b)²/(2σ_b²) )`
+  - `U0 = A · S · exp( -(C_chol - mu_c)²/(2σ_c²) )`
 
   *(Superseded: an earlier form fed a salt-modulated `C_chol_eff =
-  (1 + sat)·C_chol` into the Gaussian, which caused unphysical
-  high-salt re-dispersion. See `Salt_Concentration.md` §3 for history.)*
+  (1 + sat)·C_chol` into a 2D Gaussian in `(C_chol_eff, b_bridge)`,
+  which caused unphysical high-salt re-dispersion. See
+  `Salt_Concentration.md` §3 for history.)*
 
 ### `datatype` — S(q) vs I(q) input switch
 The `datatype` argument on `Dataset` (and the matching key in
@@ -156,7 +157,7 @@ Builds a callable `objective(x_unit, ffpath)` that, for one BO query:
    to `mode`:
    - `"map"`: applies the mapping equations using the optimized
      coefficients above (`alpha→density`, `k→r0`,
-     `A,mu_c,mu_b,sigma_c,sigma_b,K_s → U0`).
+     `A,mu_c,sigma_c,K_s → U0`).
    - `"sim"`: takes `density, r0, U0` directly from the param space
      (local > global > `dataset.sim.*`).
 3. Runs `simulation.run_simulation(...)` (HOOMD).
@@ -271,9 +272,8 @@ for idx, (L_bridge, C_chol, exp_path) in enumerate(CANDIDATES):
 
 FIXED = {
     "alpha":   3.0,  "n":  12.0, "m": 6.0,
-    "mu_c":  100.0,  "mu_b": 0.5,
-    "sigma_c": 10.0, "sigma_b": 0.2,
-    "K_s":     0.5,
+    "mu_c":  100.0,  "sigma_c": 10.0,
+    "K_s":     0.05,
 }
 
 param_cfg = {

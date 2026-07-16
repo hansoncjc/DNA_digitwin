@@ -72,7 +72,7 @@ _SIM_PARAMS = {"density", "r0", "U0"}
 _ALWAYS_OK_SIM = {"n", "m"}
 
 # Parameters that correspond to mapping coefficients
-_MAP_PARAMS = {"alpha", "k", "A", "mu_c", "sigma_c", "sigma_b", "mu_b", "K_s"}
+_MAP_PARAMS = {"alpha", "k", "A", "mu_c", "sigma_c", "K_s"}
 
 
 def _validate_param_mode(ps, mode: str) -> None:
@@ -432,12 +432,11 @@ def _run_objective_parallel(
                     )
 
             if mode == "map":
-                if all(k in G for k in ("A", "mu_c", "sigma_c", "sigma_b")):
+                if all(k in G for k in ("A", "mu_c", "sigma_c")):
                     U0 = float(ds.U0_from_gaussian(
                         A=G["A"],
                         mu_c=G["mu_c"],
                         sigma_c=G["sigma_c"],
-                        sigma_b=G["sigma_b"],
                         K_s=G.get("K_s", 0.05),
                     ))
                 elif ds.sim.U0 is not None:
@@ -679,14 +678,14 @@ def make_global_objective(
         * else raise.
     - U0:
         * if LOCAL "U0" present for a dataset, use it,
-        * else if GLOBAL ("A","mu_c","sigma_c","sigma_b") present, use dataset.U0_from_gaussian(...),
+        * else if GLOBAL ("A","mu_c","sigma_c") present, use dataset.U0_from_gaussian(...),
         * else if dataset.sim.U0 is set, use it,
         * else raise.
     mode: default to be "map"
     ----
     "map" (default):
         density, r0, U0 are computed via dataset mappings
-        (alpha → density, k → r0, A/mu_c/sigma_* → U0).
+        (alpha → density, k → r0, A/mu_c/sigma_c/K_s → U0).
         Direct sim params (density/r0/U0) are not allowed in ParamSpace.
     "sim":
         density, r0, U0 are taken directly from ParamSpace (global/local),
@@ -823,13 +822,12 @@ def make_global_objective(
 
                 # ---- U0 ----
                 if mode == "map":
-                    if all(k in G for k in ("A", "mu_c", "sigma_c", "sigma_b")):
+                    if all(k in G for k in ("A", "mu_c", "sigma_c")):
                         U0 = float(
                             ds.U0_from_gaussian(
                                 A=G["A"],
                                 mu_c=G["mu_c"],
                                 sigma_c=G["sigma_c"],
-                                sigma_b=G["sigma_b"],
                                 K_s=G.get("K_s", 0.05),
                             )
                         )

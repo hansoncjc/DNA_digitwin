@@ -133,9 +133,10 @@ class Dataset:
         Number density = alpha * theoretical_base, with theoretical_base computed here.
     r0_sigma(k=0.76, LC_ss=0.63, LC_ds=0.34) -> float
         Map experimental geometry/sequence to r0/σ using your formula.
-    U0_from_gaussian(A, mu_c, mu_b, sigma_c, sigma_b, K_s) -> float
-        Separable Gaussian in (C_chol, b_bridge) times a linear salt prefactor
+    U0_from_gaussian(A, mu_c, sigma_c, K_s) -> float
+        1D Gaussian in C_chol times a linear salt prefactor
         S = 1 + K_s * C_NaCl (K_s is the salt-response slope k_s, 1/mM).
+        The former b_bridge Gaussian term is removed.
     """
 
     def __init__(self, id, exp_path, exp=None, sim=None, weight=1.0, out_dir=None, datatype="sq"):
@@ -228,17 +229,20 @@ class Dataset:
         num = 2.0 * (self.exp.t_b + LC_ss * self.exp.L_poly) + LC_ds * (2.0 * self.exp.L_HBP + self.exp.L_bridge)
         return 1.0 + float(k) * (num / self.exp.d_si)
 
-    def U0_from_gaussian(self, A=2.0, mu_c=100.0, mu_b=0.5,
-                         sigma_c=10.0, sigma_b=0.2, K_s=0.05):
+    def U0_from_gaussian(self, A=2.0, mu_c=100.0, sigma_c=10.0, K_s=0.05):
         """
-        Compute U0 from a separable Gaussian in (C_chol, b_bridge) multiplied
-        by a monotonic linear salt prefactor.
+        Compute U0 from a 1D Gaussian in C_chol multiplied by a monotonic
+        linear salt prefactor.
 
         Mapping Function
         -------
             S  = 1 + K_s * C_NaCl                         # salt prefactor
-            U0 = A * S * exp( - ((C_chol   - mu_c)^2) / (2*sigma_c^2)
-                              - ((b_bridge - mu_b)^2) / (2*sigma_b^2) )
+            U0 = A * S * exp( - ((C_chol - mu_c)^2) / (2*sigma_c^2) )
+
+        The former ``b_bridge`` Gaussian term has been removed: experiments
+        fix ``b_bridge = 0.5``, so that term was always identically 1 and
+        carried no information. ``ExperimentalParams.b_bridge`` is retained
+        as metadata only.
 
         ``K_s`` is the linear salt-response slope ``k_s`` (units 1/mM). Salt is
         decoupled from cholesterol: the Gaussian uses the raw ``C_chol``.
@@ -252,9 +256,7 @@ class Dataset:
         --------
             A       = 2.0
             mu_c    = 100.0
-            mu_b    = 0.5
             sigma_c = 10.0
-            sigma_b = 0.2
             K_s     = 0.05
 
         Parameters
@@ -263,13 +265,8 @@ class Dataset:
             Zero-salt amplitude of U0.
         mu_c : float
             Center for the cholesterol count `C_chol` (molecules/particle).
-        mu_b : float
-            Center for the bridge-loading ratio `b_bridge` (dimensionless).
         sigma_c : float
             Std. dev. for the C_chol term (same unit as C_chol); must be > 0.
-        sigma_b : float
-            Std. dev. for bridge-loading term (dimensionless b_bridge);
-            must be > 0.
         K_s : float
             Linear salt-response slope k_s (1/mM); fractional increase of U0
             per mM NaCl. Should be >= 0 to keep the prefactor monotonic.
@@ -279,26 +276,22 @@ class Dataset:
         float
             U0 value.
         """
-        if sigma_c <= 0 or sigma_b <= 0:
-            raise ValueError("sigma_c and sigma_b must be > 0.")
+        if sigma_c <= 0:
+            raise ValueError("sigma_c must be > 0.")
 
-        C_chol   = float(self.exp.C_chol)
-        C_NaCl   = float(self.exp.C_NaCl)
-        b_bridge = float(self.exp.b_bridge)
+        C_chol = float(self.exp.C_chol)
+        C_NaCl = float(self.exp.C_NaCl)
 
         salt_gate = 1.0 + float(K_s) * C_NaCl
+        term_c = ((C_chol - float(mu_c)) ** 2) / (2.0 * (float(sigma_c) ** 2))
 
-        term_c = ((C_chol   - float(mu_c)) ** 2) / (2.0 * (float(sigma_c) ** 2))
-        term_b = ((b_bridge - float(mu_b)) ** 2) / (2.0 * (float(sigma_b) ** 2))
-
-        return float(A) * salt_gate * np.exp(- (term_c + term_b))
+        return float(A) * salt_gate * np.exp(-term_c)
 
     def _autofill_sim_from_default(self,
                                     *,
                                     alpha=3.0,
                                     k=0.76,
                                     A=2.0, mu_c=100.0, sigma_c=10.0,
-                                    mu_b=0.5, sigma_b=0.2,
                                     K_s=0.05):
         """
         Fill self.sim.{density,r0,U0} from mappings if any of them is None.
@@ -310,7 +303,6 @@ class Dataset:
             self.sim.r0 = self.r0_sigma(k=k)
         if getattr(self.sim, "U0", None) is None:
             self.sim.U0 = self.U0_from_gaussian(A=A, mu_c=mu_c, sigma_c=sigma_c,
-                                                mu_b=mu_b, sigma_b=sigma_b,
                                                 K_s=K_s)
     @classmethod
     def from_dict(cls, d):
@@ -325,7 +317,6 @@ class Dataset:
             "alpha": 3.0,
             "k": 0.76,
             "A": 2.0, "mu_c": 100.0, "sigma_c": 10.0,
-            "mu_b": 0.5, "sigma_b": 0.2,
             "K_s": 0.05
             },
             "weight": 1.0,
