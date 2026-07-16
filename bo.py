@@ -438,7 +438,7 @@ def _run_objective_parallel(
                         mu_c=G["mu_c"],
                         sigma_c=G["sigma_c"],
                         sigma_b=G["sigma_b"],
-                        K_s=G.get("K_s", 0.5),
+                        K_s=G.get("K_s", 0.05),
                     ))
                 elif ds.sim.U0 is not None:
                     U0 = float(ds.sim.U0)
@@ -830,7 +830,7 @@ def make_global_objective(
                                 mu_c=G["mu_c"],
                                 sigma_c=G["sigma_c"],
                                 sigma_b=G["sigma_b"],
-                                K_s=G.get("K_s", 0.5),
+                                K_s=G.get("K_s", 0.05),
                             )
                         )
                     elif ds.sim.U0 is not None:

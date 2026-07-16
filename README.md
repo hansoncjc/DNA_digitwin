@@ -90,15 +90,18 @@ record and exposes the **mapping equations** that connect them:
 - `r0_sigma(k, LC_ss=0.63, LC_ds=0.34)` → `r0` in units of σ:
   `r0/σ = 1 + k · ( 2(t_b + LC_ss·L_poly) + LC_ds·(2·L_HBP + L_bridge) ) / d_si`
 - `U0_from_gaussian(A, mu_c, mu_b, sigma_c, sigma_b, K_s)` → separable
-  Gaussian in `(C_chol_eff, b_bridge)` where the salt-modulated
-  effective cholesterol uses a saturating term plus unity (`K_s` couples
-  salt and cholesterol in the denominator; default `0.5`). Let
-  `ε = 10⁻⁶` (same units as concentrations, avoids `0/0` when
-  `C_NaCl = C_chol = 0`):
-  - `sat = C_NaCl / (C_NaCl + K_s · C_chol + ε)`
-  - `C_chol_eff = (1 + sat) · C_chol`  
-    (`C_NaCl = 0` gives `C_chol_eff = C_chol`; large salt gives `C_chol_eff → 2·C_chol`.)
-  - `U0 = A · exp( -(C_chol_eff - mu_c)²/(2σ_c²) - (b_bridge - mu_b)²/(2σ_b²) )`
+  Gaussian in `(C_chol, b_bridge)` multiplied by a **monotonic linear
+  salt prefactor**. `K_s` is the salt-response slope `k_s` (units 1/mM,
+  default `0.05`); salt and cholesterol are decoupled:
+  - `S = 1 + K_s · C_NaCl`  
+    (`C_NaCl = 0` gives `S = 1`, i.e. full cholesterol-driven well;
+    more salt only raises `U0`, never collapses it → no re-entrant
+    high-salt dispersion.)
+  - `U0 = A · S · exp( -(C_chol - mu_c)²/(2σ_c²) - (b_bridge - mu_b)²/(2σ_b²) )`
+
+  *(Superseded: an earlier form fed a salt-modulated `C_chol_eff =
+  (1 + sat)·C_chol` into the Gaussian, which caused unphysical
+  high-salt re-dispersion. See `Salt_Concentration.md` §3 for history.)*
 
 ### `datatype` — S(q) vs I(q) input switch
 The `datatype` argument on `Dataset` (and the matching key in
