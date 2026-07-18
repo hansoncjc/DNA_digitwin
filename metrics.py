@@ -131,9 +131,12 @@ def compare_saxs_curves(exp_data, sim_data, q_range=None, scale_intensity=True, 
     log_I_sim = np.log10(I_sim_scaled)
     
     if metric == 'apdist':
-        # AP distance on log10 intensities (same as original)
-        q_AP = np.linspace(q_ref[0], q_ref[-1], len(q_ref))
-        da, dp = AmplitudePhaseDistance(q_AP, log_I_exp, log_I_sim)
+        # Keep q_ref in physical q units for interpolation/plotting, but APDist
+        # requires its independent function-parameter domain to span [0, 1].
+        # Passing the narrow physical q interval here made the dynamic-
+        # programming phase term effectively use a fixed/incorrect interval.
+        t_ap = np.linspace(0.0, 1.0, len(q_ref))
+        da, dp = AmplitudePhaseDistance(t_ap, log_I_exp, log_I_sim)
         distance = da + dp
     elif metric == 'mse':
         # Mean Squared Error on log10 intensities
