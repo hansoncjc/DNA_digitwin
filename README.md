@@ -30,7 +30,7 @@ DNA_digitwin/
 ├── datasets.py           # ExperimentalParams, SimulationParams, Dataset
 ├── simulation.py         # run_simulation (HOOMD), modified_LJ + shifted_mie
 ├── scattering.py         # GSD → I(q)/S(q): convert_to_SAXS, convert_to_SAXS_fft, extract_exp_sq
-├── metrics.py            # compare_to_exp, compare_to_exp_saxsfft (log-space MSE / AP-distance)
+├── metrics.py            # compare_saxs_curves, compare_to_exp[_saxsfft] (MSE / weighted APDist + plots)
 ├── parallel/             # Slurm launcher: submits 1 GPU job per dataset per BO iteration
 │   ├── __init__.py
 │   ├── submit_parallel.py
@@ -130,6 +130,35 @@ Use `trim_tail=N` on `make_global_objective` to drop the last `N`
 points of the loaded experimental curve before comparison (useful for
 noisy I(q) tails; set `0` for clean S(q) files).
 
+### Curve metrics (`metrics.py`)
+
+Two loss modes are supported via `metric=` on `make_global_objective`:
+
+- **`mse`** – mean squared error on log10 intensities (default).
+- **`apdist`** – weighted Amplitude–Phase Distance on log10 intensities
+  over a normalized parameter domain `[0, 1]`:
+
+  ```
+  loss = dp_coeff * dp + (1 - dp_coeff) * da
+  ```
+
+  Default `dp_coeff=0.5`. Set `dp_coeff=0.0` for amplitude-only loss
+  (`da`); set `dp_coeff=1.0` for phase-only loss (`dp`).
+
+  **Note:** this weighted form differs numerically from the earlier
+  unweighted `da + dp` sum; do not compare loss values across versions.
+
+When `metric="apdist"`, phase-warp diagnostic plots are saved by default
+(`plot_apdist=True`) under `eval_XXX/<dataset_id>/apdist_plots/`:
+
+- `compare_apdist_warped.png` – log10 overlay after phase warp
+- `compare_apdist_warp_detail.png` – warp detail panel
+
+The standard overlay `compare_to_exp_saxsfft.png` is still written in
+the eval directory. Pass `plot_apdist=False` to skip the warp plots.
+When `metric="mse"`, `dp_coeff` and `plot_apdist` are ignored (a warning
+is emitted if non-default values are supplied).
+
 ### `ParamSpace` (`bo.py`)
 Declarative description of the BO search vector. Each parameter is
 either **global** (one value shared by all datasets) or **local**
@@ -164,7 +193,7 @@ Builds a callable `objective(x_unit, ffpath)` that, for one BO query:
 4. Converts GSD → S(q) via either `convert_to_SAXS` (MC-DFM) or
    `convert_to_SAXS_fft` (FFT-based).
 5. Compares against the experimental curve in log-space with `mse`
-   (default) or `apdist`.
+   (default) or weighted `apdist` (see **Curve metrics** above).
 6. Sums `weight · loss` across datasets and appends a row block to
    `out_root/bo_trajectory.csv`.
 
@@ -188,8 +217,8 @@ optimized over the unit cube. Returns `(best_x_phys, history)`.
    `"fixed"`.
 3. **Make the objective.** Choose `mode` (`"map"` or `"sim"`),
    `scattering_method` (`"saxsfft"` or `"mcdfm"`), `metric`
-   (`"mse"` or `"apdist"`), `trim_tail`, and `sim_defaults`
-   (`steps`, `N`, `device`, `plot`, …).
+   (`"mse"` or `"apdist"`), `dp_coeff`, `plot_apdist`, `trim_tail`,
+   and `sim_defaults` (`steps`, `N`, `device`, `plot`, …).
 4. **Run BO.** `bo.run_bo(objective, ps, ffpath=..., n_iters=...)`.
 5. **Inspect outputs.** Each evaluation writes to
    `out_root/eval_XXX/<dataset_id>/`:
@@ -197,6 +226,7 @@ optimized over the unit cube. Returns `(best_x_phys, history)`.
    - `potential_energy.csv`, `potential_plot.png` (if `plot=True`)
    - `S(q)_data/average_structure_factor.{npy,png}`
    - `compare_to_exp[_saxsfft].png` – diagnostic overlay
+   - `apdist_plots/` – phase-warp diagnostics (when `metric="apdist"`)
    - `sim_params_<id>.csv` – the resolved sim inputs for that eval
 
    Plus, at the run root:

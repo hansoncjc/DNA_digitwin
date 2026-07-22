@@ -367,6 +367,8 @@ def _run_objective_parallel(
     scattering_kwargs: Dict[str, Any],
     metric: str,
     compare_q_range: Optional[Tuple[float, float]],
+    dp_coeff: float,
+    plot_apdist: bool,
     parallel_cfg: Dict[str, Any],
     iteration_data: List[Dict[str, Any]],
 ) -> float:
@@ -549,6 +551,8 @@ def _run_objective_parallel(
                     ),
                     "q_min":             0.02,
                     "q_max":             0.03,
+                    "dp_coeff":          dp_coeff,
+                    "plot_apdist":       plot_apdist,
                 },
             },
         })
@@ -658,6 +662,8 @@ def make_global_objective(
     scattering_kwargs: Dict[str, Any] = None,
     metric: str = "mse",
     compare_q_range: Optional[Tuple[float, float]] = (0.003, 0.06),
+    dp_coeff: float = 0.5,
+    plot_apdist: bool = True,
     parallel: bool = False,
     parallel_cfg: Dict[str, Any] = None,
 ):
@@ -699,6 +705,12 @@ def make_global_objective(
     "compare_q_range":
         q-range used for the final saxsfft loss comparison. This is distinct
         from q_min/q_max used when extracting experimental S(q) from intensity.
+    "dp_coeff":
+        Phase-distance weight for ``metric='apdist'`` (see ``metrics.compare_saxs_curves``).
+        Default 0.5. Ignored when ``metric='mse'``.
+    "plot_apdist":
+        When True and ``metric='apdist'``, save phase-warp diagnostic plots under
+        ``eval_XXX/<dataset_id>/apdist_plots/``. Default True.
     Failed evaluations (after GPU job retry) raise ``EvaluationFailed``; they are
     logged to ``bo_trajectory.csv`` but not fed to the GP. ``run_bo`` re-acquires
     a new candidate instead.
@@ -750,6 +762,8 @@ def make_global_objective(
                     scattering_kwargs=scattering_kwargs,
                     metric=metric,
                     compare_q_range=compare_q_range,
+                    dp_coeff=dp_coeff,
+                    plot_apdist=plot_apdist,
                     parallel_cfg=parallel_cfg or {},
                     iteration_data=objective._iteration_data,
                 )
@@ -922,9 +936,18 @@ def make_global_objective(
                         save_dir,
                         metric=metric,
                         q_range=compare_q_range,
+                        dp_coeff=dp_coeff,
+                        plot_apdist=plot_apdist,
                     ))
                 else:
-                    loss = float(compare_to_exp(exp_sq, sim_sq, save_dir, metric=metric))
+                    loss = float(compare_to_exp(
+                        exp_sq,
+                        sim_sq,
+                        save_dir,
+                        metric=metric,
+                        dp_coeff=dp_coeff,
+                        plot_apdist=plot_apdist,
+                    ))
                 total_loss += ds.weight * loss
 
                 # Store data for global trajectory CSV
@@ -1191,6 +1214,7 @@ def run_bo(
     seed: int = 0,
     warm_start: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     max_acq_attempts: int = DEFAULT_MAX_ACQ_ATTEMPTS,
+    surrogate: str = "stgp",
 ):
     """
     Run a BoTorch loop over the parameter space defined by ParamSpace.
@@ -1215,6 +1239,16 @@ def run_bo(
         and try a new candidate up to this many times per completed iteration.
         Failed evaluations are not added to the GP.
 
+    surrogate
+        GP surrogate to use. ``"stgp"`` (default) is the original
+        ``SingleTaskGP`` (ARD Matern) + ``qLogExpectedImprovement``. ``"saas"``
+        swaps in ``SaasFullyBayesianSingleTaskGP`` (sparse axis-aligned subspace
+        priors, fit by NUTS), which is designed for high-dimensional,
+        low-sample BO -- it automatically shrinks unimportant input dimensions,
+        effectively searching a low-dimensional subspace. The acquisition and
+        everything else are unchanged. ``"saas"`` costs a NUTS refit per
+        iteration (tens of seconds) but that is negligible next to a HOOMD eval.
+
     Notes
     -----
     - Uses SingleTaskGP + qLogExpectedImprovement (maximize EI on -loss).
@@ -1223,6 +1257,9 @@ def run_bo(
     """
     torch.manual_seed(seed)
     dtype = torch.float64
+    if surrogate not in ("stgp", "saas"):
+        raise ValueError(f"surrogate must be 'stgp' or 'saas', got {surrogate!r}")
+    print(f"[bo] surrogate={surrogate}")
 
     from botorch.models import SingleTaskGP
     from botorch.models.transforms.outcome import Standardize
@@ -1249,9 +1286,20 @@ def run_bo(
         # z-scores the targets internally (and un-standardizes the posterior
         # automatically), silencing the warning and improving numerical
         # conditioning.
-        gp = SingleTaskGP(train_x, train_y, outcome_transform=Standardize(m=1))
-        mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
-        fit_gpytorch_mll(mll)
+        if surrogate == "saas":
+            from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
+            from botorch.fit import fit_fully_bayesian_model_nuts
+            gp = SaasFullyBayesianSingleTaskGP(
+                train_x, train_y, outcome_transform=Standardize(m=1)
+            )
+            fit_fully_bayesian_model_nuts(
+                gp, warmup_steps=256, num_samples=128, thinning=16,
+                disable_progbar=True,
+            )
+        else:
+            gp = SingleTaskGP(train_x, train_y, outcome_transform=Standardize(m=1))
+            mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+            fit_gpytorch_mll(mll)
         acq = qLogExpectedImprovement(model=gp, best_f=train_y.max())
         cand, _ = optimize_acqf(
             acq_function=acq,

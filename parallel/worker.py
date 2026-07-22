@@ -166,6 +166,8 @@ def _run_pipeline(cfg: dict, save_dir: Path) -> dict:
     compare_method = loss_cfg.get("scattering_method", method)
     metric         = loss_cfg.get("metric", "mse")
     compare_q_range = loss_cfg.get("compare_q_range", (0.003, 0.06))
+    dp_coeff       = loss_cfg.get("dp_coeff", 0.5)
+    plot_apdist    = loss_cfg.get("plot_apdist", True)
     if compare_method == "saxsfft":
         loss = float(compare_to_exp_saxsfft(
             exp_sq,
@@ -173,9 +175,18 @@ def _run_pipeline(cfg: dict, save_dir: Path) -> dict:
             str(save_dir),
             metric=metric,
             q_range=compare_q_range,
+            dp_coeff=dp_coeff,
+            plot_apdist=plot_apdist,
         ))
     else:
-        loss = float(compare_to_exp(exp_sq, sim_sq, str(save_dir), metric=metric))
+        loss = float(compare_to_exp(
+            exp_sq,
+            sim_sq,
+            str(save_dir),
+            metric=metric,
+            dp_coeff=dp_coeff,
+            plot_apdist=plot_apdist,
+        ))
 
     return {"loss": loss, "sim_result": sim_result}
 
