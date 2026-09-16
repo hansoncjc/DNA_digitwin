@@ -87,35 +87,50 @@ def _save_apdist_plots(
     weighted = dp_coeff * dp + (1.0 - dp_coeff) * da
 
     os.makedirs(save_dir, exist_ok=True)
-    plt.rcParams.update({"font.size": 18})
+    _rc = plt.rcParams.copy()
+    try:
+        plt.rcParams.update({"font.size": 14})
 
-    fig, ax = plt.subplots(figsize=(7, 6))
-    ax.scatter(q_ref, log_I_exp, linewidth=0.5, label="Exp (log10 I)", color="k")
-    ax.plot(
-        q_ref, log_I_sim_warped, linewidth=3, label="Sim warped (log10 I)", color="red"
-    )
-    ax.set_xscale("log")
-    ax.set_ylabel("log10 Intensity")
-    ax.set_xlabel("q ($\\AA^{-1}$)")
-    ax.set_title(
-        f"APDist after phase warp: da={da:.4f}, dp={dp:.4f}, "
-        f"loss={weighted:.4f} (dp_coeff={dp_coeff})"
-    )
-    ax.legend()
-    plt.savefig(
-        os.path.join(save_dir, "compare_apdist_warped.png"),
-        dpi=600,
-        bbox_inches="tight",
-    )
-    plt.close()
+        fig, ax = plt.subplots(figsize=(12, 5.5))
+        ax.scatter(q_ref, log_I_exp, linewidth=0.5, label="Exp (log10 I)", color="k")
+        ax.plot(
+            q_ref,
+            log_I_sim_warped,
+            linewidth=3,
+            label="Sim warped (log10 I)",
+            color="red",
+        )
+        ax.set_xscale("log")
+        ax.set_ylabel("log10 Intensity", labelpad=10)
+        ax.set_xlabel("q ($\\AA^{-1}$)", labelpad=10)
+        ax.set_title(
+            f"APDist after phase warp: da={da:.4f}, dp={dp:.4f}, "
+            f"loss={weighted:.4f} (dp_coeff={dp_coeff})",
+            pad=14,
+        )
+        ax.legend(loc="best", framealpha=0.9)
+        fig.tight_layout(pad=1.8)
+        fig.savefig(
+            os.path.join(save_dir, "compare_apdist_warped.png"),
+            dpi=600,
+            bbox_inches="tight",
+            pad_inches=0.35,
+        )
+        plt.close(fig)
 
-    plot_warping(q_ref, log_I_exp, log_I_sim, log_I_sim_warped, gam)
-    plt.savefig(
-        os.path.join(save_dir, "compare_apdist_warp_detail.png"),
-        dpi=600,
-        bbox_inches="tight",
-    )
-    plt.close()
+        plot_warping(q_ref, log_I_exp, log_I_sim, log_I_sim_warped, gam)
+        fig = plt.gcf()
+        fig.set_size_inches(24, 6.5)
+        fig.tight_layout(pad=2.0, h_pad=2.5, w_pad=2.5)
+        fig.savefig(
+            os.path.join(save_dir, "compare_apdist_warp_detail.png"),
+            dpi=600,
+            bbox_inches="tight",
+            pad_inches=0.4,
+        )
+        plt.close(fig)
+    finally:
+        plt.rcParams.update(_rc)
 
 
 def compare_saxs_curves(
