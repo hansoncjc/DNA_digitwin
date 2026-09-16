@@ -13,6 +13,7 @@ parameter sweeps.  See _compute_table_bounds() for the derivation.
 from __future__ import annotations
 import os, time
 import numpy as np
+import gsd.hoomd
 import hoomd
 import hoomd.md
 
@@ -360,17 +361,27 @@ def run_simulation(
         # Shuffle and take N points
         rng = np.random.default_rng()
         rng.shuffle(grid)
-        return grid[:N].tolist()
-    positions = generate_positions(N, L, rmin=rmin, offset=init_offset)
-
-    # --- Snapshot and system init ---
-    snapshot = hoomd.data.make_snapshot(
-        N=N, box=hoomd.data.boxdim(L=L), particle_types=['A']
+        return grid[:N]
+    positions = np.ascontiguousarray(
+        generate_positions(N, L, rmin=rmin, offset=init_offset),
+        dtype=np.float32,
     )
-    for i, pos in enumerate(positions):
-        snapshot.particles.position[i] = pos
-        snapshot.particles.diameter[i] = 1.0
-    hoomd.init.read_snapshot(snapshot)
+
+    # HOOMD 2.9.7: make_snapshot + read_snapshot does not load lattice coords
+    # correctly for large N (GSD frame 0 ends with 5016/5017 at origin).
+    # Write init via gsd.hoomd.Frame, then hoomd.init.read_gsd().
+    init_gsd_path = os.path.join(outdir, "_init_lattice.gsd")
+    init_frame = gsd.hoomd.Frame()
+    init_frame.particles.N = N
+    init_frame.particles.types = ["A"]
+    init_frame.particles.typeid = np.zeros(N, dtype=np.uint32)
+    init_frame.particles.position = positions
+    init_frame.particles.diameter = np.ones(N, dtype=np.float32)
+    init_frame.configuration.box = [L, L, L, 0, 0, 0]
+    with gsd.hoomd.open(init_gsd_path, "w") as traj:
+        traj.append(init_frame)
+
+    hoomd.init.read_gsd(init_gsd_path)
 
     # --- Pair potential via table ---
     width = 1000
