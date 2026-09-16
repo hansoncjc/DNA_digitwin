@@ -353,13 +353,34 @@ def _failed_trajectory_record(eval_id, ds_id, G, plan=None, reason="FAILED"):
     return rec
 
 
-def _run_objective_parallel(
+def _launcher_config_from_pcfg(pcfg: Dict[str, Any], run_dir: Path):
+    """Build ``LauncherConfig`` from a parallel-cfg dict."""
+    from parallel import LauncherConfig
+
+    pcfg = pcfg or {}
+    return LauncherConfig(
+        run_dir=run_dir,
+        partition=pcfg.get("partition", "gpu-a40"),
+        account=pcfg.get("account", "zeelab"),
+        gpus=int(pcfg.get("gpus", 1)),
+        mem=pcfg.get("mem", "40G"),
+        time=pcfg.get("time", "02:00:00"),
+        module_loads=list(pcfg.get("module_loads", [])),
+        venv_activate=pcfg.get("venv_activate", ""),
+        code_root=pcfg.get("code_root", ""),
+        mc_dfm_root=pcfg.get("mc_dfm_root", ""),
+        poll_interval=float(pcfg.get("poll_interval", 15.0)),
+        max_wait=float(pcfg.get("max_wait", 4 * 3600)),
+    )
+
+
+def _parallel_prepare_eval_jobs(
+    *,
     datasets: List[Any],
     eval_id: int,
     G: Dict[str, Any],
     L: Dict[str, Any],
     out_root: str,
-    ffpath: str,
     trim_tail: int,
     sim_defaults: Dict[str, Any],
     mode: str,
@@ -369,26 +390,18 @@ def _run_objective_parallel(
     compare_q_range: Optional[Tuple[float, float]],
     dp_coeff: float,
     plot_apdist: bool,
-    parallel_cfg: Dict[str, Any],
-    iteration_data: List[Dict[str, Any]],
-) -> float:
+    ffpath: str,
+) -> Tuple[List[dict], List[dict], List[Dict[str, Any]], Optional[str]]:
     """
-    Parallel analogue of the per-dataset sequential loop in `objective`.
+    Resolve per-dataset sim params and build Slurm job specs for one BO eval.
 
-    Submits one Slurm GPU job per dataset via `parallel.submit_jobs`, waits
-    for all of them to reach a terminal state, and collects each job's
-    loss from its `DONE` flag file. Mutates `iteration_data` in place so
-    the caller can write the trajectory CSV block exactly as in the
-    sequential path.
+    Returns ``(job_specs, plans, fail_records, fail_reason)``. On success
+    ``fail_records`` is empty and ``fail_reason`` is ``None``.
     """
-    from parallel import LauncherConfig, submit_jobs_with_retry  # lazy import
-
-    total_loss = 0.0
     plans: List[Dict[str, Any]] = []
     phase_a_failed: List[str] = []
+    fail_records: List[Dict[str, Any]] = []
 
-    # Phase A: resolve per-dataset sim params with the same precedence as
-    # the sequential path; write per-dataset `sim_params_<id>.csv`.
     for ds in datasets:
         try:
             n = float(G["n"]) if "n" in G else float(ds.sim.n)
@@ -505,19 +518,11 @@ def _run_objective_parallel(
                     fh.write(str(e) + "\n")
             except Exception:
                 pass
-            iteration_data.append(_failed_trajectory_record(eval_id, ds.id, G))
+            fail_records.append(_failed_trajectory_record(eval_id, ds.id, G))
 
     if phase_a_failed:
-        reason = f"param resolution failed for {phase_a_failed}"
-        _write_failed_iteration_block(
-            os.path.join(out_root, "bo_trajectory.csv"),
-            eval_id,
-            iteration_data,
-            reason=reason,
-        )
-        raise EvaluationFailed(reason)
+        return [], [], fail_records, f"param resolution failed for {phase_a_failed}"
 
-    # Phase B: build job specs for OK plans and submit them all.
     job_specs = []
     for plan in plans:
         ds = plan["ds"]
@@ -557,37 +562,29 @@ def _run_objective_parallel(
             },
         })
 
-    finished_by_ds: Dict[str, Any] = {}
-    if job_specs:
-        pcfg = parallel_cfg or {}
-        cfg = LauncherConfig(
-            run_dir=Path(out_root) / f"eval_{eval_id:03d}" / "_jobs",
-            partition    =pcfg.get("partition", "gpu-a40"),
-            account      =pcfg.get("account",   "zeelab"),
-            gpus         =int(pcfg.get("gpus", 1)),
-            mem          =pcfg.get("mem",  "40G"),
-            time         =pcfg.get("time", "02:00:00"),
-            module_loads =list(pcfg.get("module_loads", [])),
-            venv_activate=pcfg.get("venv_activate", ""),
-            code_root    =pcfg.get("code_root", ""),
-            mc_dfm_root  =pcfg.get("mc_dfm_root", ""),
-            poll_interval=float(pcfg.get("poll_interval", 15.0)),
-            max_wait     =float(pcfg.get("max_wait", 4 * 3600)),
-        )
-        finished = submit_jobs_with_retry(
-            job_specs,
-            cfg,
-            max_job_retries=int(pcfg.get("max_job_retries", DEFAULT_MAX_JOB_RETRIES)),
-            clean=True,
-            poll_interval=pcfg.get("poll_interval"),
-            max_wait=pcfg.get("max_wait"),
-        )
-        finished_by_ds = {j.ds_id: j for j in finished}
+    return job_specs, plans, [], None
 
+
+def _collect_parallel_eval_loss(
+    *,
+    eval_id: int,
+    G: Dict[str, Any],
+    plans: List[Dict[str, Any]],
+    finished_jobs: List[Any],
+    out_root: str,
+) -> Tuple[float, bool, List[Dict[str, Any]]]:
+    """
+    Collect per-dataset loss from finished Slurm jobs for one eval.
+
+    Returns ``(total_loss, success, iteration_records)``.
+    """
+    finished_by_ds = {j.ds_id: j for j in finished_jobs}
+    total_loss = 0.0
     eval_failed = False
-    # Phase C: collect per-dataset loss; emit trajectory records.
+    iteration_records: List[Dict[str, Any]] = []
+
     for plan in plans:
-        ds  = plan["ds"]
+        ds = plan["ds"]
         job = finished_by_ds.get(ds.id)
         if job is not None and job.done_status == "DONE":
             loss = None
@@ -601,13 +598,13 @@ def _run_objective_parallel(
                         fh.write(f"DONE file unreadable: {e}\n")
                 except Exception:
                     pass
-                iteration_data.append(
+                iteration_records.append(
                     _failed_trajectory_record(eval_id, ds.id, G, plan=plan)
                 )
                 continue
 
             total_loss += ds.weight * loss
-            iteration_data.append({
+            iteration_records.append({
                 "iteration": eval_id,
                 "dataset_id": ds.id,
                 "loss": loss,
@@ -633,11 +630,97 @@ def _run_objective_parallel(
                     fh.write(reason + "\n")
             except Exception:
                 pass
-            iteration_data.append(
+            iteration_records.append(
                 _failed_trajectory_record(eval_id, ds.id, G, plan=plan)
             )
 
-    if eval_failed:
+    return total_loss, not eval_failed, iteration_records
+
+
+def _run_objective_parallel(
+    datasets: List[Any],
+    eval_id: int,
+    G: Dict[str, Any],
+    L: Dict[str, Any],
+    out_root: str,
+    ffpath: str,
+    trim_tail: int,
+    sim_defaults: Dict[str, Any],
+    mode: str,
+    scattering_method: str,
+    scattering_kwargs: Dict[str, Any],
+    metric: str,
+    compare_q_range: Optional[Tuple[float, float]],
+    dp_coeff: float,
+    plot_apdist: bool,
+    parallel_cfg: Dict[str, Any],
+    iteration_data: List[Dict[str, Any]],
+) -> float:
+    """
+    Parallel analogue of the per-dataset sequential loop in `objective`.
+
+    Submits one Slurm GPU job per dataset via `parallel.submit_jobs`, waits
+    for all of them to reach a terminal state, and collects each job's
+    loss from its `DONE` flag file. Mutates `iteration_data` in place so
+    the caller can write the trajectory CSV block exactly as in the
+    sequential path.
+    """
+    from parallel import submit_jobs_with_retry  # lazy import
+
+    job_specs, plans, fail_records, fail_reason = _parallel_prepare_eval_jobs(
+        datasets=datasets,
+        eval_id=eval_id,
+        G=G,
+        L=L,
+        out_root=out_root,
+        trim_tail=trim_tail,
+        sim_defaults=sim_defaults,
+        mode=mode,
+        scattering_method=scattering_method,
+        scattering_kwargs=scattering_kwargs,
+        metric=metric,
+        compare_q_range=compare_q_range,
+        dp_coeff=dp_coeff,
+        plot_apdist=plot_apdist,
+        ffpath=ffpath,
+    )
+
+    if fail_reason is not None:
+        iteration_data.extend(fail_records)
+        _write_failed_iteration_block(
+            os.path.join(out_root, "bo_trajectory.csv"),
+            eval_id,
+            iteration_data,
+            reason=fail_reason,
+        )
+        iteration_data.clear()
+        raise EvaluationFailed(fail_reason)
+
+    finished_jobs: List[Any] = []
+    if job_specs:
+        pcfg = parallel_cfg or {}
+        cfg = _launcher_config_from_pcfg(
+            pcfg, Path(out_root) / f"eval_{eval_id:03d}" / "_jobs",
+        )
+        finished_jobs = submit_jobs_with_retry(
+            job_specs,
+            cfg,
+            max_job_retries=int(pcfg.get("max_job_retries", DEFAULT_MAX_JOB_RETRIES)),
+            clean=True,
+            poll_interval=pcfg.get("poll_interval"),
+            max_wait=pcfg.get("max_wait"),
+        )
+
+    total_loss, success, records = _collect_parallel_eval_loss(
+        eval_id=eval_id,
+        G=G,
+        plans=plans,
+        finished_jobs=finished_jobs,
+        out_root=out_root,
+    )
+    iteration_data.extend(records)
+
+    if not success:
         reason = f"one or more parallel jobs failed for eval_id={eval_id}"
         _write_failed_iteration_block(
             os.path.join(out_root, "bo_trajectory.csv"),
@@ -645,6 +728,7 @@ def _run_objective_parallel(
             iteration_data,
             reason=reason,
         )
+        iteration_data.clear()
         raise EvaluationFailed(reason)
 
     return total_loss
