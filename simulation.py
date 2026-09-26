@@ -6,6 +6,12 @@ run_simulation():
   - "shifted_mie"  : shifted Mie potential with hard-core offset r0 and
                      length-scale delta
 
+After writing the lattice GSD, run_simulation() randomizes positions
+in-memory with a Heyes-Melrose hard-sphere step (sigma = diameter = 1,
+from HS_fluid_core/HS_fluid.py) before applying the selected potential.
+The HS segment is not dumped; DNA_assembly_*.gsd starts at the
+post-HS configuration.
+
 Table bounds (rmin, rmax) are derived analytically from the potential
 parameters rather than being hard-coded, so they remain valid across
 parameter sweeps.  See _compute_table_bounds() for the derivation.
@@ -215,6 +221,84 @@ def _compute_table_bounds(
 
 
 # ---------------------------------------------------------------------------
+# Heyes-Melrose HS randomization (diameter units, sigma_HS = 1)
+# ---------------------------------------------------------------------------
+
+def _hs_potential(r, rmin, rmax, dt):
+    """Heyes-Melrose harmonic repulsion with sigma_HS = 1 (particle diameter)."""
+    U = 1.0 / (4.0 * dt) * (1.0 - r) ** 2
+    F = 1.0 / (2.0 * dt) * (1.0 - r)
+    return U, F
+
+
+def _run_hs_randomization(
+    nlist,
+    group,
+    integrator,
+    *,
+    dt_hs: float = 1e-4,
+    t_rand: float = 10.0,
+    kT: float = 1.0,
+    seed: int = 42,
+    gamma: float = 1.0,
+) -> None:
+    """Randomize the lattice with Heyes-Melrose HS. Does not dump a GSD.
+
+    Call after ``hoomd.init.read_gsd`` and before creating the production
+    pair table or Langevin integrator. Disables its own pair table and
+    Brownian integrator before returning so the caller can switch potentials.
+
+    Overdamped Brownian is required: the per-step displacement
+    ``F*dt/gamma = delta/2`` removes an overlap of depth delta in one step.
+    ``dt_hs`` defaults to 1e-4 because ``d_eff = sigma_HS - sqrt(pi * dt)``.
+    """
+    n_steps = int(np.round(t_rand / dt_hs))
+    if n_steps <= 0:
+        print(f"Skipping HS randomization (t_rand={t_rand}, dt_hs={dt_hs})")
+        return
+
+    integrator.set_params(dt=dt_hs)
+    hs = hoomd.md.pair.table(width=1000, nlist=nlist, name="hs")
+    hs.pair_coeff.set(
+        "A", "A",
+        func=_hs_potential,
+        rmin=0.0,
+        rmax=1.0,
+        coeff=dict(dt=dt_hs),
+    )
+    bd = hoomd.md.integrate.brownian(group=group, kT=kT, seed=seed)
+    bd.set_gamma("A", gamma=gamma)
+
+    print(
+        f"HS randomization: t_rand={t_rand:g} ({n_steps} steps), "
+        f"dt_hs={dt_hs}, sigma_HS=1, brownian"
+    )
+    hoomd.run(n_steps)
+
+    hs.disable()
+    bd.disable()
+
+
+_SPHERE_TYPE_SHAPE = [{'type': 'Sphere', 'diameter': 1.0}]
+
+
+def _stamp_sphere_type_shapes(gsd_path, diameter=1.0):
+    """Write GSD ``particles/type_shapes`` so OVITO locks Radius = diameter/2.
+
+    ``particles/diameter = 1`` is the GSD default and is omitted from the
+    file, so OVITO falls back to Standard radius. ``type_shapes`` is not
+    the default empty dict and is actually stored.
+    """
+    shape = [{'type': 'Sphere', 'diameter': float(diameter)}]
+    tmp_path = gsd_path + '.tmp'
+    with gsd.hoomd.open(gsd_path, 'r') as src, gsd.hoomd.open(tmp_path, 'w') as dst:
+        for src_frame in src:
+            src_frame.particles.type_shapes = shape
+            dst.append(src_frame)
+    os.replace(tmp_path, gsd_path)
+
+
+# ---------------------------------------------------------------------------
 # Main simulation entry-point
 # ---------------------------------------------------------------------------
 
@@ -239,9 +323,15 @@ def run_simulation(
     seed: int = 42,
     plot: bool = True,
     rmax: float | None = None,
+    t_rand: float = 10.0,
+    dt_hs: float = 1e-4,
 ) -> dict:
     """
     Run a HOOMD simulation of N spheres with a selectable pair potential.
+
+    Workflow: shuffled cubic lattice GSD -> in-memory Heyes-Melrose HS
+    randomization (no dump) -> selected pair potential production run.
+    ``DNA_assembly_*.gsd`` frame 0 is the post-HS configuration.
 
     Parameters
     ----------
@@ -276,17 +366,21 @@ def run_simulation(
     device : {"gpu","cpu"}
         HOOMD context device mode.
     seed : int
-        Langevin thermostat seed.
+        Seed for the HS Brownian integrator and the Langevin thermostat.
     plot : bool
         Controls whether potential and energy plots are generated.
     rmax : float, optional
         If set, use this value as the pair-potential table cutoff instead of
         the analytically derived rmax from ``_compute_table_bounds``.
+    t_rand : float
+        HS randomization time in reduced units (D = kT/γ = 1). Default 10.
+    dt_hs : float
+        HS timestep. Default 1e-4 (locked by d_eff = σ_HS - sqrt(π dt)).
 
     Returns
     -------
     dict with keys:
-        gsd_path, energy_csv, rmin, rmax, table_width, potential
+        gsd_path, energy_csv, rmin, rmax, table_width, potential, t_rand, dt_hs
 
     Raises
     ------
@@ -377,16 +471,26 @@ def run_simulation(
     init_frame.particles.typeid = np.zeros(N, dtype=np.uint32)
     init_frame.particles.position = positions
     init_frame.particles.diameter = np.ones(N, dtype=np.float32)
+    init_frame.particles.type_shapes = _SPHERE_TYPE_SHAPE
     init_frame.configuration.box = [L, L, L, 0, 0, 0]
     with gsd.hoomd.open(init_gsd_path, "w") as traj:
         traj.append(init_frame)
 
     hoomd.init.read_gsd(init_gsd_path)
 
-    # --- Pair potential via table ---
     width = 1000
     nl = hoomd.md.nlist.cell()
-    table = hoomd.md.pair.table(width=width, nlist=nl)
+    group_all = hoomd.group.all()
+    integrator = hoomd.md.integrate.mode_standard(dt=dt_hs)
+
+    # --- In-memory HS randomization (no dump) ---
+    _run_hs_randomization(
+        nl, group_all, integrator,
+        dt_hs=dt_hs, t_rand=t_rand, kT=kT, seed=seed,
+    )
+
+    # --- Production pair potential via table ---
+    table = hoomd.md.pair.table(width=width, nlist=nl, name="prod")
 
     # Build coefficient dict; add delta only for shifted_mie.
     coeff = dict(U_0=U_0, n=n, m=m, r0=r0)
@@ -408,17 +512,18 @@ def run_simulation(
         plot_pair_potential(rmin, rmax, width, U_0, n, m, r0, out_png,
                             pot_fn, extra_coeff=extra_coeff)
 
-    # --- Integrator ---
-    group_all = hoomd.group.all()
-    hoomd.md.integrate.mode_standard(dt=dt)
+    # --- Production integrator ---
+    integrator.set_params(dt=dt)
     langevin = hoomd.md.integrate.langevin(group=group_all, kT=kT, seed=seed)
     langevin.set_gamma('A', gamma=1.0)
 
-    # --- Outputs: GSD + energy CSV ---
+    # --- Outputs: GSD + energy CSV (after HS, so frame 0 is post-HS) ---
     ts = time.localtime()
     timestamp = f"{ts.tm_year:02d}{ts.tm_mon:02d}{ts.tm_mday:02d}{ts.tm_hour:02d}{ts.tm_min:02d}{ts.tm_sec:02d}"
     gsd_path = os.path.join(outdir, f"DNA_assembly_{timestamp}.gsd")
-    hoomd.dump.gsd(filename=gsd_path, period=50000, group=group_all, overwrite=True)
+    gsd_dump = hoomd.dump.gsd(
+        filename=gsd_path, period=50000, group=group_all, overwrite=True
+    )
 
     energy_csv = os.path.join(outdir, "potential_energy.csv")
     hoomd.analyze.log(
@@ -430,8 +535,11 @@ def run_simulation(
 
     # --- Run ---
     print(f"Running {steps} steps with {N} spheres at number density "
-          f"{density:.6g} particles/σ³ using potential='{potential}'")
+          f"{density:.6g} particles/σ³ using potential='{potential}' "
+          f"(dt={dt}, after HS t_rand={t_rand:g})")
     hoomd.run(steps)
+    gsd_dump.disable()
+    _stamp_sphere_type_shapes(gsd_path)
 
     # --- Generate Potential Energy Plot ---
     if plot:
@@ -447,6 +555,8 @@ def run_simulation(
         "rmax"        : rmax,
         "table_width" : width,
         "potential"   : potential,
+        "t_rand"      : t_rand,
+        "dt_hs"       : dt_hs,
     }
 
 
