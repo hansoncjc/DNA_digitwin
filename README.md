@@ -189,7 +189,13 @@ Builds a callable `objective(x_unit, ffpath)` that, for one BO query:
      `A,mu_c,sigma_c,K_s → U0`).
    - `"sim"`: takes `density, r0, U0` directly from the param space
      (local > global > `dataset.sim.*`).
-3. Runs `simulation.run_simulation(...)` (HOOMD).
+3. Runs `simulation.run_simulation(...)` (HOOMD). The pair-table
+   cutoff is dynamic by default: `t_tol_lj = tail_energy_cut / U_0`
+   with `tail_energy_cut = 0.1`, i.e. the attractive tail at `rmax` is
+   `0.1 kT` for every `U_0`. For a fixed cutoff put either `t_tol_lj`
+   or `rmax` in `sim_defaults` (each conflicts with `tail_energy_cut`).
+   Every mode must give `rmax < L/2`, checked before HOOMD starts.
+   The result dict carries `rmax`, `t_tol_lj`, `tail_energy_cut`, `L`.
 4. Converts GSD → S(q) via either `convert_to_SAXS` (MC-DFM) or
    `convert_to_SAXS_fft` (FFT-based, default `N_grid=600`). The
    simulation and a saxs-fft target must use the same `N_grid`. In

@@ -14,7 +14,10 @@ post-HS configuration.
 
 Table bounds (rmin, rmax) are derived analytically from the potential
 parameters rather than being hard-coded, so they remain valid across
-parameter sweeps.  See _compute_table_bounds() for the derivation.
+parameter sweeps.  See _compute_table_bounds() for the derivation and
+resolve_table_bounds() for how run_simulation() picks the cutoff
+(default: dynamic, t_tol_lj = tail_energy_cut / U_0 with
+tail_energy_cut = 0.1).
 """
 from __future__ import annotations
 import os, time
@@ -171,10 +174,9 @@ def _compute_table_bounds(
         xi_max = delta * (|U_0| * C / t_tol_mie)^(1/m)
         rmax   = r0 + xi_max
     """
-    if potential == "modified_lj":
-        # rmin: fixed at 0.7 * r0 (repulsive side of minimum at r0)
-        rmin = 0.7 * r0
+    rmin = _table_rmin(potential, r0, delta)
 
+    if potential == "modified_lj":
         # rmax: tail decay to t_tol_lj
         # U_attr(r) ~ U_0 * n/(n-m) * (r0/r)^m  => rmax = r0*(n/((n-m)*t_tol_lj))^(1/m)
         prefactor_m = n / (n - m)        # coefficient of the attractive (r0/r)^m term
@@ -185,9 +187,6 @@ def _compute_table_bounds(
             raise ValueError("delta is required for shifted_mie bounds.")
 
         C = (n / (n - m)) * (n / m) ** (m / (n - m))
-
-        # rmin: fixed at r0 + 0.7 * delta (repulsive side, symmetric with modified_lj)
-        rmin = r0 + 0.7 * delta
 
         # rmax: attractive tail decay to t_tol_mie directly
         # U_attr(xi) ~ U_0*C*(delta/xi)^m  => xi_max = delta*(|U_0|*C/t_tol_mie)^(1/m)
@@ -218,6 +217,113 @@ def _compute_table_bounds(
         )
 
     return rmin, rmax
+
+
+def _table_rmin(potential: str, r0: float, delta: float | None) -> float:
+    """Repulsive-side table start: 0.7*r0 (modified_lj), r0 + 0.7*delta (shifted_mie)."""
+    if potential == "modified_lj":
+        return 0.7 * r0
+    if potential == "shifted_mie":
+        if delta is None:
+            raise ValueError("delta is required for shifted_mie bounds.")
+        return r0 + 0.7 * delta
+    raise ValueError(f"Unknown potential: {potential!r}")
+
+
+DEFAULT_TAIL_ENERGY_CUT = 0.1
+
+
+def resolve_table_bounds(
+    potential: str,
+    U_0: float,
+    n: float,
+    m: float,
+    r0: float,
+    delta: float | None,
+    *,
+    N: int,
+    density: float,
+    t_tol_lj: float | None = None,
+    tail_energy_cut: float | None = None,
+    t_tol_mie: float = 4.7,
+    rmax: float | None = None,
+) -> dict:
+    """
+    Choose the pair-table cutoff used by ``run_simulation``.
+
+    Cutoff modes (modified_lj):
+      - dynamic (default): ``t_tol_lj = tail_energy_cut / U_0`` with
+        ``tail_energy_cut = 0.1`` unless given. The attractive term at rmax
+        then equals ``tail_energy_cut`` in absolute energy units (kT = 1),
+        whatever U_0 is.
+      - fixed tolerance: an explicit ``t_tol_lj`` (relative to U_0).
+      - fixed cutoff: an explicit ``rmax``.
+    ``tail_energy_cut`` conflicts with both ``t_tol_lj`` and ``rmax``.
+    shifted_mie always uses ``t_tol_mie`` (or a fixed ``rmax``) and rejects
+    ``tail_energy_cut``.
+
+    For every mode, rmax must satisfy the minimum-image condition
+    ``rmax < L/2`` with ``L = (N/density)^(1/3)``.
+
+    Returns
+    -------
+    dict with keys ``rmin``, ``rmax``, ``rmax_fixed``, ``t_tol_lj``
+    (tolerance actually used, None when rmax is fixed or for shifted_mie),
+    ``tail_energy_cut`` (None unless dynamic), and ``L``.
+    """
+    if tail_energy_cut is not None and t_tol_lj is not None:
+        raise ValueError("Give either tail_energy_cut or t_tol_lj, not both.")
+    if tail_energy_cut is not None and rmax is not None:
+        raise ValueError("Give either tail_energy_cut or a fixed rmax, not both.")
+    if tail_energy_cut is not None and potential != "modified_lj":
+        raise ValueError("tail_energy_cut is only defined for potential='modified_lj'.")
+
+    L = (N / density) ** (1.0 / 3.0)
+    t_tol_used = None
+    cut_used = None
+    rmax_fixed = rmax is not None
+
+    if rmax_fixed:
+        rmin = _table_rmin(potential, r0, delta)
+        rmax = float(rmax)
+        if rmax <= rmin:
+            raise ValueError(
+                f"Fixed rmax ({rmax:.4f}) must exceed rmin ({rmin:.4f})."
+            )
+    else:
+        bounds_kw = {"t_tol_mie": t_tol_mie}
+        if potential == "modified_lj":
+            if t_tol_lj is not None:
+                t_tol_used = float(t_tol_lj)
+            else:
+                cut_used = float(
+                    DEFAULT_TAIL_ENERGY_CUT if tail_energy_cut is None else tail_energy_cut
+                )
+                if U_0 <= 0:
+                    raise ValueError(
+                        f"Dynamic cutoff needs U_0 > 0 (got {U_0}); "
+                        "pass t_tol_lj or rmax instead."
+                    )
+                t_tol_used = cut_used / float(U_0)
+            bounds_kw["t_tol_lj"] = t_tol_used
+        rmin, rmax = _compute_table_bounds(
+            potential, U_0, n, m, r0, delta, **bounds_kw
+        )
+
+    if rmax >= L / 2:
+        raise ValueError(
+            f"rmax={rmax:.4f} violates the minimum-image condition "
+            f"(L/2={L / 2:.4f}, N={N}, density={density})."
+        )
+
+    return {
+        "rmin": rmin,
+        "rmax": rmax,
+        "rmax_fixed": rmax_fixed,
+        "t_tol_lj": t_tol_used,
+        "tail_energy_cut": cut_used,
+        "L": L,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -316,13 +422,14 @@ def run_simulation(
     dt: float = 1e-3,
     steps: int = 15_000_000,
     kT: float = 1.0,
-    t_tol_lj: float = 0.02,
+    t_tol_lj: float | None = None,
     t_tol_mie: float = 4.7,
     init_offset: float = 0.1,
     device: str = "gpu",   # "cpu" also works on HOOMD 2.x
     seed: int = 42,
     plot: bool = True,
     rmax: float | None = None,
+    tail_energy_cut: float | None = None,
     t_rand: float = 10.0,
     dt_hs: float = 1e-4,
 ) -> dict:
@@ -354,9 +461,16 @@ def run_simulation(
         Length-scale parameter required by ``"shifted_mie"``.
         Ignored when ``potential="modified_lj"``.
     N, dt, steps, kT : see defaults
-    t_tol_lj : float
-        Tail-energy tolerance for rmax (modified_lj).  rmax is where the
-        attractive tail falls to t_tol_lj * |U_0|.  Default 0.02.
+    t_tol_lj : float, optional
+        Fixed tail-energy tolerance for rmax (modified_lj): rmax is where the
+        attractive tail falls to t_tol_lj * |U_0|.  Only used when given;
+        conflicts with ``tail_energy_cut``.  Before 2026-10 the default was
+        a fixed 0.02.
+    tail_energy_cut : float, optional
+        Dynamic cutoff (modified_lj), used when neither ``t_tol_lj`` nor
+        ``rmax`` is given: ``t_tol_lj = tail_energy_cut / U_0``, so the
+        attractive tail at rmax equals ``tail_energy_cut`` (kT units).
+        Default 0.1.  Conflicts with ``t_tol_lj`` and ``rmax``.
     t_tol_mie : float
         Tail-energy tolerance for rmax (shifted_mie).  rmax is where the
         attractive tail falls to t_tol_mie.  Default 4.7.
@@ -372,6 +486,8 @@ def run_simulation(
     rmax : float, optional
         If set, use this value as the pair-potential table cutoff instead of
         the analytically derived rmax from ``_compute_table_bounds``.
+        Every cutoff mode must satisfy ``rmax < L/2`` (minimum image),
+        checked before HOOMD starts; see ``resolve_table_bounds``.
     t_rand : float
         HS randomization time in reduced units (D = kT/γ = 1). Default 10.
     dt_hs : float
@@ -380,13 +496,18 @@ def run_simulation(
     Returns
     -------
     dict with keys:
-        gsd_path, energy_csv, rmin, rmax, table_width, potential, t_rand, dt_hs
+        gsd_path, energy_csv, rmin, rmax, rmax_fixed, t_tol_lj,
+        tail_energy_cut, L, table_width, potential, t_rand, dt_hs
+        (``t_tol_lj`` is the tolerance actually used, None when rmax is
+        fixed or for shifted_mie; ``tail_energy_cut`` is None unless the
+        dynamic cutoff was used; ``L`` is the cubic box length.)
 
     Raises
     ------
     ValueError
         If an unknown potential name is given, if ``"shifted_mie"`` is
-        selected without providing ``delta``, or if the derived rmin >= rmax.
+        selected without providing ``delta``, if the derived rmin >= rmax,
+        if cutoff arguments conflict, or if rmax >= L/2.
     """
     if potential not in _POTENTIALS:
         raise ValueError(
@@ -400,22 +521,23 @@ def run_simulation(
     os.makedirs(outdir, exist_ok=True)
 
     # --- Analytically derived table bounds ---
-    rmin, rmax_auto = _compute_table_bounds(
+    bounds = resolve_table_bounds(
         potential, U_0, n, m, r0, delta,
-        t_tol_lj=t_tol_lj, t_tol_mie=t_tol_mie
+        N=N, density=density, t_tol_lj=t_tol_lj,
+        tail_energy_cut=tail_energy_cut, t_tol_mie=t_tol_mie, rmax=rmax,
     )
-    if rmax is not None:
-        rmax = float(rmax)
-        if rmax <= rmin:
-            raise ValueError(
-                f"Fixed rmax ({rmax:.4f}) must exceed rmin ({rmin:.4f})."
-            )
+    rmin, rmax = bounds["rmin"], bounds["rmax"]
+    if bounds["rmax_fixed"]:
+        cut_desc = "rmax fixed"
+    elif potential == "modified_lj" and bounds["tail_energy_cut"] is not None:
+        cut_desc = (f"dynamic: t_tol_lj={bounds['t_tol_lj']:.6g} "
+                    f"= {bounds['tail_energy_cut']:g}/U_0")
+    elif potential == "modified_lj":
+        cut_desc = f"t_tol_lj={bounds['t_tol_lj']}"
     else:
-        rmax = rmax_auto
+        cut_desc = f"t_tol_mie={t_tol_mie}"
     print(f"Table bounds: rmin={rmin:.4f}, rmax={rmax:.4f} "
-          f"(t_tol_lj={t_tol_lj}, t_tol_mie={t_tol_mie}"
-          f"{', rmax fixed' if rmax != rmax_auto else ''})"
-          )
+          f"({cut_desc}; L/2={bounds['L'] / 2:.4f})")
 
     # --- HOOMD context ---
     mode_flag = "--mode=gpu" if device == "gpu" else "--mode=cpu"
@@ -423,8 +545,7 @@ def run_simulation(
 
     # --- Derived params & box ---
     # density is number density ρ = N/V in particles/σ³ (σ = particle diameter).
-    volume = N / density
-    L = volume ** (1.0 / 3.0)  # cubic box side length
+    L = bounds["L"]  # cubic box side length (N / density)^(1/3)
 
     # --- Generate non-overlapping initial positions (same strategy) ---
     def generate_positions(N, L, rmin, offset=0.1):
@@ -553,6 +674,10 @@ def run_simulation(
         "energy_csv"  : energy_csv,
         "rmin"        : rmin,
         "rmax"        : rmax,
+        "rmax_fixed"  : bounds["rmax_fixed"],
+        "t_tol_lj"    : bounds["t_tol_lj"],
+        "tail_energy_cut": bounds["tail_energy_cut"],
+        "L"           : L,
         "table_width" : width,
         "potential"   : potential,
         "t_rand"      : t_rand,
