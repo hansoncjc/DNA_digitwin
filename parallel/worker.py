@@ -28,7 +28,7 @@ Expected JSON config layout::
       },
       "scattering": {
           "method": "saxsfft",
-          "kwargs": {"N_grid": 300}
+          "kwargs": {"N_grid": 600}
       },
       "loss": {
           "exp_path":         "/abs/.../average_structure_factor.npy",

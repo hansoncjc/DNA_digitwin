@@ -309,8 +309,46 @@ def convert_to_SAXS(save_dir, path = None):
 
 # ======== End-to-end: GSD → S(q) via saxs-fft ========
 
+DEFAULT_N_GRID = 600
+
+
+def estimate_saxsfft_n_grid(curve, spacing_rtol=1e-3):
+    """
+    Estimate the saxs-fft ``N_grid`` that produced an S(q) curve.
+
+    saxs-fft bins a cubic-box FFT grid into shells of width ``dq = 2*pi/L``
+    out to the grid corner ``sqrt(3) * (N_grid/2) * dq``, independent of the
+    box length. Bin centres sit at ``(j + 1/2) dq``; assuming the same number
+    of bins was trimmed at both ends, ``(q_min + q_max) / dq`` recovers the
+    corner, so ``N_grid ~= 2/sqrt(3) * (q_min + q_max) / dq``.
+
+    Parameters
+    ----------
+    curve : (N, 2+) array-like
+        ``[q, S(q)]``; only the q column is used.
+    spacing_rtol : float
+        Maximum relative deviation of any q step from the median step.
+
+    Returns
+    -------
+    float or None
+        Estimated ``N_grid``, or None if the q spacing is not uniform
+        (e.g. a measured curve), so the curve did not come from saxs-fft.
+    """
+    q = np.asarray(curve, dtype=np.float64)[:, 0]
+    q = np.unique(q[np.isfinite(q)])
+    if q.size < 10:
+        return None
+    steps = np.diff(q)
+    dq = float(np.median(steps))
+    if dq <= 0.0 or np.max(np.abs(steps - dq)) > spacing_rtol * dq:
+        return None
+    return float(2.0 / np.sqrt(3.0) * (q.min() + q.max()) / dq)
+
+
 def convert_to_SAXS_fft(save_dir, path=None, particle_diameter=24.6,
-                          N_grid=300, frames='last:100', step=5, trim=slice(3, -3)):
+                          N_grid=DEFAULT_N_GRID, frames='last:100', step=5,
+                          trim=slice(3, -3)):
     """
     Compute the structure factor S(q) from a GSD trajectory using saxs-fft (FFT-based).
 
@@ -330,7 +368,11 @@ def convert_to_SAXS_fft(save_dir, path=None, particle_diameter=24.6,
         reduced simulation units to Å⁻¹ via ``q / (particle_diameter * 10)``.
         Default is 24.6 nm.
     N_grid : int
-        Number of FFT grid points in the smallest box dimension.
+        Number of FFT grid points in the smallest box dimension.  Default
+        600.  Must match the N_grid used for a saxs-fft target: the
+        nearest-grid-point assignment damps S(q) by
+        ``prod_i sinc^2(q_i L / (2 N_grid))``, which the loss cannot absorb.
+        Before 2026-10 the default was 300.
     frames : str
         Frame selection string, e.g. ``'last:100'``.
     trim : slice

@@ -191,7 +191,12 @@ Builds a callable `objective(x_unit, ffpath)` that, for one BO query:
      (local > global > `dataset.sim.*`).
 3. Runs `simulation.run_simulation(...)` (HOOMD).
 4. Converts GSD → S(q) via either `convert_to_SAXS` (MC-DFM) or
-   `convert_to_SAXS_fft` (FFT-based).
+   `convert_to_SAXS_fft` (FFT-based, default `N_grid=600`). The
+   simulation and a saxs-fft target must use the same `N_grid`. In
+   `mode="sim"` the objective infers each `datatype="sq"` target's
+   `N_grid` from its q grid (`scattering.estimate_saxsfft_n_grid`) and
+   raises before the first simulation if it differs from
+   `scattering_kwargs["N_grid"]` by more than 5 %.
 5. Compares against the experimental curve in log-space with `mse`
    (default) or weighted `apdist` (see **Curve metrics** above).
 6. Sums `weight · loss` across datasets and appends a row block to
@@ -345,7 +350,7 @@ objective = bo.make_global_objective(
                          "device": "gpu", "plot": False},
     mode              = "map",
     scattering_method = "saxsfft",
-    scattering_kwargs = {"N_grid": 300},
+    scattering_kwargs = {"N_grid": 600},     # must match the target's N_grid
     metric            = "mse",
     parallel          = True,
     parallel_cfg      = PARALLEL_CFG,

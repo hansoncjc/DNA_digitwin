@@ -51,7 +51,13 @@ from typing import Dict, List, Tuple, Any, Optional
 import csv
 
 from simulation import run_simulation
-from scattering import convert_to_SAXS, convert_to_SAXS_fft, extract_exp_sq
+from scattering import (
+    DEFAULT_N_GRID,
+    convert_to_SAXS,
+    convert_to_SAXS_fft,
+    estimate_saxsfft_n_grid,
+    extract_exp_sq,
+)
 from metrics import compare_to_exp, compare_to_exp_saxsfft
 
 # ------------------------- Evaluation failures ------------------------- #
@@ -734,6 +740,39 @@ def _run_objective_parallel(
     return total_loss
 
 
+N_GRID_RTOL = 0.05
+
+
+def _check_target_n_grid(
+    datasets: List[Any],
+    scattering_kwargs: Optional[Dict[str, Any]],
+    trim_tail: int,
+    rtol: float = N_GRID_RTOL,
+) -> None:
+    """
+    Raise if a saxs-fft S(q) target was made with a different N_grid than the
+    simulation side will use. Targets without a uniform q grid are skipped.
+    """
+    n_grid = int((scattering_kwargs or {}).get("N_grid", DEFAULT_N_GRID))
+    for ds in datasets:
+        if getattr(ds, "datatype", "sq") != "sq":
+            continue
+        n_est = estimate_saxsfft_n_grid(ds.load_exp_curve(trim_tail=trim_tail))
+        if n_est is None:
+            print(
+                f"[bo] N_grid check skipped for {ds.id}: target q grid is not "
+                "uniform (not a saxs-fft curve)"
+            )
+            continue
+        if abs(n_est - n_grid) > rtol * n_grid:
+            raise ValueError(
+                f"Dataset {ds.id}: target S(q) looks like saxs-fft N_grid~{n_est:.0f} "
+                f"but the simulation side uses N_grid={n_grid}. "
+                "Set scattering_kwargs['N_grid'] to the target's value."
+            )
+        print(f"[bo] N_grid check {ds.id}: target ~{n_est:.0f}, simulation {n_grid}")
+
+
 def make_global_objective(
     datasets: List[Any],
     ps: ParamSpace,
@@ -795,6 +834,12 @@ def make_global_objective(
     "plot_apdist":
         When True and ``metric='apdist'``, save phase-warp diagnostic plots under
         ``eval_XXX/<dataset_id>/apdist_plots/``. Default True.
+    "scattering_kwargs":
+        Passed to ``convert_to_SAXS_fft`` / ``convert_to_SAXS``. In
+        ``mode='sim'`` with saxs-fft, each ``datatype='sq'`` target is checked
+        once here: the N_grid inferred from its q grid must match
+        ``scattering_kwargs['N_grid']`` (default 600) within 5 %, otherwise
+        ``ValueError`` is raised before any simulation runs.
     Failed evaluations (after GPU job retry) raise ``EvaluationFailed``; they are
     logged to ``bo_trajectory.csv`` but not fed to the GP. ``run_bo`` re-acquires
     a new candidate instead.
@@ -803,6 +848,8 @@ def make_global_objective(
 
     # Ensure the ParamSpace is consistent with the chosen mode
     _validate_param_mode(ps, mode)
+    if mode == "sim" and scattering_method == "saxsfft":
+        _check_target_n_grid(datasets, scattering_kwargs, trim_tail)
 
     def objective(x_unit: torch.Tensor, ffpath: str) -> torch.Tensor:
         objective._eval_failed = False
