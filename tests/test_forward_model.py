@@ -29,6 +29,9 @@ def test_simulation_defaults():
     assert d["t_rand"] == 10.0
     assert d["dt_hs"] == 1e-4
     assert d["hs_sigma_follows_rmin"] is True
+    assert d["transient_log_steps"] == 0
+    assert d["transient_log_period"] == 1
+    assert d["log_max_force"] is False
     assert d["rmax"] is None
     assert d["t_tol_lj"] is None
     assert d["tail_energy_cut"] is None

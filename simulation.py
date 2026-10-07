@@ -519,6 +519,9 @@ def run_simulation(
     t_rand: float = 10.0,
     dt_hs: float = 1e-4,
     hs_sigma_follows_rmin: bool = True,
+    transient_log_steps: int = 0,
+    transient_log_period: int = 1,
+    log_max_force: bool = False,
 ) -> dict:
     """
     Run a HOOMD simulation of N spheres with a selectable pair potential.
@@ -526,6 +529,17 @@ def run_simulation(
     Workflow: shuffled cubic lattice GSD -> in-memory Heyes-Melrose HS
     randomization (no dump) -> selected pair potential production run.
     ``DNA_assembly_*.gsd`` frame 0 is the post-HS configuration.
+
+    ``potential_energy.csv`` is written every 5000 steps during production.
+    After the HOOMD timestep the columns are ``potential_energy``,
+    ``kinetic_energy``, ``temperature``, and ``pressure`` (names from the
+    HOOMD 2.9.7 ``hoomd.analyze.log`` docstring). ``potential_energy`` stays
+    in column 1, which ``plot_energy`` plots. ``transient_log_steps > 0``
+    also writes ``transient_energy.csv`` over the start of production and
+    splits ``hoomd.run`` only so that logger can be disabled. The Langevin
+    update itself is unchanged: HOOMD 2.9.7 draws the noise from the seed,
+    the particle, and the timestep, and the default (``transient_log_steps``
+    0) is still a single ``hoomd.run``.
 
     Forward model
     -------------
@@ -615,14 +629,33 @@ def run_simulation(
         serves to randomize positions, so its contact distance is free.
         False gives ``σ_HS = 1`` (particle diameter), the behaviour before
         2026-10.
+    transient_log_steps : int
+        If positive, also write ``transient_energy.csv`` for this many
+        steps at the start of production, then disable that logger.
+        Default 0 leaves production as one ``hoomd.run`` and does not
+        write the file. The HOOMD timestep column includes the HS steps:
+        production step 0 is ``round(t_rand / dt_hs)`` (100000 at the
+        defaults). Rows are the timesteps in
+        ``[t0, t0 + transient_log_steps)`` on which the period lands.
+        The endpoint itself is not in this file.
+    transient_log_period : int
+        Period of ``transient_energy.csv``, in steps. Default 1 records
+        every step in the window. A larger period subsamples it. Used
+        only when ``transient_log_steps > 0``.
+    log_max_force : bool
+        If True, add a ``max_force`` column to both logs: the maximum
+        per-particle net-force magnitude, from a Python callback on the
+        particle proxy. Default False. Each logged row then loops over
+        all particles, so leave this off for a full-length run.
 
     Returns
     -------
     dict with keys:
-        gsd_path, energy_csv, rmin, rmax, rmax_fixed, t_tol_lj,
-        tail_energy_cut, L, table_width, potential, t_rand, dt_hs,
-        sigma_hs, n_pairs_below_rmin, min_pair_distance
-        (``t_tol_lj`` is the tolerance actually used, None when rmax is
+        gsd_path, energy_csv, transient_energy_csv, rmin, rmax,
+        rmax_fixed, t_tol_lj, tail_energy_cut, L, table_width, potential,
+        t_rand, dt_hs, sigma_hs, n_pairs_below_rmin, min_pair_distance
+        (``transient_energy_csv`` is None when ``transient_log_steps`` is
+        0. ``t_tol_lj`` is the tolerance actually used, None when rmax is
         fixed or for shifted_mie; ``tail_energy_cut`` is None unless the
         dynamic cutoff was used; ``L`` is the cubic box length;
         ``n_pairs_below_rmin`` and ``min_pair_distance`` are measured on
@@ -634,7 +667,8 @@ def run_simulation(
     ValueError
         If an unknown potential name is given, if ``"shifted_mie"`` is
         selected without providing ``delta``, if the derived rmin >= rmax,
-        if cutoff arguments conflict, or if rmax >= L/2.
+        if cutoff arguments conflict, if rmax >= L/2, or if the transient
+        log arguments are out of range.
     """
     if potential not in _POTENTIALS:
         raise ValueError(
@@ -644,6 +678,17 @@ def run_simulation(
     pot_fn, needs_delta = _POTENTIALS[potential]
     if needs_delta and delta is None:
         raise ValueError("`delta` must be provided when potential='shifted_mie'.")
+    if transient_log_steps < 0 or transient_log_period < 1:
+        raise ValueError(
+            "transient_log_steps must be >= 0 and transient_log_period "
+            f"must be >= 1 (got steps={transient_log_steps}, "
+            f"period={transient_log_period})."
+        )
+    if transient_log_steps > steps:
+        raise ValueError(
+            f"transient_log_steps ({transient_log_steps}) is longer than "
+            f"the production run ({steps})."
+        )
 
     os.makedirs(outdir, exist_ok=True)
 
@@ -756,18 +801,33 @@ def run_simulation(
     )
 
     energy_csv = os.path.join(outdir, "potential_energy.csv")
-    hoomd.analyze.log(
-        filename=energy_csv,
-        quantities=['potential_energy'],
-        period=5000,
-        overwrite=True
-    )
+    _attach_thermo_log(energy_csv, period=5000, log_max_force=log_max_force,
+                       system=system)
 
     # --- Run ---
+    # The dense logger is removed by ending its segment. HOOMD 2.9.7
+    # Langevin noise depends on (seed, particle, timestep), not on how
+    # many times hoomd.run was called, so the split does not change the
+    # trajectory. transient_log_steps == 0 keeps the single hoomd.run.
     print(f"Running {steps} steps with {N} spheres at number density "
           f"{density:.6g} particles/σ³ using potential='{potential}' "
           f"(dt={dt}, after HS t_rand={t_rand:g})")
-    hoomd.run(steps)
+    transient_csv = None
+    if transient_log_steps:
+        transient_csv = os.path.join(outdir, "transient_energy.csv")
+        dense_log = _attach_thermo_log(
+            transient_csv, period=transient_log_period,
+            log_max_force=log_max_force, system=system,
+        )
+        print(f"Transient log: first {transient_log_steps} production steps "
+              f"every {transient_log_period} -> {transient_csv}")
+        hoomd.run(transient_log_steps)
+        dense_log.disable()
+        remaining = steps - transient_log_steps
+        if remaining:
+            hoomd.run(remaining)
+    else:
+        hoomd.run(steps)
     gsd_dump.disable()
     _stamp_sphere_type_shapes(gsd_path)
 
@@ -781,6 +841,7 @@ def run_simulation(
     return {
         "gsd_path"    : gsd_path,
         "energy_csv"  : energy_csv,
+        "transient_energy_csv": transient_csv,
         "rmin"        : rmin,
         "rmax"        : rmax,
         "rmax_fixed"  : bounds["rmax_fixed"],
@@ -825,10 +886,78 @@ def plot_pair_potential(rmin, rmax, width, U_0, n, m, r0, out_png,
     plt.tight_layout(); plt.savefig(out_png, dpi=600); plt.close()
 
 
+# Quantities hoomd.analyze.log accepts on HOOMD 2.9.7 (analyze.py docstring).
+# potential_energy stays first: plot_energy reads column 1 of the TSV
+# (column 0 is the timestep HOOMD writes itself).
+_THERMO_LOG_QUANTITIES = (
+    "potential_energy",
+    "kinetic_energy",
+    "temperature",
+    "pressure",
+)
+
+
+def _energy_log_quantities(log_max_force=False):
+    """Column names after ``timestep`` in the production energy logs."""
+    quantities = list(_THERMO_LOG_QUANTITIES)
+    if log_max_force:
+        quantities.append("max_force")
+    return quantities
+
+
+def _max_net_force(system):
+    """Largest per-particle net-force magnitude.
+
+    Read through the particle proxy. Under numpy 2, HOOMD 2.9.7
+    ``take_snapshot()`` returns a wrong position buffer; this path does
+    not use that buffer.
+    """
+    f2_max = 0.0
+    for p in system.particles:
+        fx, fy, fz = p.net_force
+        f2 = fx * fx + fy * fy + fz * fz
+        if f2 > f2_max:
+            f2_max = f2
+    return f2_max ** 0.5
+
+
+def _attach_thermo_log(filename, period, log_max_force, system):
+    """Tab-separated HOOMD log of the thermo columns, optionally max force.
+
+    ``max_force`` is a Python callback, not a built-in quantity. It runs
+    on every row this logger writes. Leave ``log_max_force`` false on a
+    long run: each row walks all particles from Python.
+    """
+    logger = hoomd.analyze.log(
+        filename=filename,
+        quantities=_energy_log_quantities(log_max_force),
+        period=period,
+        overwrite=True,
+    )
+    if log_max_force:
+        def max_force(_timestep, system=system):
+            return _max_net_force(system)
+        logger.register_callback("max_force", max_force)
+    return logger
+
+
+def _energy_log_xy(csv_path):
+    """Timestep and potential-energy columns plotted by ``plot_energy``.
+
+    The first 6 data rows are skipped, as before. HOOMD writes the
+    timestep in column 0 and the logged quantities after it.
+    ``potential_energy`` is the first logged quantity, so it stays in
+    column 1 when kinetic energy, temperature, and pressure are added
+    to the right. A two-column log from before that change still plots.
+    """
+    data = pd.read_csv(csv_path, delimiter='\t').values
+    return data[6:, 0], data[6:, 1]
+
+
 def plot_energy(csv_path, out_png):
-    df = pd.read_csv(csv_path, delimiter='\t').values
+    time, energy = _energy_log_xy(csv_path)
     plt.figure(figsize=(6, 4))
-    plt.plot(df[6:, 0], df[6:, 1])
+    plt.plot(time, energy)
     plt.xlabel("Time"); plt.ylabel("Potential Energy")
     plt.grid(True); plt.tight_layout()
     plt.savefig(out_png, dpi=600); plt.close()
