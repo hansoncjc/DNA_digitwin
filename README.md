@@ -224,6 +224,25 @@ optimized over the unit cube. Returns `(best_x_phys, history)`.
 
 ---
 
+### Forward model
+
+The defaults of `simulation.run_simulation` and
+`scattering.convert_to_SAXS_fft` are the forward model shared by inverse
+design and mapping training (ground truth and BO). Leave them at their
+defaults and pass only `N` (each run states its own `N` next to its target
+path), `density` and the potential parameters:
+
+| Stage | Defaults |
+|---|---|
+| Pair potential | `modified_lj` table; dynamic cutoff `t_tol_lj = 0.1/U_0`, no fixed `rmax`, `rmax < L/2` |
+| HS randomization | Heyes–Melrose, `t_rand = 10`, `dt_hs = 1e-4`, contact distance `max(1, rmin)` |
+| Langevin production | `kT = 1`, γ = 1, `dt = 1e-3`, `steps = 22_500_000` (450 GSD frames), `seed = 42` |
+| saxs-fft | `N_grid = 600`, `frames = 'last:100'`, `step = 5`, `trim = slice(3, -3)`, `particle_diameter = 24.6` nm |
+
+`tests/test_forward_model.py` pins these values.
+
+---
+
 ## End-to-end workflow
 
 1. **Build datasets.** For each experimental condition you have an
@@ -358,11 +377,10 @@ objective = bo.make_global_objective(
     ffpath            = FORMFACTOR,
     out_root          = OUT_ROOT,
     trim_tail         = 0,
-    sim_defaults      = {"steps": 15_000_000, "N": 5000,
-                         "device": "gpu", "plot": False},
+    sim_defaults      = {"N": 5000, "device": "gpu", "plot": False},
     mode              = "map",
     scattering_method = "saxsfft",
-    scattering_kwargs = {"N_grid": 600},     # must match the target's N_grid
+    scattering_kwargs = {},                  # forward-model defaults (N_grid=600)
     metric            = "mse",
     parallel          = True,
     parallel_cfg      = PARALLEL_CFG,

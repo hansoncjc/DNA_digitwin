@@ -356,6 +356,16 @@ def convert_to_SAXS_fft(save_dir, path=None, particle_diameter=24.6,
     from particle positions — no form-factor division is needed on the simulation
     side.
 
+    Forward model
+    -------------
+    The defaults of this function, together with those of
+    ``simulation.run_simulation``, are the forward model shared by inverse
+    design and mapping training (ground truth and BO): ``N_grid = 600``,
+    ``frames = 'last:100'`` with ``step = 5`` (20 of the 450 production
+    frames), ``trim = slice(3, -3)``, ``particle_diameter = 24.6`` nm.
+    Changing a default changes the forward model; a saxs-fft target must be
+    made with the same ``N_grid``.
+
     Parameters
     ----------
     save_dir : str
@@ -375,6 +385,8 @@ def convert_to_SAXS_fft(save_dir, path=None, particle_diameter=24.6,
         Before 2026-10 the default was 300.
     frames : str
         Frame selection string, e.g. ``'last:100'``.
+    step : int
+        Use every ``step``-th frame of the selection. Default 5.
     trim : slice
         Slice applied to q and S(q) to remove FFT boundary artefacts.
         Default ``slice(3, -3)`` drops the first and last 3 bins.

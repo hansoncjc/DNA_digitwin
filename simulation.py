@@ -462,7 +462,7 @@ def run_simulation(
     delta: float | None = None,
     N: int = 5000,
     dt: float = 1e-3,
-    steps: int = 15_000_000,
+    steps: int = 22_500_000,
     kT: float = 1.0,
     t_tol_lj: float | None = None,
     t_tol_mie: float = 4.7,
@@ -482,6 +482,25 @@ def run_simulation(
     Workflow: shuffled cubic lattice GSD -> in-memory Heyes-Melrose HS
     randomization (no dump) -> selected pair potential production run.
     ``DNA_assembly_*.gsd`` frame 0 is the post-HS configuration.
+
+    Forward model
+    -------------
+    The defaults of this function, together with those of
+    ``scattering.convert_to_SAXS_fft``, are the forward model shared by
+    inverse design and mapping training (ground truth and BO): call both
+    with defaults and pass only ``N``, ``density`` and the potential
+    parameters. Changing a default changes the forward model.
+
+      - modified_lj table potential; dynamic cutoff
+        ``t_tol_lj = 0.1 / U_0`` (``tail_energy_cut``), no fixed rmax,
+        ``rmax < L/2`` enforced
+      - Heyes-Melrose HS randomization: ``t_rand = 10``, ``dt_hs = 1e-4``,
+        contact distance ``max(1, rmin)``
+      - Langevin production: ``kT = 1``, gamma = 1, ``dt = 1e-3``,
+        ``steps = 22_500_000`` (22,500 tau; one GSD frame every 50,000
+        steps -> 450 frames), ``seed = 42``
+      - ``N`` comes from the caller (default 5000); each run states its N
+        next to its target path
 
     Parameters
     ----------
@@ -503,7 +522,7 @@ def run_simulation(
     delta : float, optional
         Length-scale parameter required by ``"shifted_mie"``.
         Ignored when ``potential="modified_lj"``.
-    N, dt, steps, kT : see defaults
+    N, dt, steps, kT : see defaults (``steps`` was 15_000_000 before 2026-10)
     t_tol_lj : float, optional
         Fixed tail-energy tolerance for rmax (modified_lj): rmax is where the
         attractive tail falls to t_tol_lj * |U_0|.  Only used when given;
