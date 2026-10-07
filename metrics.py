@@ -9,15 +9,26 @@ This module provides the same behavior as the original script:
 - Optionally save diagnostic figures including APDist phase-warp plots.
 """
 
+import json
 import os
 import warnings
+from dataclasses import asdict, dataclass
 
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
+from scipy.signal import find_peaks, savgol_filter
 from apdist.distances import AmplitudePhaseDistance
 
 DEFAULT_DP_COEFF = 0.5
+
+
+class MetricFailed(ValueError):
+    """The loss cannot be computed from a valid simulated S(q).
+
+    Deterministic given the two curves, so rerunning the simulation does not
+    help: the BO evaluation is failed and not given to the GP.
+    """
 
 
 def _sanitize_curve(arr: np.ndarray) -> np.ndarray:
@@ -245,6 +256,442 @@ def compare_saxs_curves(
     return distance, q_ref, I_exp_resampled, I_sim_scaled, da, dp
 
 
+# ------------------------- shift_mse ------------------------- #
+#
+# L = M4 + lambda * |ln(q1_sim / q1_tgt)|, where M4 is the aligned log10
+# RMSE on the reduced axis x = q / q1 (each curve divided by its own first
+# peak) after scaling the simulated intensity by the high-q S(q) -> 1
+# plateau. The defaults reproduce the metric of the 2026-08/09 FCC inverse
+# runs; the HS-fluid runs differ only in the three q ranges.
+
+SHIFT_MSE_DEFAULTS = {
+    "peak_search_range": (0.006, 0.021),
+    "peak_baseline_range": (0.005, 0.008),
+    "asymptote_band": (0.050, 0.0654),
+    "prominence_frac": 0.3,
+    "min_prom_ratio": 3.0,
+    "n_points": 512,
+    "lambda_shift": 1.0,
+    "overlap_trim": None,
+    "no_peak": "fallback",
+    "require_reliable": False,
+    "asymptote_min_points": 3,
+    "asymptote_fallback": "tail",
+    "asymptote_tail_frac": 0.75,
+    "asymptote_zero_den": "unity",
+}
+
+_SHIFT_MSE_RANGES = ("peak_search_range", "peak_baseline_range", "asymptote_band")
+_SHIFT_MSE_CHOICES = {
+    "no_peak": ("fallback", "fail"),
+    "asymptote_fallback": ("tail", "fail"),
+    "asymptote_zero_den": ("unity", "fail"),
+}
+
+
+def shift_mse_params(metric_kwargs=None):
+    """
+    Return the full ``shift_mse`` parameter dict: defaults overridden by
+    ``metric_kwargs``. Lists (from JSON) become tuples. Unknown keys or
+    invalid choices raise ``ValueError``.
+
+    Parameters (keys of ``metric_kwargs``)
+    --------------------------------------
+    peak_search_range, peak_baseline_range : (q_lo, q_hi)
+        First-peak search window and the window whose median S is the
+        baseline (A^-1). Defaults (0.006, 0.021), (0.005, 0.008).
+    asymptote_band : (q_lo, q_hi)
+        High-q S(q) -> 1 band; the simulated curve is scaled by
+        mean_band(S_tgt) / mean_band(S_sim). Default (0.050, 0.0654).
+    prominence_frac : float
+        ``find_peaks`` prominence = prominence_frac * (max - baseline). 0.3.
+    min_prom_ratio : float
+        Peak / baseline needed for ``reliable``. 3.
+    n_points : int
+        Log-spaced grid points on the reduced axis. 512.
+    lambda_shift : float
+        Weight of ``|ln(q1_sim/q1_tgt)|``. 1.
+    overlap_trim : int or None
+        Used only when ``q_range is None``: compare over the overlap of the
+        two curves on the reduced axis after dropping ``overlap_trim`` points
+        at each end of each curve. None (default) keeps the old behaviour:
+        ``q_range=None`` raises.
+    no_peak : {"fallback", "fail"}
+        No ``find_peaks`` peak in the search window: take the maximum of the
+        smoothed curve (old behaviour) or fail.
+    require_reliable : bool
+        Fail when a detected peak is not ``reliable``. False.
+    asymptote_min_points : int
+        Fewer band points than this triggers ``asymptote_fallback``. 3.
+    asymptote_fallback : {"tail", "fail"}
+        "tail" uses ``q >= asymptote_tail_frac * q_max`` of that curve (old
+        behaviour); "fail" fails.
+    asymptote_tail_frac : float
+        0.75.
+    asymptote_zero_den : {"unity", "fail"}
+        Simulated band mean non-finite or below 1e-12: scale 1.0 (old
+        behaviour) or fail.
+    """
+    unknown = set(metric_kwargs or {}) - set(SHIFT_MSE_DEFAULTS)
+    if unknown:
+        raise ValueError(f"Unknown shift_mse metric_kwargs: {sorted(unknown)}")
+    p = dict(SHIFT_MSE_DEFAULTS)
+    p.update(metric_kwargs or {})
+    for key in _SHIFT_MSE_RANGES:
+        lo, hi = p[key]
+        p[key] = (float(lo), float(hi))
+    for key, choices in _SHIFT_MSE_CHOICES.items():
+        if p[key] not in choices:
+            raise ValueError(f"shift_mse {key} must be one of {choices}; got {p[key]!r}")
+    p["n_points"] = int(p["n_points"])
+    p["asymptote_min_points"] = int(p["asymptote_min_points"])
+    if p["overlap_trim"] is not None:
+        p["overlap_trim"] = int(p["overlap_trim"])
+        if p["overlap_trim"] < 0:
+            raise ValueError("shift_mse overlap_trim must be >= 0")
+    for key in ("prominence_frac", "min_prom_ratio", "lambda_shift", "asymptote_tail_frac"):
+        p[key] = float(p[key])
+    p["require_reliable"] = bool(p["require_reliable"])
+    return p
+
+
+@dataclass
+class PeakInfo:
+    q1: float
+    s_peak: float
+    baseline: float
+    prom_ratio: float
+    fwhm_points: float
+    n_peaks_found: int
+    at_search_edge: bool
+    reliable: bool
+
+
+def detect_first_peak(
+    curve,
+    search_range=SHIFT_MSE_DEFAULTS["peak_search_range"],
+    baseline_range=SHIFT_MSE_DEFAULTS["peak_baseline_range"],
+    prominence_frac=SHIFT_MSE_DEFAULTS["prominence_frac"],
+    min_prom_ratio=SHIFT_MSE_DEFAULTS["min_prom_ratio"],
+):
+    """
+    Lowest-q peak of a sanitized (N, 2) curve with sub-grid refinement.
+
+    Savitzky-Golay smoothing (window 5, order 2) inside ``search_range``,
+    ``find_peaks`` with prominence ``prominence_frac * (max - baseline)``,
+    first peak taken, parabolic refinement on the raw points. With no peak
+    found, the smoothed maximum is used and ``n_peaks_found = 0``. Fewer than
+    5 points in the window gives ``q1 = nan``.
+    """
+    q, s = curve[:, 0], curve[:, 1]
+
+    base_mask = (q >= baseline_range[0]) & (q <= baseline_range[1])
+    baseline = float(np.median(s[base_mask])) if base_mask.any() else float(np.min(s))
+    baseline = max(baseline, 1e-12)
+
+    mask = (q >= search_range[0]) & (q <= search_range[1])
+    qw, sw = q[mask], s[mask]
+    if qw.size < 5:
+        return PeakInfo(np.nan, np.nan, baseline, np.nan, np.nan, 0, True, False)
+
+    window = min(5, qw.size if qw.size % 2 == 1 else qw.size - 1)
+    sw_smooth = savgol_filter(sw, window_length=window, polyorder=2) if window >= 5 else sw.copy()
+
+    prominence = prominence_frac * max(float(sw_smooth.max()) - baseline, 1e-12)
+    idx_peaks, _ = find_peaks(sw_smooth, prominence=prominence)
+
+    if idx_peaks.size == 0:
+        idx = int(np.argmax(sw_smooth))
+        n_found = 0
+    else:
+        idx = int(idx_peaks[0])
+        n_found = int(idx_peaks.size)
+
+    if 0 < idx < qw.size - 1:
+        y0, y1, y2 = sw[idx - 1], sw[idx], sw[idx + 1]
+        denom = y0 - 2.0 * y1 + y2
+        delta = 0.5 * (y0 - y2) / denom if abs(denom) > 1e-15 else 0.0
+        delta = float(np.clip(delta, -1.0, 1.0))
+        dq = qw[idx + 1] - qw[idx]
+        q1 = float(qw[idx] + delta * dq)
+    else:
+        q1 = float(qw[idx])
+
+    s_peak = float(sw[idx])
+    prom_ratio = s_peak / baseline
+    half = 0.5 * (s_peak + baseline)
+    fwhm_points = float(np.sum(sw >= half))
+    at_edge = idx <= 1 or idx >= qw.size - 2
+    reliable = bool((prom_ratio >= min_prom_ratio) and (not at_edge) and np.isfinite(q1))
+    return PeakInfo(q1, s_peak, baseline, prom_ratio, fwhm_points, n_found, at_edge, reliable)
+
+
+def asymptote_scale(
+    exp_curve,
+    sim_curve,
+    band=SHIFT_MSE_DEFAULTS["asymptote_band"],
+    min_points=SHIFT_MSE_DEFAULTS["asymptote_min_points"],
+    fallback=SHIFT_MSE_DEFAULTS["asymptote_fallback"],
+    tail_frac=SHIFT_MSE_DEFAULTS["asymptote_tail_frac"],
+    zero_den=SHIFT_MSE_DEFAULTS["asymptote_zero_den"],
+):
+    """
+    Intensity scale ``mean_band(S_exp) / mean_band(S_sim)`` in absolute q.
+
+    Returns ``(scale, info)``; ``info`` records the band point counts and
+    whether the tail fallback or the zero-denominator rule fired.
+    """
+    info = {}
+
+    def band_mean(curve, tag):
+        q, s = curve[:, 0], curve[:, 1]
+        mask = (q >= band[0]) & (q <= band[1])
+        info[f"{tag}_band_points"] = int(mask.sum())
+        info[f"{tag}_tail_fallback"] = bool(mask.sum() < min_points)
+        if mask.sum() < min_points:
+            if fallback == "fail":
+                raise MetricFailed(
+                    f"shift_mse: {tag} curve has {int(mask.sum())} points in "
+                    f"asymptote band {band} (< {min_points})"
+                )
+            mask = q >= tail_frac * float(q.max())
+        return float(np.mean(s[mask]))
+
+    num = band_mean(exp_curve, "exp")
+    den = band_mean(sim_curve, "sim")
+    info["zero_den"] = bool(not np.isfinite(den) or abs(den) < 1e-12)
+    if info["zero_den"]:
+        if zero_den == "fail":
+            raise MetricFailed(f"shift_mse: simulated asymptote band mean is {den}")
+        return 1.0, info
+    return num / den, info
+
+
+def _resample_reduced(exp_curve, sim_curve, window, exp_scale, sim_scale, n_points):
+    """Resample both curves onto a log grid in reduced x = q / q1.
+
+    Out-of-range grid points hold the first/last in-window intensity.
+    """
+    qe = exp_curve[:, 0] / exp_scale
+    ie = exp_curve[:, 1]
+    qs = sim_curve[:, 0] / sim_scale
+    isim = sim_curve[:, 1]
+
+    lo = max(qe.min(), qs.min(), window[0])
+    hi = min(qe.max(), qs.max(), window[1])
+    if not (hi > lo):
+        raise MetricFailed(f"shift_mse: empty comparison window [{lo}, {hi}]")
+
+    me = (qe >= lo) & (qe <= hi)
+    ms = (qs >= lo) & (qs <= hi)
+    if int(me.sum()) < 4 or int(ms.sum()) < 4:
+        raise MetricFailed(
+            f"shift_mse: too few points in window: exp={int(me.sum())}, sim={int(ms.sum())}"
+        )
+
+    grid = np.logspace(np.log10(lo), np.log10(hi), int(n_points))
+    i_exp = interp1d(
+        qe[me], ie[me], kind="linear", bounds_error=False,
+        fill_value=(float(ie[me][0]), float(ie[me][-1])),
+    )(grid)
+    i_sim = interp1d(
+        qs[ms], isim[ms], kind="linear", bounds_error=False,
+        fill_value=(float(isim[ms][0]), float(isim[ms][-1])),
+    )(grid)
+    eps = 1e-10
+    i_exp = np.clip(i_exp, eps, None)
+    i_sim = np.clip(i_sim, eps, None)
+    return np.log10(i_exp), np.log10(i_sim), grid
+
+
+_trapezoid = getattr(np, "trapezoid", None) or np.trapz
+
+
+def shift_mse_loss(exp_data, sim_data, q_range, metric_kwargs=None):
+    """
+    ``L = M4 + lambda_shift * |ln(q1_sim / q1_tgt)|``.
+
+    Parameters
+    ----------
+    exp_data, sim_data : (N, 2) arrays [q, S(q)]
+    q_range : (q_lo, q_hi) or None
+        Absolute comparison window, converted to x = q / q1_tgt. None needs
+        ``metric_kwargs['overlap_trim']`` (see :func:`shift_mse_params`).
+    metric_kwargs : dict, optional
+        Overrides of :data:`SHIFT_MSE_DEFAULTS`.
+
+    Returns
+    -------
+    loss, diag, grid, log_exp, log_sim
+        ``diag`` holds every field written to ``shift_mse_diagnostics.json``.
+
+    Raises
+    ------
+    MetricFailed
+        No usable first peak (per ``no_peak`` / ``require_reliable``),
+        asymptote rules set to "fail" and triggered, or an empty window.
+    ValueError
+        ``q_range is None`` without ``overlap_trim`` (configuration error).
+    """
+    p = shift_mse_params(metric_kwargs)
+    if q_range is None and p["overlap_trim"] is None:
+        raise ValueError(
+            "shift_mse requires an absolute q_range window, or "
+            "metric_kwargs['overlap_trim'] for the curve overlap"
+        )
+    exp_curve = _sanitize_curve(exp_data)
+    sim_curve = _sanitize_curve(sim_data)
+
+    peak_kw = dict(
+        search_range=p["peak_search_range"],
+        baseline_range=p["peak_baseline_range"],
+        prominence_frac=p["prominence_frac"],
+        min_prom_ratio=p["min_prom_ratio"],
+    )
+    peaks = {"tgt": detect_first_peak(exp_curve, **peak_kw),
+             "sim": detect_first_peak(sim_curve, **peak_kw)}
+    for tag, label in (("tgt", "target"), ("sim", "simulated")):
+        pk = peaks[tag]
+        if not np.isfinite(pk.q1):
+            raise MetricFailed(f"shift_mse: failed to detect {label} first Bragg peak")
+        if p["no_peak"] == "fail" and pk.n_peaks_found == 0:
+            raise MetricFailed(
+                f"shift_mse: no {label} peak found in {p['peak_search_range']} "
+                "(no_peak='fail')"
+            )
+        if p["require_reliable"] and not pk.reliable:
+            raise MetricFailed(
+                f"shift_mse: {label} first peak not reliable "
+                f"(prom_ratio={pk.prom_ratio:.3g}, at_edge={pk.at_search_edge})"
+            )
+
+    tgt_q1 = float(peaks["tgt"].q1)
+    sim_q1 = float(peaks["sim"].q1)
+    if q_range is not None:
+        window_abs = (float(q_range[0]), float(q_range[1]))
+        x_lo, x_hi = window_abs[0] / tgt_q1, window_abs[1] / tgt_q1
+        window_source = "q_range"
+    else:
+        k = p["overlap_trim"]
+        qe, qs = exp_curve[:, 0], sim_curve[:, 0]
+        if qe.size <= 2 * k or qs.size <= 2 * k:
+            raise MetricFailed(f"shift_mse: overlap_trim={k} leaves no points")
+        x_lo = max(qe[k] / tgt_q1, qs[k] / sim_q1)
+        x_hi = min(qe[-1 - k] / tgt_q1, qs[-1 - k] / sim_q1)
+        window_abs = (x_lo * tgt_q1, x_hi * tgt_q1)
+        window_source = "overlap"
+
+    anchor, asym_info = asymptote_scale(
+        exp_curve, sim_curve,
+        band=p["asymptote_band"],
+        min_points=p["asymptote_min_points"],
+        fallback=p["asymptote_fallback"],
+        tail_frac=p["asymptote_tail_frac"],
+        zero_den=p["asymptote_zero_den"],
+    )
+    sim_scaled = sim_curve.copy()
+    sim_scaled[:, 1] = sim_scaled[:, 1] * anchor
+    log_exp, log_sim, grid = _resample_reduced(
+        exp_curve, sim_scaled, (x_lo, x_hi),
+        exp_scale=tgt_q1, sim_scale=sim_q1, n_points=p["n_points"],
+    )
+    n = int(p["n_points"])
+    t = np.linspace(0.0, 1.0, n)
+    m4 = float(np.sqrt(_trapezoid((log_exp - log_sim) ** 2, t)))
+    q1_ratio = float(sim_q1 / tgt_q1)
+    abs_log = float(np.abs(np.log(q1_ratio)))
+    shift_term = float(p["lambda_shift"] * abs_log)
+    loss = m4 + shift_term
+
+    peak_fallback = {tag: peaks[tag].n_peaks_found == 0 for tag in peaks}
+    diag = {
+        "mse": loss,
+        "m4": m4,
+        "shift_term": shift_term,
+        "abs_log_q1_ratio": abs_log,
+        "lambda_shift": p["lambda_shift"],
+        "q1_ratio": q1_ratio,
+        "q1_tgt": tgt_q1,
+        "q1_sim": sim_q1,
+        "q1_tgt_reliable": bool(peaks["tgt"].reliable),
+        "q1_sim_reliable": bool(peaks["sim"].reliable),
+        "anchor_scale": float(anchor),
+        "window_abs": [float(window_abs[0]), float(window_abs[1])],
+        "window_source": window_source,
+        "q_range": None if q_range is None else [float(q_range[0]), float(q_range[1])],
+        "x_lo": float(x_lo),
+        "x_hi": float(x_hi),
+        "n_points": n,
+        "grid_lo": float(grid[0]),
+        "grid_hi": float(grid[-1]),
+        "peak_tgt": asdict(peaks["tgt"]),
+        "peak_sim": asdict(peaks["sim"]),
+        "asymptote": asym_info,
+        "fallbacks": {
+            "peak_tgt_max_fallback": bool(peak_fallback["tgt"]),
+            "peak_sim_max_fallback": bool(peak_fallback["sim"]),
+            "asymptote_exp_tail_fallback": asym_info["exp_tail_fallback"],
+            "asymptote_sim_tail_fallback": asym_info["sim_tail_fallback"],
+            "asymptote_zero_den_unity": asym_info["zero_den"],
+        },
+        "params": {k: (list(v) if isinstance(v, tuple) else v) for k, v in p.items()},
+    }
+    return loss, diag, grid, log_exp, log_sim
+
+
+def _compare_shift_mse(experimental_data, simulated_data, save_dir, q_range, metric_kwargs):
+    """Compute shift_mse, write ``shift_mse_diagnostics.json`` and the overlay plot."""
+    os.makedirs(save_dir, exist_ok=True)
+    try:
+        loss, diag, grid, log_exp, log_sim = shift_mse_loss(
+            experimental_data, simulated_data, q_range, metric_kwargs=metric_kwargs,
+        )
+    except MetricFailed as exc:
+        with open(os.path.join(save_dir, "shift_mse_diagnostics.json"), "w") as fh:
+            json.dump({"metric": "shift_mse", "failed": True, "reason": str(exc),
+                       "params": {k: (list(v) if isinstance(v, tuple) else v)
+                                  for k, v in shift_mse_params(metric_kwargs).items()}},
+                      fh, indent=2)
+        raise
+    diag["metric"] = "shift_mse"
+    diag["failed"] = False
+    with open(os.path.join(save_dir, "shift_mse_diagnostics.json"), "w") as fh:
+        json.dump(diag, fh, indent=2)
+
+    with plt.rc_context({"font.size": 18}):
+        fig, ax = plt.subplots(figsize=(7, 6))
+        ax.scatter(grid, 10.0 ** log_exp, linewidth=0.5, label="target (aligned x)", color="k")
+        ax.plot(grid, 10.0 ** log_sim, linewidth=3, label="sim (aligned x)", color="red")
+        ax.set_yscale("log")
+        ax.set_xscale("log")
+        ax.set_ylabel("S(q) (arb. unit)")
+        ax.set_xlabel(r"$x = q/q_1$ (aligned)")
+        ax.set_title(
+            f"L={loss:.6g}  M4={diag['m4']:.6g}  shift={diag['shift_term']:.6g}\n"
+            f"q1_ratio={diag['q1_ratio']:.5g}  "
+            f"q1_tgt={diag['q1_tgt']:.5g}  q1_sim={diag['q1_sim']:.5g}"
+        )
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(os.path.join(save_dir, "compare_to_exp_saxsfft.png"),
+                    dpi=600, bbox_inches="tight")
+        plt.close(fig)
+    return loss
+
+
+def load_shift_mse_components(save_dir):
+    """Return ``{"rmse": M4, "shift": shift_term}`` from a diagnostics JSON, or {}."""
+    path = os.path.join(save_dir, "shift_mse_diagnostics.json")
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if data.get("failed") or data.get("m4") is None:
+        return {}
+    return {"rmse": float(data["m4"]), "shift": float(data["shift_term"])}
+
+
 def compare_to_exp(
     experimental_data,
     simulated_data,
@@ -326,13 +773,16 @@ def compare_to_exp_saxsfft(
     q_range=(0.003, 0.06),
     dp_coeff=DEFAULT_DP_COEFF,
     plot_apdist=True,
+    metric_kwargs=None,
 ):
     """
     Compare experimental and simulated S(q) using the wider q-range available
     from saxs-fft.
 
-    Uses the same :func:`compare_saxs_curves` engine as :func:`compare_to_exp`,
-    but defaults to a wider comparison window ``[0.003, 0.06]`` A^-1.
+    ``mse`` / ``apdist`` use the same :func:`compare_saxs_curves` engine as
+    :func:`compare_to_exp`, with a wider default window ``[0.003, 0.06]``
+    A^-1. ``shift_mse`` uses :func:`shift_mse_loss` and writes
+    ``shift_mse_diagnostics.json`` to ``save_dir``.
 
     Parameters
     ----------
@@ -343,7 +793,7 @@ def compare_to_exp_saxsfft(
     save_dir : str
         Directory for diagnostic plots.
     metric : str
-        ``'mse'`` or ``'apdist'``.
+        ``'mse'``, ``'apdist'`` or ``'shift_mse'``.
     q_range : tuple(float, float) or None
         Optional (q_min, q_max) comparison window.
     dp_coeff : float
@@ -351,13 +801,28 @@ def compare_to_exp_saxsfft(
     plot_apdist : bool
         When True and ``metric='apdist'``, save phase-warp plots under
         ``save_dir/apdist_plots/``.
+    metric_kwargs : dict, optional
+        ``shift_mse`` parameters (see :func:`shift_mse_params`). Must be
+        empty for the other metrics.
 
     Returns
     -------
     float
         Loss over ``q_range``.
+
+    Raises
+    ------
+    MetricFailed
+        ``shift_mse`` could not compute a loss from these curves.
     """
     _warn_apdist_kwargs_ignored(metric, dp_coeff, plot_apdist)
+
+    if metric == "shift_mse":
+        return _compare_shift_mse(
+            experimental_data, simulated_data, save_dir, q_range, metric_kwargs,
+        )
+    if metric_kwargs:
+        raise ValueError(f"metric_kwargs are only used by metric='shift_mse' (got {metric!r})")
 
     loss, q_ref, I_exp_resampled, I_sim_resampled, da, dp = compare_saxs_curves(
         experimental_data,

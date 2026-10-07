@@ -74,7 +74,7 @@ class Job:
     slurm_id:     Optional[str] = None
     state:        str = "PENDING_SUBMIT"
     slurm_state:  str = ""               # last observed squeue state
-    done_status:      Optional[str] = None  # "DONE" / "FAILED" / None
+    done_status:      Optional[str] = None  # "DONE" / "METRIC_FAILED" / "FAILED" / None
     run_time_seconds: Optional[float] = None
     host:             str = ""
 
@@ -258,14 +258,26 @@ def _is_terminal_bad_sacct(state: str) -> bool:
 # Flag-file inspection
 # ---------------------------------------------------------------------------
 
+TERMINAL_FLAGS = ("DONE", "METRIC_FAILED", "FAILED")
+# Statuses that must not be resubmitted: the simulation finished. A
+# METRIC_FAILED job has a valid S(q) but no loss; rerunning it cannot help.
+NO_RETRY_STATUSES = ("DONE", "METRIC_FAILED")
+
+
+def _has_terminal_flag(sim_dir: Path) -> bool:
+    return any((sim_dir / name).exists() for name in TERMINAL_FLAGS)
+
+
 def inspect_flags(job: Job) -> None:
     done   = job.sim_dir / "DONE"
+    metric_failed = job.sim_dir / "METRIC_FAILED"
     failed = job.sim_dir / "FAILED"
 
-    if done.exists():
-        job.done_status = "DONE"
+    if done.exists() or metric_failed.exists():
+        flag = done if done.exists() else metric_failed
+        job.done_status = flag.name
         try:
-            data = json.loads(done.read_text())
+            data = json.loads(flag.read_text())
             job.run_time_seconds = float(data.get("run_time_seconds", 0.0))
             job.host = str(data.get("host", ""))
         except Exception:
@@ -358,7 +370,7 @@ def poll_until_done(
             for job in jobs:
                 if job.done_status is None:
                     inspect_flags(job)
-                    if job.done_status == "DONE":
+                    if job.done_status in NO_RETRY_STATUSES:
                         job.slurm_state = "COMPLETED"
                     elif job.done_status == "FAILED":
                         job.slurm_state = "FAILED"
@@ -382,9 +394,7 @@ def poll_until_done(
                     # done_status=None and let the next poll cycle decide
                     # (inspect_flags() at the top of the loop will pick up
                     # DONE if the worker writes it in the meantime).
-                    if (not job.slurm_state
-                            and not (job.sim_dir / "DONE").exists()
-                            and not (job.sim_dir / "FAILED").exists()):
+                    if not job.slurm_state and not _has_terminal_flag(job.sim_dir):
                         fs = sacct_final_state(job.slurm_id)
                         if _is_terminal_bad_sacct(fs):
                             job.done_status = "FAILED"
@@ -394,14 +404,15 @@ def poll_until_done(
 
             # 3) Status line.
             n_done    = sum(1 for j in jobs if j.done_status == "DONE")
+            n_metric  = sum(1 for j in jobs if j.done_status == "METRIC_FAILED")
             n_failed  = sum(1 for j in jobs if j.done_status == "FAILED")
             n_running = sum(1 for j in jobs
                             if j.done_status is None and j.slurm_state == "RUNNING")
-            n_pending = len(jobs) - n_done - n_failed - n_running
+            n_pending = len(jobs) - n_done - n_metric - n_failed - n_running
 
             status_line = (
-                f"[{elapsed:7.1f}s] done={n_done} failed={n_failed} "
-                f"running={n_running} pending={n_pending}"
+                f"[{elapsed:7.1f}s] done={n_done} metric_failed={n_metric} "
+                f"failed={n_failed} running={n_running} pending={n_pending}"
             )
             print(status_line)
             log.write(status_line + "\n")
@@ -461,7 +472,7 @@ def write_summary(jobs: List[Job], cfg: LauncherConfig) -> None:
 
 def clear_job_flags(sim_dir: Path) -> None:
     """Remove worker terminal flags so a job can be retried in the same sim_dir."""
-    for name in ("DONE", "FAILED", "RUNNING"):
+    for name in (*TERMINAL_FLAGS, "RUNNING"):
         flag = sim_dir / name
         if flag.exists():
             flag.unlink()
@@ -477,7 +488,8 @@ def submit_jobs_with_retry(
     max_wait: Optional[float] = None,
 ) -> List[Job]:
     """
-    Submit jobs, then re-submit any that did not reach DONE up to ``max_job_retries``.
+    Submit jobs, then re-submit any that ended FAILED (or without a flag) up to
+    ``max_job_retries``. DONE and METRIC_FAILED jobs are never resubmitted.
 
     Retries use the same ``worker_config`` (same coefficients / sim_dir) but a
     fresh sbatch under ``<run_dir>/retry_<n>/``.
@@ -491,7 +503,7 @@ def submit_jobs_with_retry(
     )
 
     for attempt in range(max_job_retries):
-        failed = [j for j in jobs if j.done_status != "DONE"]
+        failed = [j for j in jobs if j.done_status not in NO_RETRY_STATUSES]
         if not failed:
             return jobs
 

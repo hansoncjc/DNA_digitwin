@@ -8,8 +8,11 @@ pipeline end-to-end on a single GPU node:
     -> metrics.compare_to_exp[_saxsfft]
 
 and writes a `DONE` flag (JSON) into `outdir` containing the loss plus
-diagnostic metadata. If any stage raises, a `FAILED` flag is written
-with the traceback instead. The launcher polls these flag files.
+diagnostic metadata. If the metric raises `metrics.MetricFailed` (the
+S(q) exists but no loss can be computed from it), a `METRIC_FAILED` flag
+is written; the launcher does not resubmit it. Any other exception writes
+a `FAILED` flag with the traceback, which the launcher may resubmit. The
+launcher polls these flag files.
 
 Usage (called from inside a SLURM job script)::
 
@@ -38,15 +41,19 @@ Expected JSON config layout::
           "metric":           "mse",
           "scattering_method":"saxsfft",
           "q_min":            0.02,
-          "q_max":            0.03
+          "q_max":            0.03,
+          "metric_kwargs":    {}       # shift_mse parameters (metrics.shift_mse_params)
       }
     }
 
 Status flag files written in <outdir>::
 
-    RUNNING  - created at start (pid/host/start time)
-    DONE     - created on success (JSON with loss, run_time_seconds, result)
-    FAILED   - created on any exception (run_time_seconds prefix + traceback)
+    RUNNING        - created at start (pid/host/start time)
+    DONE           - created on success (JSON with loss, run_time_seconds, result)
+    METRIC_FAILED  - metrics.MetricFailed (JSON with reason, run_time_seconds,
+                     host, result); not retried
+    FAILED         - created on any other exception (run_time_seconds prefix
+                     + traceback)
 
 Python: written for the HOOMD venv (3.9+).
 """
@@ -71,7 +78,7 @@ for p in (_PARENT, _THIS_DIR):
 
 from simulation import run_simulation                            # noqa: E402
 from scattering  import convert_to_SAXS, convert_to_SAXS_fft, extract_exp_sq  # noqa: E402
-from metrics     import compare_to_exp, compare_to_exp_saxsfft  # noqa: E402
+from metrics     import MetricFailed, compare_to_exp, compare_to_exp_saxsfft  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +90,7 @@ def _write_flag(outdir: Path, name: str, text: str = "") -> None:
 
 
 def _clear_flags(outdir: Path) -> None:
-    for name in ("RUNNING", "DONE", "FAILED"):
+    for name in ("RUNNING", "DONE", "METRIC_FAILED", "FAILED"):
         p = outdir / name
         if p.exists():
             p.unlink()
@@ -127,13 +134,16 @@ def _load_exp_curve(exp_path: str, trim_tail: int) -> np.ndarray:
     return arr
 
 
-def _run_pipeline(cfg: dict, save_dir: Path) -> dict:
+def _run_pipeline(cfg: dict, save_dir: Path, state: dict) -> dict:
     """
     Execute sim -> SAXS conversion -> compare-to-exp. Returns a dict
     {"loss": float, "sim_result": dict} on success; raises on failure.
+    ``state["sim_result"]`` is set as soon as the simulation finishes, so
+    the caller can report it when a later stage fails.
     """
     # 1) Simulation
     sim_result = run_simulation(outdir=str(save_dir), **cfg["run_kwargs"])
+    state["sim_result"] = sim_result
 
     # 2) Sim -> S(q)
     scat = cfg.get("scattering", {}) or {}
@@ -168,6 +178,7 @@ def _run_pipeline(cfg: dict, save_dir: Path) -> dict:
     compare_q_range = loss_cfg.get("compare_q_range", (0.003, 0.06))
     dp_coeff       = loss_cfg.get("dp_coeff", 0.5)
     plot_apdist    = loss_cfg.get("plot_apdist", True)
+    metric_kwargs  = loss_cfg.get("metric_kwargs") or None
     if compare_method == "saxsfft":
         loss = float(compare_to_exp_saxsfft(
             exp_sq,
@@ -177,6 +188,7 @@ def _run_pipeline(cfg: dict, save_dir: Path) -> dict:
             q_range=compare_q_range,
             dp_coeff=dp_coeff,
             plot_apdist=plot_apdist,
+            metric_kwargs=metric_kwargs,
         ))
     else:
         loss = float(compare_to_exp(
@@ -194,6 +206,13 @@ def _run_pipeline(cfg: dict, save_dir: Path) -> dict:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+def _stringify(sim_result) -> dict:
+    try:
+        return {k: str(v) for k, v in sim_result.items()}
+    except Exception:
+        return {"_repr": str(sim_result)}
+
 
 def main(argv):
     if len(argv) != 2:
@@ -214,25 +233,32 @@ def main(argv):
     )
 
     t0 = time.time()
+    state: dict = {}
     try:
-        out = _run_pipeline(cfg, outdir)
+        out = _run_pipeline(cfg, outdir, state)
         dt  = time.time() - t0
-
-        sim_result = out["sim_result"]
-        try:
-            stringified = {k: str(v) for k, v in sim_result.items()}
-        except Exception:
-            stringified = {"_repr": str(sim_result)}
 
         summary = {
             "run_time_seconds": dt,
             "host":             host,
             "loss":             float(out["loss"]),
-            "result":           stringified,
+            "result":           _stringify(out["sim_result"]),
         }
         _write_flag(outdir, "DONE", json.dumps(summary, indent=2))
         (outdir / "RUNNING").unlink(missing_ok=True)
         print(f"[worker] SUCCESS loss={out['loss']:.6g} in {dt:.1f}s -> {outdir}")
+        return 0
+    except MetricFailed as exc:
+        dt = time.time() - t0
+        summary = {
+            "run_time_seconds": dt,
+            "host":             host,
+            "reason":           str(exc),
+            "result":           _stringify(state.get("sim_result", {})),
+        }
+        _write_flag(outdir, "METRIC_FAILED", json.dumps(summary, indent=2))
+        (outdir / "RUNNING").unlink(missing_ok=True)
+        print(f"[worker] METRIC_FAILED after {dt:.1f}s -> {outdir}: {exc}", file=sys.stderr)
         return 0
     except Exception:
         dt = time.time() - t0

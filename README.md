@@ -132,7 +132,7 @@ noisy I(q) tails; set `0` for clean S(q) files).
 
 ### Curve metrics (`metrics.py`)
 
-Two loss modes are supported via `metric=` on `make_global_objective`:
+Three loss modes are supported via `metric=` on `make_global_objective`:
 
 - **`mse`** – mean squared error on log10 intensities (default).
 - **`apdist`** – weighted Amplitude–Phase Distance on log10 intensities
@@ -158,6 +158,37 @@ The standard overlay `compare_to_exp_saxsfft.png` is still written in
 the eval directory. Pass `plot_apdist=False` to skip the warp plots.
 When `metric="mse"`, `dp_coeff` and `plot_apdist` are ignored (a warning
 is emitted if non-default values are supplied).
+
+- **`shift_mse`** (saxs-fft only) – peak-aligned log10 RMSE plus a
+  first-peak spacing term:
+
+  ```
+  loss = M4 + lambda_shift * |ln(q1_sim / q1_tgt)|
+  ```
+
+  Each curve's q axis is divided by its own first peak `q1`; the
+  simulated intensity is scaled by the high-q `S(q) → 1` band; M4 is the
+  RMS log10 difference on a 512-point log grid over `compare_q_range`
+  (converted to `x = q/q1_tgt`). All parameters go in `metric_kwargs`
+  (see `metrics.shift_mse_params`); defaults reproduce the FCC inverse
+  runs. The HS-fluid target uses
+
+  ```python
+  metric_kwargs = {"peak_search_range": (0.015, 0.040),
+                   "peak_baseline_range": (0.012, 0.018),
+                   "asymptote_band": (0.095, 0.120)}
+  ```
+
+  Rules for the full-q loss study (defaults = previous behaviour):
+  `overlap_trim=k` compares over the curve overlap minus `k` points per
+  end when `compare_q_range=None` (default `None`: error);
+  `no_peak="fallback"|"fail"`; `require_reliable`;
+  `asymptote_fallback="tail"|"fail"`; `asymptote_zero_den="unity"|"fail"`.
+  Every eval writes `shift_mse_diagnostics.json` with the parameters,
+  both peaks, and which fallbacks fired. A `metrics.MetricFailed` fails
+  the evaluation (logged as `METRIC_FAILED`, not given to the GP); in the
+  parallel path the worker writes a `METRIC_FAILED` flag and the job is
+  not resubmitted, since the simulation itself succeeded.
 
 ### `ParamSpace` (`bo.py`)
 Declarative description of the BO search vector. Each parameter is

@@ -58,7 +58,7 @@ from scattering import (
     estimate_saxsfft_n_grid,
     extract_exp_sq,
 )
-from metrics import compare_to_exp, compare_to_exp_saxsfft
+from metrics import MetricFailed, compare_to_exp, compare_to_exp_saxsfft, shift_mse_params
 
 # ------------------------- Evaluation failures ------------------------- #
 
@@ -397,6 +397,7 @@ def _parallel_prepare_eval_jobs(
     dp_coeff: float,
     plot_apdist: bool,
     ffpath: str,
+    metric_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[dict], List[dict], List[Dict[str, Any]], Optional[str]]:
     """
     Resolve per-dataset sim params and build Slurm job specs for one BO eval.
@@ -564,6 +565,7 @@ def _parallel_prepare_eval_jobs(
                     "q_max":             0.03,
                     "dp_coeff":          dp_coeff,
                     "plot_apdist":       plot_apdist,
+                    "metric_kwargs":     dict(metric_kwargs or {}),
                 },
             },
         })
@@ -628,6 +630,21 @@ def _collect_parallel_eval_loss(
                 "r0":      float(plan["r0"]),
                 "U0":      float(plan["U0"]),
             })
+        elif job is not None and job.done_status == "METRIC_FAILED":
+            eval_failed = True
+            try:
+                detail = json.loads((Path(job.sim_dir) / "METRIC_FAILED").read_text())
+                msg = str(detail.get("reason", ""))
+            except Exception as e:
+                msg = f"METRIC_FAILED file unreadable: {e}"
+            try:
+                with open(os.path.join(out_root, f"error_{ds.id}.txt"), "a") as fh:
+                    fh.write(f"eval {eval_id} METRIC_FAILED: {msg}\n")
+            except Exception:
+                pass
+            iteration_records.append(
+                _failed_trajectory_record(eval_id, ds.id, G, plan=plan, reason="METRIC_FAILED")
+            )
         else:
             eval_failed = True
             reason = f"parallel job status={getattr(job, 'done_status', None)}"
@@ -661,6 +678,7 @@ def _run_objective_parallel(
     plot_apdist: bool,
     parallel_cfg: Dict[str, Any],
     iteration_data: List[Dict[str, Any]],
+    metric_kwargs: Optional[Dict[str, Any]] = None,
 ) -> float:
     """
     Parallel analogue of the per-dataset sequential loop in `objective`.
@@ -689,6 +707,7 @@ def _run_objective_parallel(
         dp_coeff=dp_coeff,
         plot_apdist=plot_apdist,
         ffpath=ffpath,
+        metric_kwargs=metric_kwargs,
     )
 
     if fail_reason is not None:
@@ -789,6 +808,7 @@ def make_global_objective(
     plot_apdist: bool = True,
     parallel: bool = False,
     parallel_cfg: Dict[str, Any] = None,
+    metric_kwargs: Optional[Dict[str, Any]] = None,
 ):
     """
     Create an objective(x_unit) that:
@@ -834,6 +854,15 @@ def make_global_objective(
     "plot_apdist":
         When True and ``metric='apdist'``, save phase-warp diagnostic plots under
         ``eval_XXX/<dataset_id>/apdist_plots/``. Default True.
+    "metric" / "metric_kwargs":
+        ``metric`` is ``'mse'``, ``'apdist'`` or ``'shift_mse'`` (saxsfft only).
+        ``metric_kwargs`` holds the ``shift_mse`` parameters (peak search and
+        baseline ranges, asymptote band, prominence_frac, min_prom_ratio,
+        n_points, lambda_shift, overlap_trim, no_peak, require_reliable,
+        asymptote fallback rules; see ``metrics.shift_mse_params``); they are
+        validated here and passed unchanged to both execution paths. Each
+        eval writes ``shift_mse_diagnostics.json``. A ``metrics.MetricFailed``
+        fails the evaluation without rerunning the simulation.
     "scattering_kwargs":
         Passed to ``convert_to_SAXS_fft`` / ``convert_to_SAXS``. In
         ``mode='sim'`` with saxs-fft, each ``datatype='sq'`` target is checked
@@ -850,6 +879,18 @@ def make_global_objective(
     _validate_param_mode(ps, mode)
     if mode == "sim" and scattering_method == "saxsfft":
         _check_target_n_grid(datasets, scattering_kwargs, trim_tail)
+    metric_kwargs = dict(metric_kwargs or {})
+    if metric == "shift_mse":
+        if scattering_method != "saxsfft":
+            raise ValueError("metric='shift_mse' requires scattering_method='saxsfft'")
+        params = shift_mse_params(metric_kwargs)
+        if compare_q_range is None and params["overlap_trim"] is None:
+            raise ValueError(
+                "metric='shift_mse' with compare_q_range=None needs "
+                "metric_kwargs['overlap_trim']"
+            )
+    elif metric_kwargs:
+        raise ValueError(f"metric_kwargs are only used by metric='shift_mse' (got {metric!r})")
 
     def objective(x_unit: torch.Tensor, ffpath: str) -> torch.Tensor:
         objective._eval_failed = False
@@ -897,6 +938,7 @@ def make_global_objective(
                     plot_apdist=plot_apdist,
                     parallel_cfg=parallel_cfg or {},
                     iteration_data=objective._iteration_data,
+                    metric_kwargs=metric_kwargs,
                 )
             except EvaluationFailed as exc:
                 objective._eval_failed = True
@@ -1069,6 +1111,7 @@ def make_global_objective(
                         q_range=compare_q_range,
                         dp_coeff=dp_coeff,
                         plot_apdist=plot_apdist,
+                        metric_kwargs=metric_kwargs,
                     ))
                 else:
                     loss = float(compare_to_exp(
@@ -1104,13 +1147,14 @@ def make_global_objective(
 
             except Exception as e:
                 eval_failed = True
+                reason = "METRIC_FAILED" if isinstance(e, MetricFailed) else "FAILED"
                 try:
                     with open(os.path.join(out_root, f"error_{ds.id}.txt"), "a") as fh:
-                        fh.write(str(e) + "\n")
+                        fh.write(f"eval {eval_id} {reason}: {e}\n")
                 except Exception:
                     pass
 
-                trajectory_record = _failed_trajectory_record(eval_id, ds.id, G)
+                trajectory_record = _failed_trajectory_record(eval_id, ds.id, G, reason=reason)
                 objective._iteration_data.append(trajectory_record)
 
         if eval_failed:
