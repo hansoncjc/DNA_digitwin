@@ -296,10 +296,18 @@ path), `density` and the potential parameters:
    - `apdist_plots/` – phase-warp diagnostics (when `metric="apdist"`)
    - `sim_params_<id>.csv` – the resolved sim inputs for that eval
 
+   - `shift_mse_diagnostics.json` – loss components, peaks, parameters
+     and fallbacks (when `metric="shift_mse"`)
+
    Plus, at the run root:
    - `bo_trajectory.csv` – per-iteration block of every dataset's
      parameters and loss, with the iteration's total loss in the
-     header line.
+     header line. Each dataset row also carries the audit columns
+     `rmax`, `rmax_over_r0`, `t_tol_lj`, `n_pairs_below_rmin` and, for
+     `shift_mse`, `rmse` (M4) and `shift`. Older trajectories without
+     these columns still load in `load_warm_start_from_trajectory`.
+   - `loss_components.txt` – CSV, one row per successful (iteration,
+     dataset): `rmse`, `shift`, `loss` and the iteration's `total_loss`.
 
 ---
 

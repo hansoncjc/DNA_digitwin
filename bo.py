@@ -58,7 +58,13 @@ from scattering import (
     estimate_saxsfft_n_grid,
     extract_exp_sq,
 )
-from metrics import MetricFailed, compare_to_exp, compare_to_exp_saxsfft, shift_mse_params
+from metrics import (
+    MetricFailed,
+    compare_to_exp,
+    compare_to_exp_saxsfft,
+    load_shift_mse_components,
+    shift_mse_params,
+)
 
 # ------------------------- Evaluation failures ------------------------- #
 
@@ -278,10 +284,17 @@ def _write_iteration_block(filepath: str, iteration: int, total_loss: float, rec
     Format
     ------
     # Iteration N,total_loss,<value>
-    iteration,dataset_id,loss,k,alpha,A,mu_c,mu_b,sigma_c,sigma_b,density,n,m,r0,U0
+    iteration,dataset_id,loss,k,alpha,A,mu_c,mu_b,sigma_c,sigma_b,K_s,density,n,m,r0,U0,
+        rmax,rmax_over_r0,t_tol_lj,n_pairs_below_rmin,rmse,shift
     N,d0,loss_val,k_val,...
     N,d1,loss_val,k_val,...
     <blank line>
+
+    The audit columns (``AUDIT_COLUMNS``) are per (eval, dataset): in map
+    mode each dataset has its own U0, hence its own cutoff. ``rmse`` and
+    ``shift`` are filled only for ``metric='shift_mse'``. Each block carries
+    its own header row, so readers that look columns up by name also read
+    older blocks without these columns.
     """
     mode = 'a' if os.path.exists(filepath) else 'w'
 
@@ -301,6 +314,63 @@ def _write_iteration_block(filepath: str, iteration: int, total_loss: float, rec
 
         # Blank separator line
         writer.writerow([])
+
+
+AUDIT_COLUMNS = ("rmax", "rmax_over_r0", "t_tol_lj", "n_pairs_below_rmin", "rmse", "shift")
+
+
+def _audit_value(value, cast=float):
+    """``cast(value)``, or "" for missing / None (sim results may arrive as strings)."""
+    if value is None or value == "" or str(value) == "None":
+        return ""
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        return ""
+
+
+def _audit_fields(sim_result: Optional[Dict[str, Any]], r0: float, save_dir: str) -> Dict[str, Any]:
+    """
+    Per-(eval, dataset) audit columns for ``bo_trajectory.csv``.
+
+    ``sim_result`` is the ``run_simulation`` dict (sequential) or the
+    stringified ``result`` from the worker's DONE flag (parallel). ``rmse``
+    (M4) and ``shift`` come from ``save_dir/shift_mse_diagnostics.json`` and
+    are blank for other metrics.
+    """
+    sim_result = sim_result or {}
+    rmax = _audit_value(sim_result.get("rmax"))
+    comps = load_shift_mse_components(save_dir)
+    return {
+        "rmax": rmax,
+        "rmax_over_r0": rmax / float(r0) if rmax != "" else "",
+        "t_tol_lj": _audit_value(sim_result.get("t_tol_lj")),
+        "n_pairs_below_rmin": _audit_value(sim_result.get("n_pairs_below_rmin"), int),
+        "rmse": comps.get("rmse", ""),
+        "shift": comps.get("shift", ""),
+    }
+
+
+def _append_loss_components(
+    out_root: str, iteration: int, total_loss: float, records: List[Dict[str, Any]],
+) -> None:
+    """
+    Append one row per dataset to ``out_root/loss_components.txt`` (CSV):
+    iteration, dataset_id, rmse (M4), shift (lambda*|ln q1 ratio|), loss
+    (= rmse + shift for shift_mse), and the iteration's weighted total_loss.
+    Components are blank for metrics other than shift_mse.
+    """
+    path = os.path.join(out_root, "loss_components.txt")
+    write_header = not os.path.exists(path)
+    with open(path, "a", newline="") as f:
+        writer = csv.writer(f)
+        if write_header:
+            writer.writerow(["iteration", "dataset_id", "rmse", "shift", "loss", "total_loss"])
+        for rec in records:
+            writer.writerow([
+                iteration, rec.get("dataset_id", ""), rec.get("rmse", ""),
+                rec.get("shift", ""), rec.get("loss", ""), total_loss,
+            ])
 
 
 def _write_failed_iteration_block(
@@ -629,6 +699,7 @@ def _collect_parallel_eval_loss(
                 "m":       float(plan["m"]),
                 "r0":      float(plan["r0"]),
                 "U0":      float(plan["U0"]),
+                **_audit_fields(done_data.get("result"), plan["r0"], str(job.sim_dir)),
             })
         elif job is not None and job.done_status == "METRIC_FAILED":
             eval_failed = True
@@ -953,6 +1024,9 @@ def make_global_objective(
                     total_loss=float(total_loss),
                     records=objective._iteration_data,
                 )
+                _append_loss_components(
+                    out_root, eval_id, float(total_loss), objective._iteration_data,
+                )
                 objective._iteration_data = []
 
             return torch.tensor([[total_loss]], dtype=torch.float64)
@@ -1069,7 +1143,7 @@ def make_global_objective(
                     writer.writeheader()
                     writer.writerow(sim_params_record)
                 # ---- 1) Simulation ----
-                _ = run_simulation(
+                sim_result = run_simulation(
                     density=density, U_0=U0, r0=r0, n=n, m=m, outdir=save_dir, **sim_defaults
                 )
 
@@ -1142,6 +1216,7 @@ def make_global_objective(
                     "m": float(m),
                     "r0": float(r0),
                     "U0": float(U0),
+                    **_audit_fields(sim_result, r0, save_dir),
                 }
                 objective._iteration_data.append(trajectory_record)
 
@@ -1178,6 +1253,9 @@ def make_global_objective(
                 iteration=eval_id,
                 total_loss=float(total_loss),
                 records=objective._iteration_data
+            )
+            _append_loss_components(
+                out_root, eval_id, float(total_loss), objective._iteration_data,
             )
             # Reset for next iteration
             objective._iteration_data = []
