@@ -6,6 +6,9 @@ run_simulation():
   - "shifted_mie"  : shifted Mie potential with hard-core offset r0 and
                      length-scale delta
 
+The simple-cubic lattice is shuffled with ``numpy.random.default_rng(seed)``
+before it is written. Before 2026-10 that shuffle was unseeded, so a fixed
+``seed`` did not fix the configuration that enters the hard-sphere step.
 After writing the lattice GSD, run_simulation() randomizes positions
 in-memory with a Heyes-Melrose hard-sphere step (from
 HS_fluid_core/HS_fluid.py; contact distance max(1, rmin) by default, or
@@ -447,6 +450,47 @@ def _stamp_sphere_type_shapes(gsd_path, diameter=1.0):
 
 
 # ---------------------------------------------------------------------------
+# Initial lattice
+# ---------------------------------------------------------------------------
+
+def generate_lattice_positions(N, L, rmin, offset=0.1, *, seed):
+    """Shuffled simple-cubic lattice, in the order particles are created.
+
+    Sites are the centers of ``n_side**3`` cells, with
+    ``n_side = ceil(N**(1/3))``. The lattice is permuted with
+    ``numpy.random.default_rng(seed)`` and the first ``N`` sites are kept.
+
+    ``seed`` is the same integer passed to HOOMD's Brownian and Langevin
+    integrators. Those integrators do not read this NumPy generator, so
+    drawing the permutation does not advance their streams. A spawned
+    stream is not used: this is the only NumPy generator in the run, and
+    the permutation a given ``seed`` produces is then just
+    ``default_rng(seed)``.
+
+    Before 2026-10 the permutation used an unseeded ``default_rng()``.
+    The same ``seed`` now yields the same order, and a different ``seed``
+    yields a different order. Runs from before this change are not
+    reproduced by repeating ``seed``, because that permutation was not
+    saved.
+    """
+    min_dist = rmin + offset
+    n_side = int(np.ceil(N ** (1 / 3)))
+    spacing = L / n_side
+    if spacing < min_dist:
+        raise ValueError(
+            f"Box too small for non-overlapping init: "
+            f"grid spacing {spacing:.3f} < min_dist {min_dist:.3f}. "
+            f"Increase box size (lower density) or reduce rmin."
+        )
+    # Build a simple cubic lattice
+    coords = np.linspace(-L / 2 + spacing / 2, L / 2 - spacing / 2, n_side)
+    grid = np.array(np.meshgrid(coords, coords, coords)).T.reshape(-1, 3)
+    rng = np.random.default_rng(seed)
+    rng.shuffle(grid)
+    return grid[:N]
+
+
+# ---------------------------------------------------------------------------
 # Main simulation entry-point
 # ---------------------------------------------------------------------------
 
@@ -496,9 +540,15 @@ def run_simulation(
         ``rmax < L/2`` enforced
       - Heyes-Melrose HS randomization: ``t_rand = 10``, ``dt_hs = 1e-4``,
         contact distance ``max(1, rmin)``
+      - initial lattice shuffled by ``numpy.random.default_rng(seed)``
+        (``seed = 42``). Before 2026-10 this shuffle was unseeded, so the
+        same ``seed`` did not repeat the configuration that enters the HS
+        step. This NumPy generator is not HOOMD's, so the draw does not
+        consume the Brownian or Langevin streams.
       - Langevin production: ``kT = 1``, gamma = 1, ``dt = 1e-3``,
         ``steps = 22_500_000`` (22,500 tau; one GSD frame every 50,000
-        steps -> 450 frames), ``seed = 42``
+        steps -> 450 frames). ``seed = 42`` also seeds the HS Brownian
+        integrator and the Langevin thermostat
       - ``N`` comes from the caller (default 5000); each run states its N
         next to its target path
 
@@ -542,7 +592,11 @@ def run_simulation(
     device : {"gpu","cpu"}
         HOOMD context device mode.
     seed : int
-        Seed for the HS Brownian integrator and the Langevin thermostat.
+        Seed for the lattice shuffle (``numpy.random.default_rng``), the
+        HS Brownian integrator, and the Langevin thermostat. The shuffle
+        used to be unseeded, so a fixed ``seed`` did not fix the initial
+        configuration. It does now. HOOMD's generators are separate and
+        are not advanced by the NumPy draw.
     plot : bool
         Controls whether potential and energy plots are generated.
     rmax : float, optional
@@ -620,38 +674,9 @@ def run_simulation(
     # density is number density ρ = N/V in particles/σ³ (σ = particle diameter).
     L = bounds["L"]  # cubic box side length (N / density)^(1/3)
 
-    # --- Generate non-overlapping initial positions (same strategy) ---
-    def generate_positions(N, L, rmin, offset=0.1):
-        # min_dist = rmin + offset
-        # positions, attempts, max_attempts = [], 0, N * 1000
-        # while len(positions) < N and attempts < max_attempts:
-        #     pos = np.random.uniform(-L / 2, L / 2, 3)
-        #     if all(np.linalg.norm(pos - np.array(p)) >= min_dist for p in positions):
-        #         positions.append(pos)
-        #     attempts += 1
-        # if len(positions) < N:
-        #     raise RuntimeError("Failed to generate non-overlapping configuration.")
-        # return positions
-
-        # cubic lattice initialization
-        min_dist = rmin + offset
-        n_side = int(np.ceil(N ** (1/3)))
-        spacing = L / n_side
-        if spacing < min_dist:
-            raise ValueError(
-                f"Box too small for non-overlapping init: "
-                f"grid spacing {spacing:.3f} < min_dist {min_dist:.3f}. "
-                f"Increase box size (lower density) or reduce rmin."
-            )
-        # Build a simple cubic lattice
-        coords = np.linspace(-L/2 + spacing/2, L/2 - spacing/2, n_side)
-        grid = np.array(np.meshgrid(coords, coords, coords)).T.reshape(-1, 3)
-        # Shuffle and take N points
-        rng = np.random.default_rng()
-        rng.shuffle(grid)
-        return grid[:N]
+    # Lattice order is fixed by seed. See generate_lattice_positions.
     positions = np.ascontiguousarray(
-        generate_positions(N, L, rmin=rmin, offset=init_offset),
+        generate_lattice_positions(N, L, rmin, offset=init_offset, seed=seed),
         dtype=np.float32,
     )
 
