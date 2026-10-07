@@ -196,6 +196,12 @@ Builds a callable `objective(x_unit, ffpath)` that, for one BO query:
    or `rmax` in `sim_defaults` (each conflicts with `tail_energy_cut`).
    Every mode must give `rmax < L/2`, checked before HOOMD starts.
    The result dict carries `rmax`, `t_tol_lj`, `tail_energy_cut`, `L`.
+   After the Heyes–Melrose HS randomization (contact distance
+   `σ_HS = max(1, rmin)` by default; `hs_sigma_follows_rmin=False` gives
+   the particle diameter `σ_HS = 1`), the number
+   of pairs with `r < rmin` in the configuration that starts production
+   (GSD frame 0) is logged and returned as `n_pairs_below_rmin`, with
+   `min_pair_distance` and `sigma_hs`.
 4. Converts GSD → S(q) via either `convert_to_SAXS` (MC-DFM) or
    `convert_to_SAXS_fft` (FFT-based, default `N_grid=600`). The
    simulation and a saxs-fft target must use the same `N_grid`. In

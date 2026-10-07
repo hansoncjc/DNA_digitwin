@@ -7,10 +7,12 @@ run_simulation():
                      length-scale delta
 
 After writing the lattice GSD, run_simulation() randomizes positions
-in-memory with a Heyes-Melrose hard-sphere step (sigma = diameter = 1,
-from HS_fluid_core/HS_fluid.py) before applying the selected potential.
-The HS segment is not dumped; DNA_assembly_*.gsd starts at the
-post-HS configuration.
+in-memory with a Heyes-Melrose hard-sphere step (from
+HS_fluid_core/HS_fluid.py; contact distance max(1, rmin) by default, or
+the particle diameter 1 with hs_sigma_follows_rmin=False) before applying
+the selected potential. The HS segment is not dumped;
+DNA_assembly_*.gsd starts at the post-HS configuration, and the number of
+pairs closer than the table's rmin in that configuration is logged.
 
 Table bounds (rmin, rmax) are derived analytically from the potential
 parameters rather than being hard-coded, so they remain valid across
@@ -327,14 +329,50 @@ def resolve_table_bounds(
 
 
 # ---------------------------------------------------------------------------
-# Heyes-Melrose HS randomization (diameter units, sigma_HS = 1)
+# Heyes-Melrose HS randomization (diameter units, contact distance sigma_HS)
 # ---------------------------------------------------------------------------
 
-def _hs_potential(r, rmin, rmax, dt):
-    """Heyes-Melrose harmonic repulsion with sigma_HS = 1 (particle diameter)."""
-    U = 1.0 / (4.0 * dt) * (1.0 - r) ** 2
-    F = 1.0 / (2.0 * dt) * (1.0 - r)
+def _hs_potential(r, rmin, rmax, dt, sigma=1.0):
+    """Heyes-Melrose harmonic repulsion, contact distance ``sigma`` (default 1).
+
+    With overlap ``delta = sigma - r`` and gamma = 1, ``F = delta / (2 dt)``
+    moves each particle by ``delta/2`` per step, so the pair separates by
+    ``delta`` in one step for any ``sigma``. The table runs over [0, sigma].
+    """
+    U = 1.0 / (4.0 * dt) * (sigma - r) ** 2
+    F = 1.0 / (2.0 * dt) * (sigma - r)
     return U, F
+
+
+def count_close_pairs(positions, L, r_cut):
+    """
+    Count pairs with separation ``< r_cut`` in a cubic periodic box.
+
+    Parameters
+    ----------
+    positions : (N, 3) array-like
+        Coordinates in a box of side ``L`` (any origin; wrapped here).
+    L : float
+        Box side length.
+    r_cut : float
+        Separation threshold.
+
+    Returns
+    -------
+    n_pairs : int
+        Number of unordered pairs i < j with minimum-image distance < r_cut.
+    min_distance : float
+        Smallest minimum-image pair distance.
+    """
+    from scipy.spatial import cKDTree
+
+    x = np.mod(np.asarray(positions, dtype=np.float64), L)
+    x[x >= L] -= L
+    tree = cKDTree(x, boxsize=L)
+    n = x.shape[0]
+    n_ordered = tree.count_neighbors(tree, np.nextafter(float(r_cut), 0.0))
+    d, _ = tree.query(x, k=2)
+    return int((n_ordered - n) // 2), float(d[:, 1].min())
 
 
 def _run_hs_randomization(
@@ -347,6 +385,7 @@ def _run_hs_randomization(
     kT: float = 1.0,
     seed: int = 42,
     gamma: float = 1.0,
+    sigma_hs: float = 1.0,
 ) -> None:
     """Randomize the lattice with Heyes-Melrose HS. Does not dump a GSD.
 
@@ -357,6 +396,9 @@ def _run_hs_randomization(
     Overdamped Brownian is required: the per-step displacement
     ``F*dt/gamma = delta/2`` removes an overlap of depth delta in one step.
     ``dt_hs`` defaults to 1e-4 because ``d_eff = sigma_HS - sqrt(pi * dt)``.
+    The shortfall ``sqrt(pi * dt)`` (~0.018 at dt = 1e-4) depends only on
+    dt and D = kT/gamma = 1, not on ``sigma_hs``, so a larger contact
+    distance keeps the same dt with a smaller relative error.
     """
     n_steps = int(np.round(t_rand / dt_hs))
     if n_steps <= 0:
@@ -369,15 +411,15 @@ def _run_hs_randomization(
         "A", "A",
         func=_hs_potential,
         rmin=0.0,
-        rmax=1.0,
-        coeff=dict(dt=dt_hs),
+        rmax=float(sigma_hs),
+        coeff=dict(dt=dt_hs, sigma=float(sigma_hs)),
     )
     bd = hoomd.md.integrate.brownian(group=group, kT=kT, seed=seed)
     bd.set_gamma("A", gamma=gamma)
 
     print(
         f"HS randomization: t_rand={t_rand:g} ({n_steps} steps), "
-        f"dt_hs={dt_hs}, sigma_HS=1, brownian"
+        f"dt_hs={dt_hs}, sigma_HS={sigma_hs:g}, brownian"
     )
     hoomd.run(n_steps)
 
@@ -432,6 +474,7 @@ def run_simulation(
     tail_energy_cut: float | None = None,
     t_rand: float = 10.0,
     dt_hs: float = 1e-4,
+    hs_sigma_follows_rmin: bool = True,
 ) -> dict:
     """
     Run a HOOMD simulation of N spheres with a selectable pair potential.
@@ -492,15 +535,26 @@ def run_simulation(
         HS randomization time in reduced units (D = kT/γ = 1). Default 10.
     dt_hs : float
         HS timestep. Default 1e-4 (locked by d_eff = σ_HS - sqrt(π dt)).
+    hs_sigma_follows_rmin : bool
+        If True (default), the HS contact distance is ``σ_HS = max(1, rmin)``
+        so no pair starts production inside the table's ``r < rmin`` region
+        (where HOOMD's table gives zero energy and force). The HS step only
+        serves to randomize positions, so its contact distance is free.
+        False gives ``σ_HS = 1`` (particle diameter), the behaviour before
+        2026-10.
 
     Returns
     -------
     dict with keys:
         gsd_path, energy_csv, rmin, rmax, rmax_fixed, t_tol_lj,
-        tail_energy_cut, L, table_width, potential, t_rand, dt_hs
+        tail_energy_cut, L, table_width, potential, t_rand, dt_hs,
+        sigma_hs, n_pairs_below_rmin, min_pair_distance
         (``t_tol_lj`` is the tolerance actually used, None when rmax is
         fixed or for shifted_mie; ``tail_energy_cut`` is None unless the
-        dynamic cutoff was used; ``L`` is the cubic box length.)
+        dynamic cutoff was used; ``L`` is the cubic box length;
+        ``n_pairs_below_rmin`` and ``min_pair_distance`` are measured on
+        the configuration that starts production, i.e. GSD frame 0,
+        under periodic boundaries.)
 
     Raises
     ------
@@ -597,7 +651,7 @@ def run_simulation(
     with gsd.hoomd.open(init_gsd_path, "w") as traj:
         traj.append(init_frame)
 
-    hoomd.init.read_gsd(init_gsd_path)
+    system = hoomd.init.read_gsd(init_gsd_path)
 
     width = 1000
     nl = hoomd.md.nlist.cell()
@@ -605,10 +659,21 @@ def run_simulation(
     integrator = hoomd.md.integrate.mode_standard(dt=dt_hs)
 
     # --- In-memory HS randomization (no dump) ---
+    sigma_hs = max(1.0, rmin) if hs_sigma_follows_rmin else 1.0
     _run_hs_randomization(
         nl, group_all, integrator,
-        dt_hs=dt_hs, t_rand=t_rand, kT=kT, seed=seed,
+        dt_hs=dt_hs, t_rand=t_rand, kT=kT, seed=seed, sigma_hs=sigma_hs,
     )
+
+    # --- Production frame 0: pairs inside the table's r < rmin region ---
+    # Read through the particle proxy: under numpy 2 the HOOMD 2.9.7
+    # snapshot position buffer comes back with every row equal to x.
+    positions_post_hs = np.array([p.position for p in system.particles])
+    n_pairs_below_rmin, min_pair_distance = count_close_pairs(
+        positions_post_hs, L, rmin
+    )
+    print(f"Post-HS pairs with r < rmin={rmin:.4f}: {n_pairs_below_rmin} "
+          f"(min pair distance {min_pair_distance:.4f}, sigma_HS={sigma_hs:g})")
 
     # --- Production pair potential via table ---
     table = hoomd.md.pair.table(width=width, nlist=nl, name="prod")
@@ -682,6 +747,9 @@ def run_simulation(
         "potential"   : potential,
         "t_rand"      : t_rand,
         "dt_hs"       : dt_hs,
+        "sigma_hs"    : sigma_hs,
+        "n_pairs_below_rmin": n_pairs_below_rmin,
+        "min_pair_distance" : min_pair_distance,
     }
 
 
