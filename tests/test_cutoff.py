@@ -15,7 +15,11 @@ N = 5000
 
 
 def _driver_bounds(U_0, n, m, r0):
-    """Cutoff of the 2026-08/09 inverse driver patch ``_run_simulation_dynamic_cutoff``."""
+    """rmax of the 2026-08/09 inverse driver patch ``_run_simulation_dynamic_cutoff``.
+
+    That patch used ``rmin = 0.7 * r0``. ``rmin`` here follows the current
+    ``_table_rmin`` (``rmin_k * r0``).
+    """
     t_tol_lj = 0.1 / float(U_0)
     return _compute_table_bounds("modified_lj", U_0, n, m, r0, None, t_tol_lj=t_tol_lj)
 
@@ -38,6 +42,7 @@ def test_default_matches_driver_patch_exactly(U_0, n, m_rel, r0):
     rmin_ref, rmax_ref = _driver_bounds(U_0, n, m, r0)
     b = resolve_table_bounds("modified_lj", U_0, n, m, r0, None, N=N, density=RHO)
     assert b["rmin"] == rmin_ref
+    assert b["rmin"] == pytest.approx(simulation.DEFAULT_RMIN_K * r0)
     assert b["rmax"] == rmax_ref
     assert b["t_tol_lj"] == 0.1 / float(U_0)
     assert b["tail_energy_cut"] == 0.1
@@ -72,7 +77,7 @@ def test_fixed_rmax():
     b = resolve_table_bounds("modified_lj", 3.0, 12.0, 6.0, 2.5, None, N=N, density=RHO,
                              rmax=6.0)
     assert b["rmax"] == 6.0 and b["rmax_fixed"] is True
-    assert b["rmin"] == pytest.approx(0.7 * 2.5)
+    assert b["rmin"] == pytest.approx(0.65 * 2.5)
     assert b["t_tol_lj"] is None and b["tail_energy_cut"] is None
     with pytest.raises(ValueError, match="must exceed rmin"):
         resolve_table_bounds("modified_lj", 3.0, 12.0, 6.0, 2.5, None, N=N, density=RHO,
@@ -100,6 +105,28 @@ def test_minimum_image_checked_for_every_mode(kwargs):
     with pytest.raises(ValueError, match="minimum-image"):
         resolve_table_bounds("modified_lj", 0.5, 15.0, 4.0, 3.5, None, N=500, density=0.5,
                              **kwargs)
+
+
+def test_rmin_k_scales_modified_lj_and_not_rmax():
+    base = resolve_table_bounds("modified_lj", 3.0, 12.0, 6.0, 2.5, None, N=N, density=RHO)
+    moved = resolve_table_bounds("modified_lj", 3.0, 12.0, 6.0, 2.5, None, N=N, density=RHO,
+                                 rmin_k=0.5)
+    assert base["rmin"] == pytest.approx(0.65 * 2.5)
+    assert moved["rmin"] == pytest.approx(0.5 * 2.5)
+    assert moved["rmax"] == base["rmax"]
+    for bad in (0.0, 1.0, -0.1, 1.2):
+        with pytest.raises(ValueError, match="rmin_k"):
+            resolve_table_bounds("modified_lj", 3.0, 12.0, 6.0, 2.5, None, N=N, density=RHO,
+                                 rmin_k=bad)
+
+
+def test_shifted_mie_rmin_ignores_rmin_k():
+    args = ("shifted_mie", 3.0, 12.0, 6.0, 1.0, 0.5)
+    default = resolve_table_bounds(*args, N=N, density=RHO)
+    other = resolve_table_bounds(*args, N=N, density=RHO, rmin_k=0.5)
+    assert default["rmin"] == pytest.approx(1.0 + 0.7 * 0.5)
+    assert other["rmin"] == default["rmin"]
+    assert other["rmax"] == default["rmax"]
 
 
 def test_shifted_mie_unchanged_and_rejects_tail_energy_cut():

@@ -65,6 +65,15 @@ def test_transient_log_steps_cannot_exceed_the_run(tmp_path):
         )
 
 
+def test_transient_log_init_steps_cannot_exceed_initialization(tmp_path):
+    with pytest.raises(ValueError, match="transient_log_init_steps"):
+        run_simulation(
+            0.005, 3.0, 2.5, 12, 6, str(tmp_path),
+            N=8, steps=10, plot=False, t_init=0.01, dt=1e-3,
+            transient_log_init_steps=11,
+        )
+
+
 def test_transient_log_period_must_be_positive(tmp_path):
     with pytest.raises(ValueError, match="transient_log_period"):
         run_simulation(

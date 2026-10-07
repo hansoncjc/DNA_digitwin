@@ -227,12 +227,12 @@ Builds a callable `objective(x_unit, ffpath)` that, for one BO query:
    or `rmax` in `sim_defaults` (each conflicts with `tail_energy_cut`).
    Every mode must give `rmax < L/2`, checked before HOOMD starts.
    The result dict carries `rmax`, `t_tol_lj`, `tail_energy_cut`, `L`.
-   After the Heyes–Melrose HS randomization (contact distance
-   `σ_HS = max(1, rmin)` by default; `hs_sigma_follows_rmin=False` gives
-   the particle diameter `σ_HS = 1`), the number
-   of pairs with `r < rmin` in the configuration that starts production
-   (GSD frame 0) is logged and returned as `n_pairs_below_rmin`, with
-   `min_pair_distance` and `sigma_hs`.
+   Initialization is a Langevin segment on the repulsive branch of the
+   same potential, cut at the well minimum (`t_init = 10`, the production
+   `dt`). `modified_lj` uses `rmin = rmin_k * r0` (`rmin_k = 0.65`).
+   The number of pairs with `r < rmin` in the configuration that starts
+   production (GSD frame 0) is logged and returned as `n_pairs_below_rmin`,
+   with `min_pair_distance`.
 4. Converts GSD → S(q) via either `convert_to_SAXS` (MC-DFM) or
    `convert_to_SAXS_fft` (FFT-based, default `N_grid=600`). The
    simulation and a saxs-fft target must use the same `N_grid`. In
@@ -265,8 +265,8 @@ path), `density` and the potential parameters:
 
 | Stage | Defaults |
 |---|---|
-| Pair potential | `modified_lj` table; dynamic cutoff `t_tol_lj = 0.1/U_0`, no fixed `rmax`, `rmax < L/2` |
-| HS randomization | Heyes–Melrose, `t_rand = 10`, `dt_hs = 1e-4`, contact distance `max(1, rmin)` |
+| Pair potential | `modified_lj` table; dynamic cutoff `t_tol_lj = 0.1/U_0`, no fixed `rmax`, `rmax < L/2`, `rmin = rmin_k * r0` with `rmin_k = 0.65` |
+| Initialization | Repulsive branch of that potential, cut at the well, Langevin `t_init = 10` at the production `dt` |
 | Langevin production | `kT = 1`, γ = 1, `dt = 1e-3`, `steps = 22_500_000` (450 GSD frames), `seed = 42` |
 | saxs-fft | `N_grid = 600`, `frames = 'last:100'`, `step = 5`, `trim = slice(3, -3)`, `particle_diameter = 24.6` nm |
 

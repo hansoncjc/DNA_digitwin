@@ -26,16 +26,18 @@ def test_simulation_defaults():
     assert d["steps"] == 22_500_000
     assert d["kT"] == 1.0
     assert d["seed"] == 42
-    assert d["t_rand"] == 10.0
-    assert d["dt_hs"] == 1e-4
-    assert d["hs_sigma_follows_rmin"] is True
+    assert d["t_init"] == 10.0
+    assert d["rmin_k"] == 0.65
     assert d["transient_log_steps"] == 0
     assert d["transient_log_period"] == 1
+    assert d["transient_log_init_steps"] == 0
     assert d["log_max_force"] is False
+    assert "t_rand" not in d and "dt_hs" not in d and "hs_sigma_follows_rmin" not in d
     assert d["rmax"] is None
     assert d["t_tol_lj"] is None
     assert d["tail_energy_cut"] is None
     assert simulation.DEFAULT_TAIL_ENERGY_CUT == 0.1
+    assert simulation.DEFAULT_RMIN_K == 0.65
 
 
 def test_saxsfft_defaults():
