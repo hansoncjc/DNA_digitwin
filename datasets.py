@@ -3,6 +3,95 @@ import numpy as np
 from pathlib import Path
 
 
+# ---------------------------------------------------------------------------
+# Physics-based mapping (task 0c-1, 2026-10-09)
+# ---------------------------------------------------------------------------
+#
+#   r0/sigma = 1 + k (l + 0.34 L_bridge) / d_si
+#   g        = r0 / (r0 - 1)            (particle size / shell thickness)
+#   n = a_n g,  m = a_m g,  a_n = a_m + delta
+#   U0 = A (C_chol / C_ref) (1 + K_s C_NaCl)
+#
+# l is the length of every part of the linker except the bridge: two lipid
+# bilayers, two ssDNA spacers and two hybridized ends,
+# 2*(t_b + 0.63 L_poly) + 0.34*2*L_HBP with the Chiang et al. 2025 construct
+# (t_b = 3.6 nm, L_poly = 10 nt, L_HBP = 18 bp) = 32.04 nm. With these values
+# r0 is the same as Dataset.r0_sigma at its defaults. 0.34 nm/bp is the dsDNA
+# contour length per base pair; L_bridge is in bp.
+
+FIXED_LINKER_NM = 2.0 * (3.6 + 0.63 * 10.0) + 0.34 * 2.0 * 18.0
+DSDNA_RISE_NM = 0.34
+C_CHOL_REF = 100.0
+
+#: Global coefficients of the physics-based mapping, in trajectory column order.
+PHYSICS_COEFFS = ("k", "A", "K_s", "a_m", "delta")
+
+# Lower limits of the mapped parameters. U0 >= 0.5 with n >= 5.5 and m >= 4
+# is where task 0a checked that pairs stay out of r < rmin = 0.5 r0;
+# n - m >= 1 is the inverse-design box (m <= n - 1).
+U0_MIN = 0.5
+N_MIN = 5.5
+M_MIN = 4.0
+NM_GAP_MIN = 1.0
+
+
+def physics_map(L_bridge, C_chol, C_NaCl, *, k, A, K_s, a_m, delta, d_si=24.6):
+    """
+    Map one experimental condition to Mie parameters (physics-based endpoint).
+
+    Parameters
+    ----------
+    L_bridge : float
+        Bridge length (bp).
+    C_chol : float
+        DNA-cholesterol loading (molecules/particle).
+    C_NaCl : float
+        NaCl concentration (mM).
+    k : float
+        Fraction of the linker contour length realized as the surface gap at
+        the potential minimum; must be > 0.
+    A : float
+        U0 (kT) at C_chol = C_CHOL_REF and no salt.
+    K_s : float
+        Linear salt slope (1/mM).
+    a_m, delta : float
+        m = a_m g and n = (a_m + delta) g, with g = r0 / (r0 - 1).
+    d_si : float
+        Particle diameter (nm), the simulation length unit sigma.
+
+    Returns
+    -------
+    dict with ``r0`` (sigma), ``U0`` (kT), ``n``, ``m``.
+    """
+    if k <= 0:
+        raise ValueError(f"k must be > 0 (got {k}).")
+    shell = float(k) * (FIXED_LINKER_NM + DSDNA_RISE_NM * float(L_bridge)) / float(d_si)
+    r0 = 1.0 + shell
+    g = r0 / shell
+    U0 = float(A) * (float(C_chol) / C_CHOL_REF) * (1.0 + float(K_s) * float(C_NaCl))
+    return {
+        "r0": r0,
+        "U0": U0,
+        "n": (float(a_m) + float(delta)) * g,
+        "m": float(a_m) * g,
+    }
+
+
+def check_mapped_params(U0, n, m, tol=1e-9):
+    """Raise ValueError if (U0, n, m) is outside the checked forward-model range."""
+    problems = []
+    if U0 < U0_MIN - tol:
+        problems.append(f"U0={U0:.4g} < {U0_MIN}")
+    if n < N_MIN - tol:
+        problems.append(f"n={n:.4g} < {N_MIN}")
+    if m < M_MIN - tol:
+        problems.append(f"m={m:.4g} < {M_MIN}")
+    if n - m < NM_GAP_MIN - tol:
+        problems.append(f"n-m={n - m:.4g} < {NM_GAP_MIN}")
+    if problems:
+        raise ValueError("Mapped parameters outside the checked range: " + ", ".join(problems))
+
+
 class ExperimentalParams:
     """
     Holds experimental inputs (flat, explicit) and lightweight helpers.
@@ -137,6 +226,10 @@ class Dataset:
         1D Gaussian in C_chol times a linear salt prefactor
         S = 1 + K_s * C_NaCl (K_s is the salt-response slope k_s, 1/mM).
         The former b_bridge Gaussian term is removed.
+    physics_params(k, A, K_s, a_m, delta) -> dict
+        Physics-based mapping (module ``physics_map``): r0, U0, n, m. This is
+        the mapping bo.py uses in mode="map"; density is taken from
+        ``sim.density``.
     """
 
     def __init__(self, id, exp_path, exp=None, sim=None, weight=1.0, out_dir=None, datatype="sq"):
@@ -286,6 +379,15 @@ class Dataset:
         term_c = ((C_chol - float(mu_c)) ** 2) / (2.0 * (float(sigma_c) ** 2))
 
         return float(A) * salt_gate * np.exp(-term_c)
+
+    def physics_params(self, *, k, A, K_s, a_m, delta):
+        """``physics_map`` for this dataset's condition (L_bridge, C_chol, C_NaCl, d_si)."""
+        if self.exp.L_bridge is None:
+            raise ValueError("L_bridge is required by the physics-based mapping but is None.")
+        return physics_map(
+            self.exp.L_bridge, self.exp.C_chol, self.exp.C_NaCl,
+            k=k, A=A, K_s=K_s, a_m=a_m, delta=delta, d_si=self.exp.d_si,
+        )
 
     def _autofill_sim_from_default(self,
                                     *,

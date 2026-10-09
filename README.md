@@ -8,10 +8,11 @@ ties them together with a small `Dataset` abstraction that carries
 **experimental conditions** + **mapping equations** from experimental
 inputs to simulation parameters. The BO loop can be told to either:
 
-- **`mode="map"`** – optimize *mapping coefficients* (`alpha`, `k`, `A`,
-  `mu_c`, `sigma_c`, `K_s`) that translate experimental inputs
-  (`C_NaCl`, `C_chol`, `L_bridge`, …) into simulation inputs
-  (`density`, `r0`, `U0`), shared across many experimental conditions, or
+- **`mode="map"`** – optimize the coefficients of the physics-based
+  mapping (`k`, `A`, `K_s`, `a_m`, `delta`) that translate experimental
+  inputs (`L_bridge`, `C_chol`, `C_NaCl`) into simulation inputs
+  (`r0`, `U0`, `n`, `m`), shared across many experimental conditions;
+  `density` is fixed per dataset, or
 - **`mode="sim"`** – optimize the simulation inputs themselves
   (`density`, `r0`, `U0`, `n`, `m`) directly, either globally or
   per-dataset.
@@ -31,6 +32,8 @@ DNA_digitwin/
 ├── simulation.py         # run_simulation (HOOMD), mie_r0
 ├── scattering.py         # GSD → I(q)/S(q): convert_to_SAXS, convert_to_SAXS_fft, extract_exp_sq
 ├── metrics.py            # compare_saxs_curves, compare_to_exp[_saxsfft] (MSE / weighted APDist + plots)
+├── campaigns/
+│   └── r32_physics/      # R3.2: ground truth, QC and BO driver for the physics-based mapping
 ├── parallel/             # Slurm launcher: submits 1 GPU job per dataset per BO iteration
 │   ├── __init__.py
 │   ├── submit_parallel.py
@@ -81,7 +84,23 @@ by the mapping equations.
 
 ### `Dataset` (`datasets.py`)
 Bundles one `(experimental, simulation, exp_path, weight, out_dir, datatype)`
-record and exposes the **mapping equations** that connect them:
+record and exposes the **mapping equations** that connect them.
+
+`physics_params(k, A, K_s, a_m, delta)` (module function `physics_map`,
+task 0c-1, 2026-10-09) is the mapping `mode="map"` uses:
+
+- `r0/σ = 1 + k · (l + 0.34 · L_bridge) / d_si`, with `l = 32.04` nm the
+  length of every linker part except the bridge (two bilayers, two ssDNA
+  spacers, two hybridized ends of the Chiang et al. 2025 construct) and
+  `0.34` nm/bp the dsDNA contour length; `L_bridge` in bp. Same `r0` as
+  `r0_sigma` at its defaults.
+- `g = r0 / (r0 − 1)` (particle size over shell thickness);
+  `m = a_m · g`, `n = (a_m + delta) · g`.
+- `U0 = A · (C_chol / 100) · (1 + K_s · C_NaCl)`.
+- `check_mapped_params` rejects `U0 < 0.5`, `n < 5.5`, `m < 4`,
+  `n − m < 1` (the range checked in task 0a); such an evaluation fails.
+
+The older mapping functions below are kept but not used by `bo.py`:
 
 - `rho_N(alpha)` → number density, with theoretical base
   `(6/π) · (C_stock / (ρ_Si·1000)) · (V_stock / V_total)` scaled by
@@ -204,14 +223,15 @@ into the mappings/sim. The vector is optimized in `[0, 1]^D` and
 mapped back to physical bounds internally.
 
 ```python
-param_cfg = {
+param_cfg = {   # mode="map": exactly the five global coefficients
     "global": {
-        "k":     {"bounds": (0.3, 1.2), "init": 0.76},
-        "alpha": {"bounds": (1.0, 5.0), "init": 3.0, "fixed": 3.0},
+        "k":     {"bounds": (0.4, 0.9),  "init": 0.76},
+        "A":     {"bounds": (0.85, 2.5), "init": 2.0},
+        "K_s":   {"bounds": (0.0, 0.10), "init": 0.05},
+        "a_m":   {"bounds": (2.91, 4.0), "init": 3.27},
+        "delta": {"bounds": (1.09, 4.0), "init": 3.27, "fixed": 3.2},  # "fixed" freezes one
     },
-    "local": {
-        # "U0": {"bounds": (0.5, 50.0), "init": 5.0},   # one U0 per dataset
-    },
+    "local": {},
 }
 ```
 
@@ -220,9 +240,12 @@ Builds a callable `objective(x_unit, ffpath)` that, for one BO query:
 1. Decodes the unit vector into globals + locals.
 2. For every `Dataset`, resolves `(density, r0, U0, n, m)` according
    to `mode`:
-   - `"map"`: applies the mapping equations using the optimized
-     coefficients above (`alpha→density`, `k→r0`,
-     `A,mu_c,sigma_c,K_s → U0`).
+   - `"map"`: `dataset.physics_params(k, A, K_s, a_m, delta)` gives
+     `r0, U0, n, m`; `density` is `dataset.sim.density` (the former
+     `alpha` coefficient was removed). The ParamSpace must hold exactly
+     these five global coefficients; `bo_trajectory.csv` and
+     `sim_params_*.csv` carry one column per coefficient, which
+     `load_warm_start_from_trajectory` reads back on resume.
    - `"sim"`: takes `density, r0, U0` directly from the param space
      (local > global > `dataset.sim.*`).
 3. Runs `simulation.run_simulation(...)` (HOOMD). The pair-table
@@ -318,11 +341,12 @@ path), `density` and the potential parameters:
 
 ## Example: train a digital twin with the multithread feature
 
-The script below mirrors the validated 9-sample test
-(`testing/digitwin_test/two_mapping_coeff/9_sample_test/multithread/`)
-and recovers two mapping coefficients (`k`, `A`) by globally fitting
-9 experimental conditions. All other mapping coefficients are frozen
-at their ground-truth defaults. Each BO iteration submits 9 GPU jobs
+The script below has the layout of the 9-sample test
+(`testing/digitwin_test/two_mapping_coeff/9_sample_test/multithread/`),
+rewritten for the physics-based mapping (2026-10-09): it fits two
+mapping coefficients (`k`, `A`) over 9 experimental conditions with the
+other three frozen. The full R3.2 campaign (24 conditions, all five
+coefficients) is `campaigns/r32_physics/`. Each BO iteration submits 9 GPU jobs
 in parallel through `DNA_digitwin/parallel/`; the master process runs
 on a CPU node.
 
@@ -373,23 +397,19 @@ for idx, (L_bridge, C_chol, exp_path) in enumerate(CANDIDATES):
     ds = Dataset(
         id       = f"d{idx}",
         exp_path = exp_path,
-        exp      = ExperimentalParams(L_bridge=L_bridge, C_chol=C_chol),
-        sim      = SimulationParams(),       # filled by mappings during BO
+        exp      = ExperimentalParams(L_bridge=L_bridge, C_chol=C_chol, C_NaCl=10.0),
+        sim      = SimulationParams(density=0.005),   # density is fixed; r0, U0, n, m mapped
         out_dir  = os.path.join(OUT_ROOT, f"d{idx}"),
         datatype = "sq",                     # set "iq" if files are I(q)
     )
     datasets.append(ds)
 
-FIXED = {
-    "alpha":   3.0,  "n":  12.0, "m": 6.0,
-    "mu_c":  100.0,  "sigma_c": 10.0,
-    "K_s":     0.05,
-}
+FIXED = {"K_s": 0.07, "a_m": 3.2, "delta": 3.2}
 
 param_cfg = {
     "global": {
-        "k": {"bounds": (0.3, 1.2),  "init": 0.76},
-        "A": {"bounds": (1.0, 15.0), "init": 2.0},
+        "k": {"bounds": (0.4, 0.9),  "init": 0.76},
+        "A": {"bounds": (0.85, 2.5), "init": 2.0},
 
         **{name: {"bounds": (v, v), "init": v, "fixed": v}
            for name, v in FIXED.items()},
@@ -425,7 +445,8 @@ objective = bo.make_global_objective(
     mode              = "map",
     scattering_method = "saxsfft",
     scattering_kwargs = {},                  # forward-model defaults (N_grid=600)
-    metric            = "mse",
+    metric            = "shift_rmse",
+    compare_q_range   = None,                # shift_rmse compares over the curve overlap
     parallel          = True,
     parallel_cfg      = PARALLEL_CFG,
 )

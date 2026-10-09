@@ -312,7 +312,8 @@ def test_metric_kwargs_rejected_for_other_metrics(tmp_path):
 # ---------------- make_global_objective validation ---------------- #
 
 def _ps():
-    return bo.ParamSpace({"global": {}, "local": {}}, dataset_ids=["d0"])
+    fixed = {name: {"fixed": 1.0} for name in bo.PHYSICS_COEFFS}
+    return bo.ParamSpace({"global": fixed, "local": {}}, dataset_ids=["d0"])
 
 
 def test_objective_rejects_shift_rmse_without_window():

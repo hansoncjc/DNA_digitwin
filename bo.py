@@ -13,32 +13,30 @@ What this gives you
 3) A pack/unpack system that maps an optimizer vector x ∈ [0,1]^D to a dict of
    named parameters (globals + locals) with your bounds.
 
-Minimal usage (Stage 1: globals only)
--------------------------------------
+Minimal usage (mode="map", physics-based mapping)
+-------------------------------------------------
+Every coefficient of ``datasets.PHYSICS_COEFFS`` must be in "global", free
+or "fixed". Density is ``dataset.sim.density`` (fixed, not mapped).
+
 param_cfg = {
     "global": {
-        "alpha":   {"bounds": (0.2, 5.0),   "init": 1.0},    # density coeff
-        "n":       {"bounds": (6.0, 20.0),  "init": 12.0},
-        "m":       {"bounds": (4.0, 12.0),  "init": 6.0},
-        # Optional global mapping coeffs you want to learn in Stage 1 as well:
-        # "k":       {"bounds": (0.5, 1.2),   "init": 0.76},  # r0 mapping coeff
-        # "A":       {"bounds": (1.0, 20.0),  "init": 2.0},
-        # "mu_c":    {"bounds": (40.0, 200.0),"init": 100.0},
-        # "sigma_c": {"bounds": (5.0, 25.0),  "init": 15.0},
-        # "sigma_b": {"bounds": (0.05, 0.5),  "init": 0.1},
+        "k":     {"bounds": (0.4, 0.9),   "init": 0.76},  # r0
+        "A":     {"bounds": (0.85, 2.5),  "init": 2.0},   # U0 at C_ref, no salt
+        "K_s":   {"bounds": (0.0, 0.10),  "init": 0.05},  # salt slope (1/mM)
+        "a_m":   {"bounds": (2.91, 4.0),  "init": 3.27},  # m = a_m g
+        "delta": {"bounds": (1.09, 4.0),  "init": 3.27},  # n = (a_m + delta) g
     },
-    "local": {
-        # leave empty in Stage 1 (or put "U0"/"r0" here for Stage 2 refinements)
-    }
+    "local": {},
 }
 
-from bo import ParamSpace, make_global_objective, run_bo
+from bo import ParamSpace, make_global_objective, run_bo_resumable
 ps = ParamSpace(param_cfg, dataset_ids=[d.id for d in datasets])
 
-obj = make_global_objective(datasets, ps, out_root="Optimization_Results",
-                            trim_tail=0, sim_defaults={"steps": 1_500_000})
+obj = make_global_objective(datasets, ps, ffpath, out_root="Optimization_Results",
+                            trim_tail=0, sim_defaults={"N": 5000},
+                            metric="shift_rmse", compare_q_range=None)
 
-best, history = run_bo(obj, ps, n_iters=20, seed=0)
+best, history = run_bo_resumable(obj, ps, ffpath, "Optimization_Results", n_iters=20)
 print("Best params (physical):", ps.decode(best))
 """
 
@@ -67,6 +65,7 @@ from metrics import (
     load_shift_rmse_components,
     shift_rmse_params,
 )
+from datasets import PHYSICS_COEFFS, check_mapped_params
 
 # ------------------------- Evaluation failures ------------------------- #
 
@@ -82,21 +81,32 @@ DEFAULT_MAX_ACQ_ATTEMPTS = 5
 # Parameters that correspond to direct simulation inputs
 _SIM_PARAMS = {"density", "r0", "U0"}
 
-# Parameters that don't correpond to modes
+# Simulation parameters that only mode="sim" may optimize directly
 _ALWAYS_OK_SIM = {"n", "m"}
 
-# Parameters that correspond to mapping coefficients
-_MAP_PARAMS = {"alpha", "k", "A", "mu_c", "sigma_c", "K_s"}
+# Parameters that correspond to mapping coefficients (datasets.physics_map)
+_MAP_PARAMS = set(PHYSICS_COEFFS)
+
+# Coefficient columns of bo_trajectory.csv and sim_params_*.csv, then the
+# simulation parameters. Written in both modes (blank coefficients in "sim").
+_TRAJECTORY_PARAM_COLUMNS = ("iteration", "dataset_id", "loss", *PHYSICS_COEFFS,
+                             "density", "n", "m", "r0", "U0")
+
+
+def _coeff_columns(G: Dict[str, Any]) -> Dict[str, Any]:
+    """Mapping-coefficient columns for one trajectory / sim_params row."""
+    return {name: G.get(name, "") for name in PHYSICS_COEFFS}
 
 
 def _validate_param_mode(ps, mode: str) -> None:
     """
     Ensure that the ParamSpace configuration is consistent with the chosen mode.
 
-    mode = "map": only mapping parameters (alpha, k, A, ...) are allowed.
-    mode = "sim": only direct simulation parameters (density, r0, U0, ...) are allowed.
-
-    n and m are always treated as *simulation* parameters and are allowed in both modes.
+    mode = "map": exactly the physics-based mapping coefficients
+        (``datasets.PHYSICS_COEFFS``), all GLOBAL, each free or "fixed".
+        n, m, r0, U0 come from the mapping; density from ``dataset.sim``.
+    mode = "sim": only direct simulation parameters (density, r0, U0, n, m)
+        are allowed.
     """
     if mode not in ("map", "sim"):
         raise ValueError(f"Unknown mode '{mode}'. Expected 'map' or 'sim'.")
@@ -105,11 +115,15 @@ def _validate_param_mode(ps, mode: str) -> None:
     l_names = set(ps.cfg.get("local", {}).keys())
 
     if mode == "map":
-        illegal = (g_names | l_names) & _SIM_PARAMS
-        if illegal:
+        extra = (g_names | l_names) - _MAP_PARAMS
+        missing = _MAP_PARAMS - g_names
+        if l_names or extra or missing:
             raise ValueError(
-                "ParamSpace configuration is inconsistent with mode='map'. "
-                f"These direct simulation parameters are not allowed here: {sorted(illegal)}"
+                "ParamSpace configuration is inconsistent with mode='map': it must hold "
+                f"exactly the global coefficients {list(PHYSICS_COEFFS)} (free or fixed). "
+                f"Local: {sorted(l_names)}; not allowed: {sorted(extra)}; "
+                f"missing: {sorted(missing)}. Density is dataset.sim.density "
+                "(alpha was removed 2026-10-09)."
             )
     else:  # mode == "sim"
         illegal = (g_names | l_names) & _MAP_PARAMS
@@ -151,7 +165,7 @@ class ParamSpace:
     param_cfg schema:
         {
           "global": {
-             "alpha":   {"bounds": (0.2, 5.0),  "init": 1.0},
+             "k":       {"bounds": (0.4, 0.9),  "init": 0.76},
              "n":       {"bounds": (6.0, 20.0), "init": 12.0},
              "m":       {"bounds": (4.0, 12.0), "init": 6.0},
              # You can also "freeze" any param:
@@ -281,12 +295,13 @@ def _write_iteration_block(filepath: str, iteration: int, total_loss: float, rec
         Total loss summed across all datasets for this iteration
     records : List[Dict[str, Any]]
         List of parameter/loss records for each dataset in this iteration.
-        Each record should have keys: iteration, dataset_id, loss, k, alpha, A, etc.
+        Each record should have keys: iteration, dataset_id, loss, the
+        mapping coefficients (PHYSICS_COEFFS), density, n, m, r0, U0, audit columns.
 
     Format
     ------
     # Iteration N,total_loss,<value>
-    iteration,dataset_id,loss,k,alpha,A,mu_c,mu_b,sigma_c,sigma_b,K_s,density,n,m,r0,U0,
+    iteration,dataset_id,loss,k,A,K_s,a_m,delta,density,n,m,r0,U0,
         rmax,rmax_over_r0,t_tol,n_pairs_below_rmin,rmse,shift
     N,d0,loss_val,k_val,...
     N,d1,loss_val,k_val,...
@@ -386,17 +401,11 @@ def _write_failed_iteration_block(
     with open(filepath, "a", newline="") as f:
         writer = csv.writer(f)
         if write_header:
-            writer.writerow([
-                "iteration", "dataset_id", "loss", "k", "alpha", "A", "mu_c",
-                "mu_b", "sigma_c", "sigma_b", "K_s", "density", "n", "m", "r0", "U0",
-            ])
+            writer.writerow(list(_TRAJECTORY_PARAM_COLUMNS))
         writer.writerow([f"# Iteration {iteration}", "EVALUATION", "FAILED", reason])
         if records:
             writer.writerows([
-                [r.get(c, "") for c in (
-                    "iteration", "dataset_id", "loss", "k", "alpha", "A", "mu_c",
-                    "mu_b", "sigma_c", "sigma_b", "K_s", "density", "n", "m", "r0", "U0",
-                )]
+                [r.get(c, "") for c in _TRAJECTORY_PARAM_COLUMNS]
                 for r in records
             ])
 
@@ -406,14 +415,7 @@ def _failed_trajectory_record(eval_id, ds_id, G, plan=None, reason="FAILED"):
         "iteration": eval_id,
         "dataset_id": ds_id,
         "loss": reason,
-        "k": G.get("k", ""),
-        "alpha": G.get("alpha", ""),
-        "A": G.get("A", ""),
-        "mu_c": G.get("mu_c", ""),
-        "mu_b": G.get("mu_b", ""),
-        "sigma_c": G.get("sigma_c", ""),
-        "sigma_b": G.get("sigma_b", ""),
-        "K_s": G.get("K_s", ""),
+        **_coeff_columns(G),
         "density": "ERROR",
         "n": "ERROR",
         "m": "ERROR",
@@ -452,6 +454,46 @@ def _launcher_config_from_pcfg(pcfg: Dict[str, Any], run_dir: Path):
     )
 
 
+def _resolve_sim_params(ds, G: Dict[str, Any], L: Dict[str, Any], mode: str):
+    """
+    Simulation inputs ``(density, r0, U0, n, m)`` for one dataset.
+
+    mode="map": ``dataset.physics_params`` with the global coefficients
+    (``datasets.PHYSICS_COEFFS``); density is ``dataset.sim.density``. A
+    mapped point outside ``datasets.check_mapped_params`` raises ValueError,
+    which fails the evaluation (it is logged, not fed to the GP).
+
+    mode="sim": each of density, r0, U0 from LOCAL, then GLOBAL, then
+    ``dataset.sim``; n, m from GLOBAL, then ``dataset.sim``.
+    """
+    if mode == "map":
+        if getattr(ds.sim, "density", None) is None:
+            raise ValueError(
+                f"Dataset {ds.id}: mode='map' takes density from dataset.sim.density, "
+                "which is None."
+            )
+        p = ds.physics_params(**{name: float(G[name]) for name in PHYSICS_COEFFS})
+        check_mapped_params(p["U0"], p["n"], p["m"])
+        return float(ds.sim.density), p["r0"], p["U0"], p["n"], p["m"]
+
+    n = float(G["n"]) if "n" in G else float(ds.sim.n)
+    m = float(G["m"]) if "m" in G else float(ds.sim.m)
+    values = {}
+    for name in ("density", "r0", "U0"):
+        if name in L[ds.id]:
+            values[name] = float(L[ds.id][name])
+        elif name in G:
+            values[name] = float(G[name])
+        elif getattr(ds.sim, name, None) is not None:
+            values[name] = float(getattr(ds.sim, name))
+        else:
+            raise ValueError(
+                f"Dataset {ds.id}: {name} not provided in mode='sim' "
+                f"and dataset.sim.{name} is None."
+            )
+    return values["density"], values["r0"], values["U0"], n, m
+
+
 def _parallel_prepare_eval_jobs(
     *,
     datasets: List[Any],
@@ -483,75 +525,7 @@ def _parallel_prepare_eval_jobs(
 
     for ds in datasets:
         try:
-            n = float(G["n"]) if "n" in G else float(ds.sim.n)
-            m = float(G["m"]) if "m" in G else float(ds.sim.m)
-
-            if mode == "map":
-                alpha = float(G.get("alpha", 1.0))
-                density = ds.rho_N(alpha=alpha)
-            else:
-                if "density" in L[ds.id]:
-                    density = float(L[ds.id]["density"])
-                elif "density" in G:
-                    density = float(G["density"])
-                elif ds.sim.density is not None:
-                    density = float(ds.sim.density)
-                else:
-                    raise ValueError(
-                        f"Dataset {ds.id}: density not provided in mode='sim' "
-                        "and dataset.sim.density is None."
-                    )
-
-            if mode == "map":
-                if "k" in G:
-                    r0 = float(ds.r0_sigma(k=float(G["k"])))
-                elif ds.sim.r0 is not None:
-                    r0 = float(ds.sim.r0)
-                else:
-                    raise ValueError(
-                        f"Dataset {ds.id}: r0 not provided and no mapping coeff 'k' "
-                        "found in mode='map'."
-                    )
-            else:
-                if "r0" in L[ds.id]:
-                    r0 = float(L[ds.id]["r0"])
-                elif "r0" in G:
-                    r0 = float(G["r0"])
-                elif ds.sim.r0 is not None:
-                    r0 = float(ds.sim.r0)
-                else:
-                    raise ValueError(
-                        f"Dataset {ds.id}: r0 not provided in mode='sim' "
-                        "and dataset.sim.r0 is None."
-                    )
-
-            if mode == "map":
-                if all(k in G for k in ("A", "mu_c", "sigma_c")):
-                    U0 = float(ds.U0_from_gaussian(
-                        A=G["A"],
-                        mu_c=G["mu_c"],
-                        sigma_c=G["sigma_c"],
-                        K_s=G.get("K_s", 0.05),
-                    ))
-                elif ds.sim.U0 is not None:
-                    U0 = float(ds.sim.U0)
-                else:
-                    raise ValueError(
-                        f"Dataset {ds.id}: U0 not provided and no global Gaussian coeffs "
-                        "found in mode='map'."
-                    )
-            else:
-                if "U0" in L[ds.id]:
-                    U0 = float(L[ds.id]["U0"])
-                elif "U0" in G:
-                    U0 = float(G["U0"])
-                elif ds.sim.U0 is not None:
-                    U0 = float(ds.sim.U0)
-                else:
-                    raise ValueError(
-                        f"Dataset {ds.id}: U0 not provided in mode='sim' "
-                        "and dataset.sim.U0 is None."
-                    )
+            density, r0, U0, n, m = _resolve_sim_params(ds, G, L, mode)
 
             save_dir = os.path.join(out_root, f"eval_{eval_id:03d}", ds.id)
             os.makedirs(save_dir, exist_ok=True)
@@ -559,14 +533,7 @@ def _parallel_prepare_eval_jobs(
             sim_params_record = {
                 "dataset_id": ds.id,
                 "eval_id": eval_id,
-                "k": G.get("k", ""),
-                "alpha": G.get("alpha", ""),
-                "A": G.get("A", ""),
-                "mu_c": G.get("mu_c", ""),
-                "mu_b": G.get("mu_b", ""),
-                "sigma_c": G.get("sigma_c", ""),
-                "sigma_b": G.get("sigma_b", ""),
-                "K_s": G.get("K_s", ""),
+                **_coeff_columns(G),
                 "density": float(density),
                 "n": float(n),
                 "m": float(m),
@@ -688,14 +655,7 @@ def _collect_parallel_eval_loss(
                 "iteration": eval_id,
                 "dataset_id": ds.id,
                 "loss": loss,
-                "k": G.get("k", ""),
-                "alpha": G.get("alpha", ""),
-                "A": G.get("A", ""),
-                "mu_c": G.get("mu_c", ""),
-                "mu_b": G.get("mu_b", ""),
-                "sigma_c": G.get("sigma_c", ""),
-                "sigma_b": G.get("sigma_b", ""),
-                "K_s": G.get("K_s", ""),
+                **_coeff_columns(G),
                 "density": float(plan["density"]),
                 "n":       float(plan["n"]),
                 "m":       float(plan["m"]),
@@ -889,30 +849,18 @@ def make_global_objective(
       - runs sim → SAXS → compare_to_exp on each dataset,
       - returns the weighted sum of losses.
 
-    Policy / defaults
-    -----------------
-    - density = alpha * dataset.exp.theoretical_base (computed via dataset.rho_N(alpha))
-    - n, m: taken from GLOBALs if present; otherwise fall back to dataset.sim.n / m.
-    - r0:
-        * if LOCAL "r0" present for a dataset, use it,
-        * else if GLOBAL "k" present, use dataset.r0_sigma(k),
-        * else if dataset.sim.r0 is set, use it,
-        * else raise.
-    - U0:
-        * if LOCAL "U0" present for a dataset, use it,
-        * else if GLOBAL ("A","mu_c","sigma_c") present, use dataset.U0_from_gaussian(...),
-        * else if dataset.sim.U0 is set, use it,
-        * else raise.
-    mode: default to be "map"
+    mode: default to be "map" (see ``_resolve_sim_params``)
     ----
     "map" (default):
-        density, r0, U0 are computed via dataset mappings
-        (alpha → density, k → r0, A/mu_c/sigma_c/K_s → U0).
-        Direct sim params (density/r0/U0) are not allowed in ParamSpace.
+        r0, U0, n, m come from the physics-based mapping
+        ``dataset.physics_params(k, A, K_s, a_m, delta)``; the ParamSpace must
+        hold exactly these GLOBAL coefficients (free or fixed). Density is
+        ``dataset.sim.density`` (fixed; the former ``alpha`` coefficient was
+        removed 2026-10-09). A mapped point below ``datasets.check_mapped_params``
+        limits fails the evaluation.
     "sim":
-        density, r0, U0 are taken directly from ParamSpace (global/local),
-        or fall back to dataset.sim.* if not optimized.
-        Mapping params (alpha/k/A/...) are not allowed in ParamSpace.
+        density, r0, U0 from LOCAL, then GLOBAL, then dataset.sim.*; n, m
+        from GLOBAL, then dataset.sim. Mapping coefficients are not allowed.
 
     "trim_tail":
         number of points to drop from the end of the experimental intensity 
@@ -1039,82 +987,8 @@ def make_global_objective(
         eval_failed = False
         for ds in datasets:
             try:
-                # ---- Shared n, m (always "sim" style) ----
-                n = float(G["n"]) if "n" in G else float(ds.sim.n)
-                m = float(G["m"]) if "m" in G else float(ds.sim.m)
-
-                # ---- density ----
-                if mode == "map":
-                    alpha = float(G.get("alpha", 1.0))
-                    density = ds.rho_N(alpha=alpha)
-                else:  # mode == "sim"
-                    # Prefer local, then global, then dataset.sim
-                    if "density" in L[ds.id]:
-                        density = float(L[ds.id]["density"])
-                    elif "density" in G:
-                        density = float(G["density"])
-                    elif ds.sim.density is not None:
-                        density = float(ds.sim.density)
-                    else:
-                        raise ValueError(
-                            f"Dataset {ds.id}: density not provided in mode='sim' "
-                            "and dataset.sim.density is None."
-                        )
-
-                # ---- r0 ----
-                if mode == "map":
-                    if "k" in G:
-                        r0 = float(ds.r0_sigma(k=float(G["k"])))
-                    elif ds.sim.r0 is not None:
-                        r0 = float(ds.sim.r0)
-                    else:
-                        raise ValueError(
-                            f"Dataset {ds.id}: r0 not provided and no mapping coeff 'k' found "
-                            "in mode='map'."
-                        )
-                else:  # mode == "sim"
-                    if "r0" in L[ds.id]:
-                        r0 = float(L[ds.id]["r0"])
-                    elif "r0" in G:
-                        r0 = float(G["r0"])
-                    elif ds.sim.r0 is not None:
-                        r0 = float(ds.sim.r0)
-                    else:
-                        raise ValueError(
-                            f"Dataset {ds.id}: r0 not provided in mode='sim' "
-                            "and dataset.sim.r0 is None."
-                        )
-
-                # ---- U0 ----
-                if mode == "map":
-                    if all(k in G for k in ("A", "mu_c", "sigma_c")):
-                        U0 = float(
-                            ds.U0_from_gaussian(
-                                A=G["A"],
-                                mu_c=G["mu_c"],
-                                sigma_c=G["sigma_c"],
-                                K_s=G.get("K_s", 0.05),
-                            )
-                        )
-                    elif ds.sim.U0 is not None:
-                        U0 = float(ds.sim.U0)
-                    else:
-                        raise ValueError(
-                            f"Dataset {ds.id}: U0 not provided and no global Gaussian coeffs "
-                            "found in mode='map'."
-                        )
-                else:  # mode == "sim"
-                    if "U0" in L[ds.id]:
-                        U0 = float(L[ds.id]["U0"])
-                    elif "U0" in G:
-                        U0 = float(G["U0"])
-                    elif ds.sim.U0 is not None:
-                        U0 = float(ds.sim.U0)
-                    else:
-                        raise ValueError(
-                            f"Dataset {ds.id}: U0 not provided in mode='sim' "
-                            "and dataset.sim.U0 is None."
-                        )
+                # ---- density, r0, U0, n, m (mapping or direct) ----
+                density, r0, U0, n, m = _resolve_sim_params(ds, G, L, mode)
 
                 # ---- Output directory ----
                 # New structure: eval_XXX/d0/, eval_XXX/d1/, etc.
@@ -1126,14 +1000,7 @@ def make_global_objective(
                     "dataset_id": ds.id,
                     "eval_id": eval_id,
                     # Mapping coefficients (saved regardless of mode)
-                    "k": G.get("k", ""),
-                    "alpha": G.get("alpha", ""),
-                    "A": G.get("A", ""),
-                    "mu_c": G.get("mu_c", ""),
-                    "mu_b": G.get("mu_b", ""),
-                    "sigma_c": G.get("sigma_c", ""),
-                    "sigma_b": G.get("sigma_b", ""),
-                    "K_s": G.get("K_s", ""),
+                    **_coeff_columns(G),
                     # Simulation parameters
                     "density": float(density),
                     "n": float(n),
@@ -1207,14 +1074,7 @@ def make_global_objective(
                     "iteration": eval_id,
                     "dataset_id": ds.id,
                     "loss": loss,
-                    "k": G.get("k", ""),
-                    "alpha": G.get("alpha", ""),
-                    "A": G.get("A", ""),
-                    "mu_c": G.get("mu_c", ""),
-                    "mu_b": G.get("mu_b", ""),
-                    "sigma_c": G.get("sigma_c", ""),
-                    "sigma_b": G.get("sigma_b", ""),
-                    "K_s": G.get("K_s", ""),
+                    **_coeff_columns(G),
                     "density": float(density),
                     "n": float(n),
                     "m": float(m),

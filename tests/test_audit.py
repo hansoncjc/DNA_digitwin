@@ -101,7 +101,8 @@ def test_sequential_records_audit_per_dataset(tmp_path, stub_pipeline):
         assert float(r["shift"]) == pytest.approx(diag["shift_term"])
         assert float(r["loss"]) == pytest.approx(diag["loss"])
     assert rows["d0"]["rmax"] != rows["d1"]["rmax"]
-    assert "mu_b" in block["rows"][0] and "sigma_b" in block["rows"][0]
+    assert all(block["rows"][0][c] == "" for c in bo.PHYSICS_COEFFS)
+    assert "mu_b" not in block["rows"][0] and "alpha" not in block["rows"][0]
 
     with open(tmp_path / "loss_components.txt", newline="") as fh:
         comp = list(csv.DictReader(fh))
