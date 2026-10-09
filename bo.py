@@ -1478,6 +1478,8 @@ def run_bo_resumable(
 
 GP_LOG_VERSION = 1
 
+# Written into every gp_log.jsonl row. Kept verbatim so the version-1 format
+# does not change.
 GP_LOG_UNITS = (
     "lengthscale: unit cube, columns follow param_names "
     "(ParamSpace order: globals, then locals as name:dataset_id). "
@@ -1517,7 +1519,7 @@ class _PreserveRng:
 def _align_lengthscale(lengthscale: torch.Tensor, n_dims: int) -> torch.Tensor:
     """Drop gpytorch's singleton output axis.
 
-    One GP is ``(d,)`` or ``(1, d)``. A SAAS MCMC batch is ``(S, 1, d)``.
+    One GP is ``(d,)`` or ``(1, d)``.
     The last axis is the unit-cube dimension, in ``param_names`` order.
     """
     ls = lengthscale.detach()
@@ -1530,21 +1532,14 @@ def _align_lengthscale(lengthscale: torch.Tensor, n_dims: int) -> torch.Tensor:
     return ls
 
 
-def _json_hyper(values: torch.Tensor, n_mcmc: Optional[int], name: str):
-    """Scalar for STGP, one JSON number per MCMC sample for SAAS."""
+def _json_hyper(values: torch.Tensor, name: str):
+    """Scalar STGP hyperparameter as a JSON number."""
     flat = values.detach().reshape(-1).cpu()
-    if n_mcmc is None:
-        if flat.numel() != 1:
-            raise RuntimeError(
-                f"{name} shape {tuple(values.shape)} is not a scalar STGP hyperparameter"
-            )
-        return float(flat[0].item())
-    if flat.numel() != n_mcmc:
+    if flat.numel() != 1:
         raise RuntimeError(
-            f"{name} has {flat.numel()} values, expected {n_mcmc} MCMC samples "
-            f"(shape {tuple(values.shape)})"
+            f"{name} shape {tuple(values.shape)} is not a scalar STGP hyperparameter"
         )
-    return [float(v) for v in flat.tolist()]
+    return float(flat[0].item())
 
 
 def _standardize_stats(model) -> Tuple[float, float]:
@@ -1583,61 +1578,14 @@ def _as_cov(cov: torch.Tensor, n: int) -> torch.Tensor:
     return c
 
 
-def _mixture_covariance(posterior) -> torch.Tensor:
-    """Posterior covariance of a fully Bayesian mixture.
-
-    Uses ``mixture_covariance_matrix`` when the installed botorch has it
-    (newer than 0.9). Otherwise applies the same law of total covariance to
-    ``posterior.distribution`` (or ``.mvn``).
-    """
-    cov = getattr(posterior, "mixture_covariance_matrix", None)
-    if cov is not None:
-        return cov
+def _posterior_moments(posterior, n: int):
+    """Latent moments in train_y units."""
+    mean = posterior.mean
+    var = posterior.variance
     dist = getattr(posterior, "distribution", None)
     if dist is None:
         dist = posterior.mvn
-    cov_s = dist.covariance_matrix
-    if hasattr(cov_s, "to_dense"):
-        cov_s = cov_s.to_dense()
-    mean_s = dist.mean
-    if (
-        mean_s.ndim >= 1
-        and mean_s.shape[-1] == 1
-        and cov_s.shape[-1] != 1
-    ):
-        mean_s = mean_s.squeeze(-1)
-    q = cov_s.shape[-1]
-    if mean_s.shape[-1] != q:
-        raise RuntimeError(
-            f"cannot align mixture mean {tuple(mean_s.shape)} "
-            f"with covariance {tuple(cov_s.shape)}"
-        )
-    mean_flat = mean_s.reshape(-1, q)
-    cov_flat = cov_s.reshape(-1, q, q)
-    if mean_flat.shape[0] != cov_flat.shape[0]:
-        raise RuntimeError(
-            f"MCMC batch mismatch: mean {tuple(mean_s.shape)} "
-            f"cov {tuple(cov_s.shape)}"
-        )
-    centered = mean_flat - mean_flat.mean(dim=0, keepdim=True)
-    within = cov_flat.mean(dim=0)
-    between = torch.matmul(centered.unsqueeze(-1), centered.unsqueeze(-2)).mean(dim=0)
-    return within + between
-
-
-def _posterior_moments(posterior, n: int):
-    """Latent moments in train_y units. SAAS uses the MCMC mixture."""
-    if hasattr(posterior, "mixture_mean"):
-        mean = posterior.mixture_mean
-        var = posterior.mixture_variance
-        cov = _mixture_covariance(posterior)
-    else:
-        mean = posterior.mean
-        var = posterior.variance
-        dist = getattr(posterior, "distribution", None)
-        if dist is None:
-            dist = posterior.mvn
-        cov = dist.covariance_matrix
+    cov = dist.covariance_matrix
     if hasattr(cov, "to_dense"):
         cov = cov.to_dense()
     return _as_vector(mean, n), _as_vector(var, n), _as_cov(cov, n)
@@ -1688,54 +1636,28 @@ def gp_posterior(model, X_unit: torch.Tensor) -> Dict[str, torch.Tensor]:
     }
 
 
-def _read_gp_hypers(model, n_dims: int, surrogate: str) -> Dict[str, Any]:
+def _read_gp_hypers(model, n_dims: int) -> Dict[str, Any]:
     ls = _align_lengthscale(model.covar_module.base_kernel.lengthscale, n_dims)
-    if surrogate == "stgp":
-        if ls.ndim == 2 and ls.shape[0] == 1:
-            ls = ls[0]
-        if ls.ndim != 1 or ls.shape[0] != n_dims:
-            raise RuntimeError(
-                f"STGP lengthscale did not reduce to ({n_dims},); "
-                f"raw shape {tuple(model.covar_module.base_kernel.lengthscale.shape)}"
-            )
-        lengthscale_json = [float(v) for v in ls.cpu().tolist()]
-        n_mcmc = None
-        mcmc_samples = None
-    elif surrogate == "saas":
-        if ls.ndim == 1:
-            ls = ls.unsqueeze(0)
-        if ls.ndim != 2 or ls.shape[1] != n_dims:
-            raise RuntimeError(
-                f"SAAS lengthscale did not reduce to (n_mcmc, {n_dims}); "
-                f"raw shape {tuple(model.covar_module.base_kernel.lengthscale.shape)}"
-            )
-        lengthscale_json = [[float(v) for v in row] for row in ls.cpu().tolist()]
-        n_mcmc = int(ls.shape[0])
-        mcmc_samples = {
-            "lengthscale": ls.detach().cpu().contiguous().clone(),
-        }
-    else:
-        raise ValueError(f"surrogate must be 'stgp' or 'saas', got {surrogate!r}")
-
-    outputscale = _json_hyper(model.covar_module.outputscale, n_mcmc, "outputscale")
-    noise = _json_hyper(model.likelihood.noise, n_mcmc, "noise")
-    mean_constant = _json_hyper(model.mean_module.constant, n_mcmc, "mean_constant")
-    std_mean, std_std = _standardize_stats(model)
-    if mcmc_samples is not None:
-        mcmc_samples["outputscale"] = (
-            model.covar_module.outputscale.detach().reshape(-1).cpu().clone()
+    if ls.ndim == 2 and ls.shape[0] == 1:
+        ls = ls[0]
+    if ls.ndim != 1 or ls.shape[0] != n_dims:
+        raise RuntimeError(
+            f"STGP lengthscale did not reduce to ({n_dims},); "
+            f"raw shape {tuple(model.covar_module.base_kernel.lengthscale.shape)}"
         )
-        mcmc_samples["noise"] = model.likelihood.noise.detach().reshape(-1).cpu().clone()
-        mcmc_samples["mean"] = model.mean_module.constant.detach().reshape(-1).cpu().clone()
+    lengthscale_json = [float(v) for v in ls.cpu().tolist()]
+
+    outputscale = _json_hyper(model.covar_module.outputscale, "outputscale")
+    noise = _json_hyper(model.likelihood.noise, "noise")
+    mean_constant = _json_hyper(model.mean_module.constant, "mean_constant")
+    std_mean, std_std = _standardize_stats(model)
     return {
         "lengthscale": lengthscale_json,
         "outputscale": outputscale,
         "noise": noise,
         "mean_constant": mean_constant,
-        "n_mcmc": n_mcmc,
         "standardize_mean": std_mean,
         "standardize_std": std_std,
-        "mcmc_samples": mcmc_samples,
     }
 
 
@@ -1816,7 +1738,6 @@ def _write_gp_iteration(
     train_y: torch.Tensor,
     ps: ParamSpace,
     *,
-    surrogate: str,
     stage: str,
     acq_value,
     candidate: Optional[torch.Tensor],
@@ -1841,7 +1762,7 @@ def _write_gp_iteration(
 
     with _PreserveRng():
         state_dict = _cpu_state_dict(model)
-        hypers = _read_gp_hypers(model, n_dims, surrogate)
+        hypers = _read_gp_hypers(model, n_dims)
         best_index = int(torch.argmax(train_y))
         best_unit = _cpu_row(train_x[best_index])
         best_phys = ps.unit_to_phys(best_unit)
@@ -1870,13 +1791,14 @@ def _write_gp_iteration(
             "n_train": n_train,
             "stage": stage,
             "attempt": attempt,
-            "surrogate": surrogate,
+            "surrogate": "stgp",
             "param_names": names,
             "lengthscale": hypers["lengthscale"],
             "outputscale": hypers["outputscale"],
             "noise": hypers["noise"],
             "mean_constant": hypers["mean_constant"],
-            "n_mcmc": hypers["n_mcmc"],
+            # Always None; kept so the version-1 format does not change.
+            "n_mcmc": None,
             "standardize_mean": hypers["standardize_mean"],
             "standardize_std": hypers["standardize_std"],
             "observation_noise": False,
@@ -1895,17 +1817,17 @@ def _write_gp_iteration(
             "state_file": state_path.relative_to(log_dir).as_posix(),
             "units": GP_LOG_UNITS,
         }
-        mcmc_samples = hypers["mcmc_samples"]
         bundle = {
             "gp_log_version": GP_LOG_VERSION,
             "state_dict": state_dict,
             "train_x": train_x.detach().to(dtype=torch.float64, device="cpu").clone(),
             "train_y": train_y.detach().to(dtype=torch.float64, device="cpu").clone(),
-            "surrogate": surrogate,
+            "surrogate": "stgp",
             "outcome_transform": "Standardize",
             "outcome_transform_kwargs": {"m": 1},
             "param_names": names,
-            "mcmc_samples": mcmc_samples,
+            # Always None; kept so the version-1 format does not change.
+            "mcmc_samples": None,
             "botorch_version": _package_version("botorch"),
             "gpytorch_version": _package_version("gpytorch"),
         }
@@ -1936,23 +1858,6 @@ def _torch_load(path):
         return torch.load(path, map_location="cpu")
 
 
-def _load_outcome_transform(model, state_dict: Dict[str, torch.Tensor]) -> None:
-    prefix = "outcome_transform."
-    sub = {
-        key[len(prefix):]: value
-        for key, value in state_dict.items()
-        if key.startswith(prefix)
-    }
-    if not sub:
-        return
-    # Constructor already ran Standardize on this same train_y. If the saved
-    # buffer names differ across botorch versions, keep that result.
-    try:
-        model.outcome_transform.load_state_dict(sub)
-    except (RuntimeError, ValueError, KeyError):
-        return
-
-
 def _require_botorch(symbol: str):
     try:
         import botorch  # noqa: F401
@@ -1966,9 +1871,7 @@ def _require_botorch(symbol: str):
 def load_gp_model(state_path):
     """Rebuild a GP from a ``states/*.pt`` file written by ``run_bo``.
 
-    Returns ``(model, bundle)``. ``model`` is in eval mode. For SAAS, the
-    state dict is loaded when this botorch version can do that; otherwise
-    the retained MCMC samples are passed to ``load_mcmc_samples``.
+    Returns ``(model, bundle)``. ``model`` is in eval mode.
 
     The posterior at new points is :func:`gp_posterior` or
     :func:`load_gp_posterior`.
@@ -1986,36 +1889,12 @@ def load_gp_model(state_path):
     if train_y.ndim == 1:
         train_y = train_y.unsqueeze(-1)
     surrogate = bundle["surrogate"]
-    if surrogate == "stgp":
-        from botorch.models import SingleTaskGP
-        from botorch.models.transforms.outcome import Standardize
-        model = SingleTaskGP(train_x, train_y, outcome_transform=Standardize(m=1))
-        model.load_state_dict(bundle["state_dict"])
-    elif surrogate == "saas":
-        from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
-        from botorch.models.transforms.outcome import Standardize
-
-        def _new():
-            return SaasFullyBayesianSingleTaskGP(
-                train_x, train_y, outcome_transform=Standardize(m=1)
-            )
-
-        model = _new()
-        try:
-            model.load_state_dict(bundle["state_dict"])
-        except (AttributeError, KeyError, RuntimeError, ValueError) as exc:
-            samples = bundle.get("mcmc_samples")
-            if not samples:
-                raise RuntimeError(
-                    "SAAS state_dict did not load and the file has no mcmc_samples"
-                ) from exc
-            model = _new()
-            model.load_mcmc_samples(samples)
-            _load_outcome_transform(model, bundle["state_dict"])
-        if getattr(model, "covar_module", None) is None:
-            raise RuntimeError("SAAS reload left covar_module unset")
-    else:
-        raise ValueError(f"surrogate must be 'stgp' or 'saas', got {surrogate!r}")
+    if surrogate != "stgp":
+        raise ValueError(f"surrogate must be 'stgp', got {surrogate!r}")
+    from botorch.models import SingleTaskGP
+    from botorch.models.transforms.outcome import Standardize
+    model = SingleTaskGP(train_x, train_y, outcome_transform=Standardize(m=1))
+    model.load_state_dict(bundle["state_dict"])
     model.eval()
     return model, bundle
 
@@ -2056,7 +1935,6 @@ def run_bo(
     seed: int = 0,
     warm_start: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     max_acq_attempts: int = DEFAULT_MAX_ACQ_ATTEMPTS,
-    surrogate: str = "stgp",
     gp_log_dir: Optional[str] = None,
 ):
     """
@@ -2082,16 +1960,6 @@ def run_bo(
         and try a new candidate up to this many times per completed iteration.
         Failed evaluations are not added to the GP.
 
-    surrogate
-        GP surrogate to use. ``"stgp"`` (default) is the original
-        ``SingleTaskGP`` (ARD Matern) + ``qLogExpectedImprovement``. ``"saas"``
-        swaps in ``SaasFullyBayesianSingleTaskGP`` (sparse axis-aligned subspace
-        priors, fit by NUTS), which is designed for high-dimensional,
-        low-sample BO -- it automatically shrinks unimportant input dimensions,
-        effectively searching a low-dimensional subspace. The acquisition and
-        everything else are unchanged. ``"saas"`` costs a NUTS refit per
-        iteration (tens of seconds) but that is negligible next to a HOOMD eval.
-
     gp_log_dir
         If given, append one JSON object per fitted GP to
         ``<gp_log_dir>/gp_log.jsonl`` and write a new ``states/*.pt``
@@ -2110,9 +1978,7 @@ def run_bo(
     """
     torch.manual_seed(seed)
     dtype = torch.float64
-    if surrogate not in ("stgp", "saas"):
-        raise ValueError(f"surrogate must be 'stgp' or 'saas', got {surrogate!r}")
-    print(f"[bo] surrogate={surrogate}")
+    print("[bo] surrogate=stgp")
     if gp_log_dir is not None:
         gp_log_dir = os.fspath(gp_log_dir)
         print(f"[bo] gp log dir: {gp_log_dir}")
@@ -2142,20 +2008,9 @@ def run_bo(
         # z-scores the targets internally (and un-standardizes the posterior
         # automatically), silencing the warning and improving numerical
         # conditioning.
-        if surrogate == "saas":
-            from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
-            from botorch.fit import fit_fully_bayesian_model_nuts
-            gp = SaasFullyBayesianSingleTaskGP(
-                train_x, train_y, outcome_transform=Standardize(m=1)
-            )
-            fit_fully_bayesian_model_nuts(
-                gp, warmup_steps=256, num_samples=128, thinning=16,
-                disable_progbar=True,
-            )
-        else:
-            gp = SingleTaskGP(train_x, train_y, outcome_transform=Standardize(m=1))
-            mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
-            fit_gpytorch_mll(mll)
+        gp = SingleTaskGP(train_x, train_y, outcome_transform=Standardize(m=1))
+        mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+        fit_gpytorch_mll(mll)
         return gp
 
     def _optimize_candidate(train_x, train_y):
@@ -2176,7 +2031,6 @@ def run_bo(
                     train_x,
                     train_y,
                     ps,
-                    surrogate=surrogate,
                     stage="acquisition",
                     acq_value=acq_value,
                     candidate=cand,
@@ -2259,7 +2113,6 @@ def run_bo(
                     x_final,
                     y_final,
                     ps,
-                    surrogate=surrogate,
                     stage="final",
                     acq_value=None,
                     candidate=None,

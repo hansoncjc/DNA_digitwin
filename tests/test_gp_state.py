@@ -1,6 +1,6 @@
 """GP log written by run_bo: schema, append, loss-unit posterior, RNG isolation.
 
-End-to-end SingleTaskGP / SAAS checks need botorch and are skipped in the
+End-to-end SingleTaskGP checks need botorch and are skipped in the
 local digitwin env. On the cluster they also check that logging does not
 change the candidate sequence.
 """
@@ -34,30 +34,20 @@ _NAMES = ["n", "m", "U0:fcc", "U0:fluid"]
 
 
 class _ToyGP(torch.nn.Module):
-    """Attribute layout matches a fitted gpytorch ExactGP / SAAS batch.
+    """Attribute layout matches a fitted gpytorch ExactGP.
 
     Shapes were checked against gpytorch 1.14: STGP lengthscale ``(1, d)``,
-    noise ``(1,)``; SAAS lengthscale ``(S, 1, d)``, noise ``(S, 1)``.
+    noise ``(1,)``.
     """
 
-    def __init__(self, *, saas=False, burn_rng=False):
+    def __init__(self, *, burn_rng=False):
         super().__init__()
-        self.saas = saas
         self.burn_rng = burn_rng
         d = len(_NAMES)
-        if saas:
-            ls = torch.tensor(
-                [[[0.2, 0.3, 0.4, 0.5]], [[0.6, 0.7, 0.8, 0.9]]],
-                dtype=torch.float64,
-            )
-            outputscale = torch.tensor([1.0, 1.5], dtype=torch.float64)
-            noise = torch.tensor([[0.01], [0.02]], dtype=torch.float64)
-            mean = torch.tensor([0.0, 0.1], dtype=torch.float64)
-        else:
-            ls = torch.tensor([[0.7, 1.1, 0.3, 0.9]], dtype=torch.float64)
-            outputscale = torch.tensor(0.8, dtype=torch.float64)
-            noise = torch.tensor([1e-3], dtype=torch.float64)
-            mean = torch.tensor(0.2, dtype=torch.float64)
+        ls = torch.tensor([[0.7, 1.1, 0.3, 0.9]], dtype=torch.float64)
+        outputscale = torch.tensor(0.8, dtype=torch.float64)
+        noise = torch.tensor([1e-3], dtype=torch.float64)
+        mean = torch.tensor(0.2, dtype=torch.float64)
         self.covar_module = SimpleNamespace(
             base_kernel=SimpleNamespace(lengthscale=ls),
             outputscale=outputscale,
@@ -80,12 +70,6 @@ class _ToyGP(torch.nn.Module):
         mean = torch.full((n, 1), -1.25, dtype=torch.float64)
         var = torch.full((n, 1), 0.25, dtype=torch.float64)
         cov = torch.eye(n, dtype=torch.float64) * 0.25
-        if self.saas:
-            return SimpleNamespace(
-                mixture_mean=mean,
-                mixture_variance=var,
-                mixture_covariance_matrix=cov,
-            )
         return SimpleNamespace(
             mean=mean,
             variance=var,
@@ -108,17 +92,16 @@ def _train():
     return train_x, train_y, candidate
 
 
-def _write(log_dir, *, saas=False, burn_rng=False, stage="acquisition", candidate=None, acq=0.123):
+def _write(log_dir, *, burn_rng=False, stage="acquisition", candidate=None, acq=0.123):
     train_x, train_y, default_cand = _train()
     if candidate is None and stage == "acquisition":
         candidate = default_cand
     bo._write_gp_iteration(
         log_dir,
-        _ToyGP(saas=saas, burn_rng=burn_rng),
+        _ToyGP(burn_rng=burn_rng),
         train_x,
         train_y,
         _space(),
-        surrogate="saas" if saas else "stgp",
         stage=stage,
         acq_value=None if stage == "final" else torch.tensor([acq]),
         candidate=None if stage == "final" else candidate,
@@ -138,11 +121,9 @@ def test_preserve_rng_restores_after_an_exception():
     assert torch.equal(torch.rand(2), expected_t)
 
 
-def test_run_bo_logging_is_optional_and_rejects_unknown_surrogate():
+def test_run_bo_logging_is_optional():
     assert inspect.signature(bo.run_bo).parameters["gp_log_dir"].default is None
     assert inspect.signature(bo.run_bo_resumable).parameters["gp_log_dir"].default is None
-    with pytest.raises(ValueError, match="surrogate"):
-        bo.run_bo(lambda *a, **k: None, ps=None, ffpath="", surrogate="nope")
 
 
 def test_resumable_forwards_gp_log_dir(monkeypatch, tmp_path):
@@ -167,23 +148,6 @@ def test_resumable_forwards_gp_log_dir(monkeypatch, tmp_path):
     )
     assert captured["kwargs"]["gp_log_dir"] == str(log)
     assert captured["kwargs"]["warm_start"] is None
-
-
-def test_mixture_covariance_uses_every_sample_or_the_botorch_matrix():
-    mean = torch.tensor([[0.0, 1.0], [2.0, 3.0]], dtype=torch.float64)
-    eye = torch.eye(2, dtype=torch.float64)
-    posterior = SimpleNamespace(
-        distribution=SimpleNamespace(
-            mean=mean,
-            covariance_matrix=torch.stack([eye, eye], dim=0),
-        )
-    )
-    expected = torch.tensor([[2.0, 1.0], [1.0, 2.0]], dtype=torch.float64)
-    assert torch.allclose(bo._mixture_covariance(posterior), expected)
-
-    flag = torch.tensor([[5.0]])
-    prefer = SimpleNamespace(mixture_covariance_matrix=flag)
-    assert bo._mixture_covariance(prefer) is flag
 
 
 def test_posterior_mean_is_loss_and_stays_differentiable():
@@ -301,7 +265,6 @@ def test_gp_log_schema_append_and_rng(tmp_path):
         train_x,
         train_y,
         _space(),
-        surrogate="stgp",
         stage="acquisition",
         acq_value=torch.tensor(0.5),
         candidate=torch.tensor([[0.9, 0.1, 0.2, 0.3]], dtype=torch.float64),
@@ -312,33 +275,6 @@ def test_gp_log_schema_append_and_rng(tmp_path):
     assert resumed[-1]["iteration"] == 4
     assert resumed[-1]["stage"] == "acquisition"
     assert [r["iteration"] for r in resumed] == [3, 3, 3, 4]
-
-
-def test_saas_log_keeps_every_mcmc_sample(tmp_path):
-    log = tmp_path / "saas"
-    _write(log, saas=True)
-    row = bo.read_gp_log(log)[0]
-    assert row["surrogate"] == "saas"
-    assert row["n_mcmc"] == 2
-    assert row["lengthscale"] == [
-        [0.2, 0.3, 0.4, 0.5],
-        [0.6, 0.7, 0.8, 0.9],
-    ]
-    assert row["outputscale"] == pytest.approx([1.0, 1.5])
-    assert row["noise"] == pytest.approx([0.01, 0.02])
-    assert row["mean_constant"] == pytest.approx([0.0, 0.1])
-    bundle = bo._torch_load(log / row["state_file"])
-    samples = bundle["mcmc_samples"]
-    assert torch.equal(
-        samples["lengthscale"],
-        torch.tensor(
-            [[0.2, 0.3, 0.4, 0.5], [0.6, 0.7, 0.8, 0.9]],
-            dtype=torch.float64,
-        ),
-    )
-    assert samples["outputscale"].shape == (2,)
-    assert samples["noise"].shape == (2,)
-    assert samples["mean"].shape == (2,)
 
 
 def test_gp_log_error_is_recorded_and_does_not_raise(tmp_path):
@@ -426,7 +362,7 @@ def _check_reloaded_posterior(log_dir, row):
 
 def test_stgp_log_matches_unlogged_run_and_reloads(tmp_path):
     pytest.importorskip("botorch")
-    ps_kwargs = dict(n_iters=2, seed=0, surrogate="stgp")
+    ps_kwargs = dict(n_iters=2, seed=0)
     plain, logged = [], []
     best_plain, hist_plain = bo.run_bo(
         _analytic(plain), _bo_space(), ffpath="", gp_log_dir=None, **ps_kwargs
@@ -472,7 +408,6 @@ def test_stgp_log_matches_unlogged_run_and_reloads(tmp_path):
         seed=7,
         warm_start=(warm[0].clone(), warm[1].clone()),
         gp_log_dir=log,
-        surrogate="stgp",
     )
     bo.run_bo(
         _analytic(cont_plain),
@@ -482,7 +417,6 @@ def test_stgp_log_matches_unlogged_run_and_reloads(tmp_path):
         seed=7,
         warm_start=(warm[0].clone(), warm[1].clone()),
         gp_log_dir=None,
-        surrogate="stgp",
     )
     _equal_points(cont, cont_plain)
     assert (log / "gp_log.jsonl").read_text().splitlines()[0] == first_line
@@ -494,25 +428,3 @@ def test_stgp_log_matches_unlogged_run_and_reloads(tmp_path):
     ]
     _check_reloaded_posterior(log, more[-1])
 
-
-def test_saas_log_matches_unlogged_run_and_keeps_samples(tmp_path):
-    pytest.importorskip("botorch")
-    plain, logged = [], []
-    kwargs = dict(n_iters=1, seed=0, surrogate="saas")
-    bo.run_bo(_analytic(plain), _bo_space(), ffpath="", gp_log_dir=None, **kwargs)
-    log = tmp_path / "saas"
-    bo.run_bo(_analytic(logged), _bo_space(), ffpath="", gp_log_dir=log, **kwargs)
-    _equal_points(plain, logged)
-    rows = bo.read_gp_log(log)
-    assert [r["stage"] for r in rows] == ["acquisition", "final"]
-    assert [r["iteration"] for r in rows] == [1, 2]
-    for row in rows:
-        assert row["surrogate"] == "saas"
-        # num_samples=128, thinning=16 → 8 retained samples. All of them.
-        assert row["n_mcmc"] == 8
-        assert len(row["lengthscale"]) == 8
-        assert all(len(sample) == 2 for sample in row["lengthscale"])
-        assert len(row["outputscale"]) == 8
-        assert len(row["noise"]) == 8
-        assert len(row["mean_constant"]) == 8
-        _check_reloaded_posterior(log, row)
