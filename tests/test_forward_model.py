@@ -27,7 +27,7 @@ def test_simulation_defaults():
     assert d["kT"] == 1.0
     assert d["seed"] == 42
     assert d["t_init"] == 10.0
-    assert d["rmin_k"] == 0.65
+    assert d["rmin_k"] == 0.5
     assert d["transient_log_steps"] == 0
     assert d["transient_log_period"] == 1
     assert d["transient_log_init_steps"] == 0
@@ -37,7 +37,7 @@ def test_simulation_defaults():
     assert d["t_tol_lj"] is None
     assert d["tail_energy_cut"] is None
     assert simulation.DEFAULT_TAIL_ENERGY_CUT == 0.1
-    assert simulation.DEFAULT_RMIN_K == 0.65
+    assert simulation.DEFAULT_RMIN_K == 0.5
 
 
 def test_saxsfft_defaults():

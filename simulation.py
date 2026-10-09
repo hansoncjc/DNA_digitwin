@@ -18,8 +18,11 @@ closer than the table's rmin in that configuration is logged.
 
 Table bounds (rmin, rmax) are derived analytically from the potential
 parameters rather than being hard-coded, so they remain valid across
-parameter sweeps. modified_lj uses rmin = rmin_k * r0 with rmin_k = 0.65
-by default (0.7 before 2026-10). shifted_mie keeps rmin = r0 + 0.7*delta.
+parameter sweeps. modified_lj uses rmin = rmin_k * r0 with rmin_k = 0.5
+by default (0.65 on 2026-10-07, 0.7 before). At 0.65 and 0.6, pairs at the
+soft corner of the search box (U_0 = 0.5, n = 5.5, m = 4) entered r < rmin
+during production; at 0.5 none did (task 0a, 2026-10-08).
+shifted_mie keeps rmin = r0 + 0.7*delta.
 See _compute_table_bounds() for the derivation and resolve_table_bounds()
 for how run_simulation() picks the cutoff (default: dynamic,
 t_tol_lj = tail_energy_cut / U_0 with tail_energy_cut = 0.1).
@@ -108,7 +111,7 @@ _POTENTIALS = {
 # Physics-derived table bounds
 # ---------------------------------------------------------------------------
 
-DEFAULT_RMIN_K = 0.65
+DEFAULT_RMIN_K = 0.5
 
 
 def _compute_table_bounds(
@@ -162,7 +165,7 @@ def _compute_table_bounds(
     modified_lj
     -----------
     The well minimum is exactly at r = r0.  rmin is ``rmin_k * r0``
-    (default 0.65; 0.7 before 2026-10), on the repulsive side.  The
+    (default 0.5; 0.65 on 2026-10-07, 0.7 before), on the repulsive side.  The
     attractive tail behaves asymptotically as:
 
         U_attr(r) ~ U_0 * n/(n-m) * (r0/r)^m
@@ -238,7 +241,7 @@ def _table_rmin(
 ) -> float:
     """Repulsive-side table start.
 
-    modified_lj uses ``rmin_k * r0`` (default 0.65). ``rmin_k`` must lie
+    modified_lj uses ``rmin_k * r0`` (default 0.5). ``rmin_k`` must lie
     in (0, 1) so the table starts before the well at r0. shifted_mie
     keeps ``r0 + 0.7 * delta`` and ignores ``rmin_k``.
     """
@@ -589,7 +592,7 @@ def run_simulation(
 
       - modified_lj table potential; dynamic cutoff
         ``t_tol_lj = 0.1 / U_0`` (``tail_energy_cut``), no fixed rmax,
-        ``rmax < L/2`` enforced; ``rmin = rmin_k * r0`` with ``rmin_k = 0.65``
+        ``rmax < L/2`` enforced; ``rmin = rmin_k * r0`` with ``rmin_k = 0.5``
       - repulsive-branch initialization: ``t_init = 10`` with the
         production Langevin (``dt = 1e-3``, gamma = 1, ``kT = 1``), cut
         at the well minimum. shifted_mie uses the same cut at its
@@ -659,8 +662,8 @@ def run_simulation(
         Every cutoff mode must satisfy ``rmax < L/2`` (minimum image),
         checked before HOOMD starts; see ``resolve_table_bounds``.
     rmin_k : float
-        modified_lj only: ``rmin = rmin_k * r0``. Default 0.65 (0.7 before
-        2026-10). Must lie in (0, 1). Ignored for shifted_mie, whose rmin
+        modified_lj only: ``rmin = rmin_k * r0``. Default 0.5 (0.65 on
+        2026-10-07, 0.7 before). Must lie in (0, 1). Ignored for shifted_mie, whose rmin
         stays ``r0 + 0.7 * delta``.
     t_init : float
         Repulsive-branch Langevin time, in the same units as production

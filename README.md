@@ -229,7 +229,7 @@ Builds a callable `objective(x_unit, ffpath)` that, for one BO query:
    The result dict carries `rmax`, `t_tol_lj`, `tail_energy_cut`, `L`.
    Initialization is a Langevin segment on the repulsive branch of the
    same potential, cut at the well minimum (`t_init = 10`, the production
-   `dt`). `modified_lj` uses `rmin = rmin_k * r0` (`rmin_k = 0.65`).
+   `dt`). `modified_lj` uses `rmin = rmin_k * r0` (`rmin_k = 0.5`).
    The number of pairs with `r < rmin` in the configuration that starts
    production (GSD frame 0) is logged and returned as `n_pairs_below_rmin`,
    with `min_pair_distance`.
@@ -265,7 +265,7 @@ path), `density` and the potential parameters:
 
 | Stage | Defaults |
 |---|---|
-| Pair potential | `modified_lj` table; dynamic cutoff `t_tol_lj = 0.1/U_0`, no fixed `rmax`, `rmax < L/2`, `rmin = rmin_k * r0` with `rmin_k = 0.65` |
+| Pair potential | `modified_lj` table; dynamic cutoff `t_tol_lj = 0.1/U_0`, no fixed `rmax`, `rmax < L/2`, `rmin = rmin_k * r0` with `rmin_k = 0.5` |
 | Initialization | Repulsive branch of that potential, cut at the well, Langevin `t_init = 10` at the production `dt` |
 | Langevin production | `kT = 1`, γ = 1, `dt = 1e-3`, `steps = 22_500_000` (450 GSD frames), `seed = 42` |
 | saxs-fft | `N_grid = 600`, `frames = 'last:100'`, `step = 5`, `trim = slice(3, -3)`, `particle_diameter = 24.6` nm |

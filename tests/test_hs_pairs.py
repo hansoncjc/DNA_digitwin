@@ -49,7 +49,7 @@ def test_count_is_strictly_below_cut():
 def test_modified_lj_branch_matches_the_full_force_below_r0():
     r0, U0, n, m = 2.5, 3.0, 12.0, 6.0
     assert _well_separation("modified_lj", n, m, r0, None) == r0
-    rmin = 0.65 * r0
+    rmin = 0.5 * r0
     r = np.linspace(rmin, r0, 400, endpoint=False)
     U, F = modified_LJ(r, rmin, r0, U0, n, m, r0)
     Ur, Fr = _repulsive_branch(r, rmin, r0, U0, n, m, r0, potential="modified_lj")

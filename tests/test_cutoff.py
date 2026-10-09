@@ -77,7 +77,7 @@ def test_fixed_rmax():
     b = resolve_table_bounds("modified_lj", 3.0, 12.0, 6.0, 2.5, None, N=N, density=RHO,
                              rmax=6.0)
     assert b["rmax"] == 6.0 and b["rmax_fixed"] is True
-    assert b["rmin"] == pytest.approx(0.65 * 2.5)
+    assert b["rmin"] == pytest.approx(simulation.DEFAULT_RMIN_K * 2.5)
     assert b["t_tol_lj"] is None and b["tail_energy_cut"] is None
     with pytest.raises(ValueError, match="must exceed rmin"):
         resolve_table_bounds("modified_lj", 3.0, 12.0, 6.0, 2.5, None, N=N, density=RHO,
@@ -110,9 +110,9 @@ def test_minimum_image_checked_for_every_mode(kwargs):
 def test_rmin_k_scales_modified_lj_and_not_rmax():
     base = resolve_table_bounds("modified_lj", 3.0, 12.0, 6.0, 2.5, None, N=N, density=RHO)
     moved = resolve_table_bounds("modified_lj", 3.0, 12.0, 6.0, 2.5, None, N=N, density=RHO,
-                                 rmin_k=0.5)
-    assert base["rmin"] == pytest.approx(0.65 * 2.5)
-    assert moved["rmin"] == pytest.approx(0.5 * 2.5)
+                                 rmin_k=0.65)
+    assert base["rmin"] == pytest.approx(simulation.DEFAULT_RMIN_K * 2.5)
+    assert moved["rmin"] == pytest.approx(0.65 * 2.5)
     assert moved["rmax"] == base["rmax"]
     for bad in (0.0, 1.0, -0.1, 1.2):
         with pytest.raises(ValueError, match="rmin_k"):
