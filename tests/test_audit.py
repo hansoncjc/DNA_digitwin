@@ -32,7 +32,7 @@ class _DS:
 @pytest.fixture
 def stub_pipeline(monkeypatch):
     def fake_sim(density, U_0, r0, n, m, outdir, **kw):
-        b = resolve_table_bounds("modified_lj", U_0, n, m, r0, None, N=5000, density=density)
+        b = resolve_table_bounds(U_0, n, m, r0, N=5000, density=density)
         return {"rmax": b["rmax"], "t_tol_lj": b["t_tol_lj"], "n_pairs_below_rmin": 3}
 
     def fake_saxs(save_dir, **kw):
@@ -91,7 +91,7 @@ def test_sequential_records_audit_per_dataset(tmp_path, stub_pipeline):
     rows = {r["dataset_id"]: r for r in block["rows"]}
     for ds in datasets:
         r = rows[ds.id]
-        b = resolve_table_bounds("modified_lj", ds.sim.U0, 12.0, 6.0, 2.5, None, N=5000, density=0.005)
+        b = resolve_table_bounds(ds.sim.U0, 12.0, 6.0, 2.5, N=5000, density=0.005)
         assert float(r["rmax"]) == pytest.approx(b["rmax"])
         assert float(r["rmax_over_r0"]) == pytest.approx(b["rmax"] / 2.5)
         assert float(r["t_tol_lj"]) == pytest.approx(0.1 / ds.sim.U0)

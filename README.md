@@ -28,7 +28,7 @@ per BO iteration.
 DNA_digitwin/
 ├── bo.py                 # ParamSpace, make_global_objective, run_bo
 ├── datasets.py           # ExperimentalParams, SimulationParams, Dataset
-├── simulation.py         # run_simulation (HOOMD), modified_LJ + shifted_mie
+├── simulation.py         # run_simulation (HOOMD), modified_LJ
 ├── scattering.py         # GSD → I(q)/S(q): convert_to_SAXS, convert_to_SAXS_fft, extract_exp_sq
 ├── metrics.py            # compare_saxs_curves, compare_to_exp[_saxsfft] (MSE / weighted APDist + plots)
 ├── parallel/             # Slurm launcher: submits 1 GPU job per dataset per BO iteration

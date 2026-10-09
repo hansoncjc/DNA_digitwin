@@ -1,17 +1,15 @@
 """
 Simulation of DNA-mediated SiNP using HOOMD-blue.
-Supports two pair potentials selected via the `potential` argument of
-run_simulation():
-  - "modified_lj"  : n-m Lennard-Jones-like potential (original)
-  - "shifted_mie"  : shifted Mie potential with hard-core offset r0 and
-                     length-scale delta
+The pair potential is the n-m Lennard-Jones-like table potential
+"modified_lj", the only value the `potential` argument of
+run_simulation() accepts.
 
 The simple-cubic lattice is shuffled with ``numpy.random.default_rng(seed)``
 before it is written. Before 2026-10 that shuffle was unseeded, so a fixed
 ``seed`` did not fix the configuration that enters initialization.
 After the lattice GSD is read, run_simulation() integrates for ``t_init``
 (default 10) with the production Langevin integrator — same dt, gamma,
-kT and seed — on the repulsive branch of the selected potential, cut at
+kT and seed — on the repulsive branch of the potential, cut at
 the well minimum. That segment is not dumped. DNA_assembly_*.gsd starts
 at the configuration that enters production, and the number of pairs
 closer than the table's rmin in that configuration is logged.
@@ -22,7 +20,6 @@ parameter sweeps. modified_lj uses rmin = rmin_k * r0 with rmin_k = 0.5
 by default (0.65 on 2026-10-07, 0.7 before). At 0.65 and 0.6, pairs at the
 soft corner of the search box (U_0 = 0.5, n = 5.5, m = 4) entered r < rmin
 during production; at 0.5 none did (task 0a, 2026-10-08).
-shifted_mie keeps rmin = r0 + 0.7*delta.
 See _compute_table_bounds() for the derivation and resolve_table_bounds()
 for how run_simulation() picks the cutoff (default: dynamic,
 t_tol_lj = tail_energy_cut / U_0 with tail_energy_cut = 0.1).
@@ -54,59 +51,6 @@ def modified_LJ(r, rmin, rmax, U_0, n, m, r0):
     return U, F
 
 
-def shifted_mie(r, rmin, rmax, U_0, n, m, r0, delta):
-    """
-    Shifted Mie pair potential.
-
-    .. math::
-        U(r) = U_0 \\, C \\left[
-            \\left(\\frac{\\delta}{r - r_0}\\right)^n -
-            \\left(\\frac{\\delta}{r - r_0}\\right)^m
-        \\right]
-
-    with the standard Mie prefactor
-
-    .. math::
-        C = \\frac{n}{n-m}\\left(\\frac{n}{m}\\right)^{\\frac{m}{n-m}}
-
-    Parameters
-    ----------
-    r : array-like
-        Pair separation distances.
-    rmin, rmax : float
-        Table bounds (passed by HOOMD; not used in the math directly).
-    U_0 : float
-        Energy scale / well depth.
-    n, m : float
-        Repulsive and attractive exponents (n > m).
-    r0 : float
-        Hard-core shift origin; effective variable is xi = r - r0.
-        Must satisfy rmin > r0 to avoid the xi = 0 singularity.
-    delta : float
-        Length scale.  The potential minimum sits at
-        r_well = r0 + delta * (n/m)^(1/(n-m)).
-
-    Returns
-    -------
-    U : ndarray -- potential energy
-    F : ndarray -- force magnitude (-dU/dr, positive = repulsive)
-    """
-    C  = (n / (n - m)) * (n / m) ** (m / (n - m))
-    xi = r - r0
-    dn = (delta / xi) ** n
-    dm = (delta / xi) ** m
-    U  = U_0 * C * (dn - dm)
-    F  = U_0 * C * (n * dn - m * dm) / xi   # F = -dU/dr
-    return U, F
-
-
-# Registry: selector string -> (function, requires_delta)
-_POTENTIALS = {
-    "modified_lj" : (modified_LJ, False),
-    "shifted_mie" : (shifted_mie, True),
-}
-
-
 # ---------------------------------------------------------------------------
 # Physics-derived table bounds
 # ---------------------------------------------------------------------------
@@ -115,42 +59,34 @@ DEFAULT_RMIN_K = 0.5
 
 
 def _compute_table_bounds(
-    potential: str,
     U_0: float,
     n: float,
     m: float,
     r0: float,
-    delta: float | None,
     *,
     t_tol_lj: float = 0.02,
-    t_tol_mie: float = 4.7,
     rmin_k: float = DEFAULT_RMIN_K,
 ) -> tuple[float, float]:
     """
     Compute (rmin, rmax) analytically from the potential parameters.
 
-    The strategy for both potentials is:
+    The strategy is:
       - rmin: place it on the repulsive side of the well minimum, far
               enough from any singularity to keep forces finite and
               table values well-defined.
       - rmax: solve for the separation at which the attractive tail
               decays to the tolerance t_tol.  This guarantees the
               cutoff never truncates the well prematurely, regardless of
-              how (n, m, r0, delta) vary across a sweep.
+              how (n, m, r0) vary across a sweep.
 
     Parameters
     ----------
-    potential : {"modified_lj", "shifted_mie"}
     U_0 : float   -- energy scale / well depth
     n, m : float  -- repulsive and attractive exponents (n > m > 0)
-    r0 : float    -- reference length (modified_lj) or hard-core shift (shifted_mie)
-    delta : float -- length scale for shifted_mie; ignored for modified_lj
+    r0 : float    -- reference length; the well minimum is at r0
     t_tol_lj : float
         Tail-energy tolerance used as rmax cutoff for modified_lj.
         rmax is where U_attr = t_tol_lj * (n/(n-m)).  Default 0.02.
-    t_tol_mie : float
-        Tail-energy tolerance used as rmax cutoff for shifted_mie.
-        rmax is where U_attr tail equals t_tol_mie.  Default 4.7.
 
     Returns
     -------
@@ -162,8 +98,6 @@ def _compute_table_bounds(
 
     Notes
     -----
-    modified_lj
-    -----------
     The well minimum is exactly at r = r0.  rmin is ``rmin_k * r0``
     (default 0.5; 0.65 on 2026-10-07, 0.7 before), on the repulsive side.  The
     attractive tail behaves asymptotically as:
@@ -173,114 +107,57 @@ def _compute_table_bounds(
     Setting U_attr(rmax) = t_tol_lj * |U_0| and solving:
 
         rmax = r0 * (n / ((n-m) * t_tol_lj))^(1/m)
-
-    shifted_mie
-    -----------
-    Let xi = r - r0.  The singularity is at xi = 0 (r = r0).
-    The Mie prefactor is C = n/(n-m) * (n/m)^(m/(n-m)).
-
-    rmin is fixed at r0 + 0.7 * delta.  ``rmin_k`` applies only to
-    modified_lj; it does not move this bound.
-
-    The attractive tail: U_attr ~ U_0 * C * (delta/xi)^m
-    Setting U_attr(xi_max) = t_tol_mie and solving directly:
-
-        xi_max = delta * (|U_0| * C / t_tol_mie)^(1/m)
-        rmax   = r0 + xi_max
     """
-    rmin = _table_rmin(potential, r0, delta, rmin_k)
+    rmin = _table_rmin(r0, rmin_k)
 
-    if potential == "modified_lj":
-        # rmax: tail decay to t_tol_lj
-        # U_attr(r) ~ U_0 * n/(n-m) * (r0/r)^m  => rmax = r0*(n/((n-m)*t_tol_lj))^(1/m)
-        prefactor_m = n / (n - m)        # coefficient of the attractive (r0/r)^m term
-        rmax = r0 * (prefactor_m / t_tol_lj) ** (1.0 / m)
-
-    elif potential == "shifted_mie":
-        if delta is None:
-            raise ValueError("delta is required for shifted_mie bounds.")
-
-        C = (n / (n - m)) * (n / m) ** (m / (n - m))
-
-        # rmax: attractive tail decay to t_tol_mie directly
-        # U_attr(xi) ~ U_0*C*(delta/xi)^m  => xi_max = delta*(|U_0|*C/t_tol_mie)^(1/m)
-        xi_max = delta * (abs(U_0) * C / t_tol_mie) ** (1.0 / m)
-        rmax_raw = r0 + xi_max
-        # Sanity cap: rmax should not exceed half the box length,
-        # and realistically the tail is negligible beyond ~5*delta from r0
-        rmax_physical = r0 + 5.0 * delta
-        if rmax_raw > rmax_physical:
-            import warnings
-            warnings.warn(
-                f"Computed rmax ({rmax_raw:.3f}) exceeds physical cap "
-                f"({rmax_physical:.3f}). Clamping. Consider increasing t_tol_mie.",
-                RuntimeWarning
-            )
-            rmax = rmax_physical
-        else:
-            rmax = rmax_raw
-
-    else:
-        raise ValueError(f"Unknown potential: {potential!r}")
+    # rmax: tail decay to t_tol_lj
+    # U_attr(r) ~ U_0 * n/(n-m) * (r0/r)^m  => rmax = r0*(n/((n-m)*t_tol_lj))^(1/m)
+    prefactor_m = n / (n - m)        # coefficient of the attractive (r0/r)^m term
+    rmax = r0 * (prefactor_m / t_tol_lj) ** (1.0 / m)
 
     if rmin >= rmax:
         raise ValueError(
             f"Computed rmin ({rmin:.4f}) >= rmax ({rmax:.4f}) for "
-            f"potential={potential!r}, n={n}, m={m}, r0={r0}, delta={delta}.  "
+            f"n={n}, m={m}, r0={r0}.  "
             f"Check that n > m > 0 and tolerance parameters are reasonable."
         )
 
     return rmin, rmax
 
 
-def _table_rmin(
-    potential: str,
-    r0: float,
-    delta: float | None,
-    rmin_k: float = DEFAULT_RMIN_K,
-) -> float:
+def _table_rmin(r0: float, rmin_k: float = DEFAULT_RMIN_K) -> float:
     """Repulsive-side table start.
 
-    modified_lj uses ``rmin_k * r0`` (default 0.5). ``rmin_k`` must lie
-    in (0, 1) so the table starts before the well at r0. shifted_mie
-    keeps ``r0 + 0.7 * delta`` and ignores ``rmin_k``.
+    ``rmin_k * r0`` (default 0.5). ``rmin_k`` must lie in (0, 1) so the
+    table starts before the well at r0.
     """
-    if potential == "modified_lj":
-        if not 0.0 < float(rmin_k) < 1.0:
-            raise ValueError(
-                f"rmin_k must lie in (0, 1) for modified_lj (got {rmin_k})."
-            )
-        return float(rmin_k) * float(r0)
-    if potential == "shifted_mie":
-        if delta is None:
-            raise ValueError("delta is required for shifted_mie bounds.")
-        return r0 + 0.7 * delta
-    raise ValueError(f"Unknown potential: {potential!r}")
+    if not 0.0 < float(rmin_k) < 1.0:
+        raise ValueError(
+            f"rmin_k must lie in (0, 1) for modified_lj (got {rmin_k})."
+        )
+    return float(rmin_k) * float(r0)
 
 
 DEFAULT_TAIL_ENERGY_CUT = 0.1
 
 
 def resolve_table_bounds(
-    potential: str,
     U_0: float,
     n: float,
     m: float,
     r0: float,
-    delta: float | None,
     *,
     N: int,
     density: float,
     t_tol_lj: float | None = None,
     tail_energy_cut: float | None = None,
-    t_tol_mie: float = 4.7,
     rmax: float | None = None,
     rmin_k: float = DEFAULT_RMIN_K,
 ) -> dict:
     """
     Choose the pair-table cutoff used by ``run_simulation``.
 
-    Cutoff modes (modified_lj):
+    Cutoff modes:
       - dynamic (default): ``t_tol_lj = tail_energy_cut / U_0`` with
         ``tail_energy_cut = 0.1`` unless given. The attractive term at rmax
         then equals ``tail_energy_cut`` in absolute energy units (kT = 1),
@@ -288,8 +165,6 @@ def resolve_table_bounds(
       - fixed tolerance: an explicit ``t_tol_lj`` (relative to U_0).
       - fixed cutoff: an explicit ``rmax``.
     ``tail_energy_cut`` conflicts with both ``t_tol_lj`` and ``rmax``.
-    shifted_mie always uses ``t_tol_mie`` (or a fixed ``rmax``) and rejects
-    ``tail_energy_cut``.
 
     For every mode, rmax must satisfy the minimum-image condition
     ``rmax < L/2`` with ``L = (N/density)^(1/3)``.
@@ -297,15 +172,13 @@ def resolve_table_bounds(
     Returns
     -------
     dict with keys ``rmin``, ``rmax``, ``rmax_fixed``, ``t_tol_lj``
-    (tolerance actually used, None when rmax is fixed or for shifted_mie),
+    (tolerance actually used, None when rmax is fixed),
     ``tail_energy_cut`` (None unless dynamic), and ``L``.
     """
     if tail_energy_cut is not None and t_tol_lj is not None:
         raise ValueError("Give either tail_energy_cut or t_tol_lj, not both.")
     if tail_energy_cut is not None and rmax is not None:
         raise ValueError("Give either tail_energy_cut or a fixed rmax, not both.")
-    if tail_energy_cut is not None and potential != "modified_lj":
-        raise ValueError("tail_energy_cut is only defined for potential='modified_lj'.")
 
     L = (N / density) ** (1.0 / 3.0)
     t_tol_used = None
@@ -313,30 +186,27 @@ def resolve_table_bounds(
     rmax_fixed = rmax is not None
 
     if rmax_fixed:
-        rmin = _table_rmin(potential, r0, delta, rmin_k)
+        rmin = _table_rmin(r0, rmin_k)
         rmax = float(rmax)
         if rmax <= rmin:
             raise ValueError(
                 f"Fixed rmax ({rmax:.4f}) must exceed rmin ({rmin:.4f})."
             )
     else:
-        bounds_kw = {"t_tol_mie": t_tol_mie}
-        if potential == "modified_lj":
-            if t_tol_lj is not None:
-                t_tol_used = float(t_tol_lj)
-            else:
-                cut_used = float(
-                    DEFAULT_TAIL_ENERGY_CUT if tail_energy_cut is None else tail_energy_cut
+        if t_tol_lj is not None:
+            t_tol_used = float(t_tol_lj)
+        else:
+            cut_used = float(
+                DEFAULT_TAIL_ENERGY_CUT if tail_energy_cut is None else tail_energy_cut
+            )
+            if U_0 <= 0:
+                raise ValueError(
+                    f"Dynamic cutoff needs U_0 > 0 (got {U_0}); "
+                    "pass t_tol_lj or rmax instead."
                 )
-                if U_0 <= 0:
-                    raise ValueError(
-                        f"Dynamic cutoff needs U_0 > 0 (got {U_0}); "
-                        "pass t_tol_lj or rmax instead."
-                    )
-                t_tol_used = cut_used / float(U_0)
-            bounds_kw["t_tol_lj"] = t_tol_used
+            t_tol_used = cut_used / float(U_0)
         rmin, rmax = _compute_table_bounds(
-            potential, U_0, n, m, r0, delta, rmin_k=rmin_k, **bounds_kw
+            U_0, n, m, r0, t_tol_lj=t_tol_used, rmin_k=rmin_k
         )
 
     if rmax >= L / 2:
@@ -359,35 +229,17 @@ def resolve_table_bounds(
 # Repulsive branch used to leave the lattice (WCA-style cut at the well)
 # ---------------------------------------------------------------------------
 
-def _well_separation(potential: str, n: float, m: float, r0: float, delta: float | None) -> float:
-    """Pair distance at which U = -U_0 and the force is zero.
+def _repulsive_branch(r, rmin, rmax, U_0, n, m, r0):
+    """Repulsive branch of ``modified_LJ``, cut at the well minimum r0.
 
-    modified_lj: the minimum is exactly at r0.
-    shifted_mie: r_well = r0 + delta * (n/m) ** (1/(n-m)). At that point
-    the Mie prefactor makes U = -U_0, so the same cut U -> U + U_0 applies.
-    """
-    if potential == "modified_lj":
-        return float(r0)
-    if potential == "shifted_mie":
-        if delta is None:
-            raise ValueError("delta is required for shifted_mie.")
-        return float(r0 + delta * (n / m) ** (1.0 / (n - m)))
-    raise ValueError(f"Unknown potential: {potential!r}")
-
-
-def _repulsive_branch(r, rmin, rmax, U_0, n, m, r0, delta=None, potential="modified_lj"):
-    """Repulsive branch of ``potential``, cut at the well minimum.
-
-    For r < r_well, U_rep = U + U_0 and the force is the full-potential
-    force. For r >= r_well, both are 0. The initialization table runs over
-    [rmin, r_well], so HOOMD's own r >= rmax rule agrees with this cut.
+    For r < r0, U_rep = U + U_0 and the force is the full-potential
+    force. For r >= r0, both are 0. The initialization table runs over
+    [rmin, r0], so HOOMD's own r >= rmax rule agrees with this cut.
     HOOMD 2.9.7 evaluates the table function once per grid point (a
     scalar); arrays are accepted for tests.
     """
-    pot_fn, needs_delta = _POTENTIALS[potential]
-    extra = {"delta": delta} if needs_delta else {}
-    r_well = _well_separation(potential, n, m, r0, delta)
-    U, F = pot_fn(r, rmin, rmax, U_0, n, m, r0, **extra)
+    r_well = float(r0)
+    U, F = modified_LJ(r, rmin, rmax, U_0, n, m, r0)
     r_arr = np.asarray(r, dtype=float)
     U = np.asarray(U, dtype=float) + float(U_0)
     F = np.asarray(F, dtype=float)
@@ -512,13 +364,11 @@ def run_simulation(
     outdir: str,
     *,
     potential: str = "modified_lj",
-    delta: float | None = None,
     N: int = 5000,
     dt: float = 1e-3,
     steps: int = 22_500_000,
     kT: float = 1.0,
     t_tol_lj: float | None = None,
-    t_tol_mie: float = 4.7,
     init_offset: float = 0.1,
     device: str = "gpu",   # "cpu" also works on HOOMD 2.x
     seed: int = 42,
@@ -533,10 +383,10 @@ def run_simulation(
     log_max_force: bool = False,
 ) -> dict:
     """
-    Run a HOOMD simulation of N spheres with a selectable pair potential.
+    Run a HOOMD simulation of N spheres with the modified_lj pair potential.
 
     Workflow: shuffled cubic lattice GSD -> Langevin on the repulsive
-    branch of the selected potential, cut at the well minimum (no dump)
+    branch of the potential, cut at the well minimum (no dump)
     -> the same Langevin on the full potential. ``DNA_assembly_*.gsd``
     frame 0 is the configuration that starts production.
 
@@ -595,8 +445,7 @@ def run_simulation(
         ``rmax < L/2`` enforced; ``rmin = rmin_k * r0`` with ``rmin_k = 0.5``
       - repulsive-branch initialization: ``t_init = 10`` with the
         production Langevin (``dt = 1e-3``, gamma = 1, ``kT = 1``), cut
-        at the well minimum. shifted_mie uses the same cut at its
-        analytic minimum and does not use ``rmin_k``
+        at the well minimum
       - initial lattice shuffled by ``numpy.random.default_rng(seed)``
         (``seed = 42``). Before 2026-10 this shuffle was unseeded, so the
         same ``seed`` did not repeat the configuration that enters
@@ -617,18 +466,14 @@ def run_simulation(
     U_0 : float
         Energy scale / well depth.
     r0 : float
-        Reference length.
-        - modified_lj : equilibrium distance scale; well minimum is at r = r0.
-        - shifted_mie : hard-core shift origin; effective variable is xi = r - r0.
+        Reference length: equilibrium distance scale; well minimum is at r = r0.
     n, m : float
         Repulsive and attractive exponents (n > m > 0).
     outdir : str
         Directory to write artifacts (gsd, csv).
-    potential : {"modified_lj", "shifted_mie"}
-        Selects the pair potential.  Default is ``"modified_lj"``.
-    delta : float, optional
-        Length-scale parameter required by ``"shifted_mie"``.
-        Ignored when ``potential="modified_lj"``.
+    potential : {"modified_lj"}
+        Pair potential.  Only ``"modified_lj"`` (the default) is accepted;
+        it is recorded in the returned dict.
     N, dt, steps, kT : see defaults (``steps`` was 15_000_000 before 2026-10)
     t_tol_lj : float, optional
         Fixed tail-energy tolerance for rmax (modified_lj): rmax is where the
@@ -640,9 +485,6 @@ def run_simulation(
         ``rmax`` is given: ``t_tol_lj = tail_energy_cut / U_0``, so the
         attractive tail at rmax equals ``tail_energy_cut`` (kT units).
         Default 0.1.  Conflicts with ``t_tol_lj`` and ``rmax``.
-    t_tol_mie : float
-        Tail-energy tolerance for rmax (shifted_mie).  rmax is where the
-        attractive tail falls to t_tol_mie.  Default 4.7.
     init_offset : float
         Added to rmin when checking that the initial lattice spacing is
         wide enough (``min_dist = rmin + init_offset``). Default 0.1.
@@ -662,9 +504,8 @@ def run_simulation(
         Every cutoff mode must satisfy ``rmax < L/2`` (minimum image),
         checked before HOOMD starts; see ``resolve_table_bounds``.
     rmin_k : float
-        modified_lj only: ``rmin = rmin_k * r0``. Default 0.5 (0.65 on
-        2026-10-07, 0.7 before). Must lie in (0, 1). Ignored for shifted_mie, whose rmin
-        stays ``r0 + 0.7 * delta``.
+        ``rmin = rmin_k * r0``. Default 0.5 (0.65 on
+        2026-10-07, 0.7 before). Must lie in (0, 1).
     t_init : float
         Repulsive-branch Langevin time, in the same units as production
         (D = kT/γ = 1). Default 10. The timestep is ``dt``, not a
@@ -702,10 +543,10 @@ def run_simulation(
         min_pair_distance
         (``transient_energy_csv`` is None when both transient windows are
         0. ``t_tol_lj`` is the tolerance actually used, None when rmax is
-        fixed or for shifted_mie; ``tail_energy_cut`` is None unless the
+        fixed; ``tail_energy_cut`` is None unless the
         dynamic cutoff was used; ``L`` is the cubic box length;
         ``n_init_steps`` is the HOOMD timestep of production step 0;
-        ``rmin_k`` is None for shifted_mie; ``r_well`` is the cut;
+        ``r_well`` is the cut (r0);
         ``n_pairs_below_rmin`` and ``min_pair_distance`` are measured on
         the configuration that starts production, i.e. GSD frame 0,
         under periodic boundaries.)
@@ -713,20 +554,15 @@ def run_simulation(
     Raises
     ------
     ValueError
-        If an unknown potential name is given, if ``"shifted_mie"`` is
-        selected without providing ``delta``, if the derived rmin >= rmax,
+        If ``potential`` is not ``"modified_lj"``, if the derived rmin >= rmax,
         if the well minimum is not strictly inside (rmin, rmax), if cutoff
-        arguments conflict, if rmax >= L/2, if ``rmin_k`` is outside (0, 1)
-        for modified_lj, or if the transient log arguments are out of range.
+        arguments conflict, if rmax >= L/2, if ``rmin_k`` is outside (0, 1),
+        or if the transient log arguments are out of range.
     """
-    if potential not in _POTENTIALS:
+    if potential != "modified_lj":
         raise ValueError(
-            f"Unknown potential {potential!r}. "
-            f"Choose from: {list(_POTENTIALS)}"
+            f"Unknown potential {potential!r}. Choose from: ['modified_lj']"
         )
-    pot_fn, needs_delta = _POTENTIALS[potential]
-    if needs_delta and delta is None:
-        raise ValueError("`delta` must be provided when potential='shifted_mie'.")
     if transient_log_steps < 0 or transient_log_period < 1:
         raise ValueError(
             "transient_log_steps must be >= 0 and transient_log_period "
@@ -753,28 +589,26 @@ def run_simulation(
 
     # --- Analytically derived table bounds ---
     bounds = resolve_table_bounds(
-        potential, U_0, n, m, r0, delta,
+        U_0, n, m, r0,
         N=N, density=density, t_tol_lj=t_tol_lj,
-        tail_energy_cut=tail_energy_cut, t_tol_mie=t_tol_mie, rmax=rmax,
+        tail_energy_cut=tail_energy_cut, rmax=rmax,
         rmin_k=rmin_k,
     )
     rmin, rmax = bounds["rmin"], bounds["rmax"]
     if bounds["rmax_fixed"]:
         cut_desc = "rmax fixed"
-    elif potential == "modified_lj" and bounds["tail_energy_cut"] is not None:
+    elif bounds["tail_energy_cut"] is not None:
         cut_desc = (f"dynamic: t_tol_lj={bounds['t_tol_lj']:.6g} "
                     f"= {bounds['tail_energy_cut']:g}/U_0")
-    elif potential == "modified_lj":
-        cut_desc = f"t_tol_lj={bounds['t_tol_lj']}"
     else:
-        cut_desc = f"t_tol_mie={t_tol_mie}"
-    r_well = _well_separation(potential, n, m, r0, delta)
+        cut_desc = f"t_tol_lj={bounds['t_tol_lj']}"
+    r_well = float(r0)
     if not (rmin < r_well < rmax):
         raise ValueError(
             f"Repulsive-branch cutoff r_well={r_well:.4f} must lie strictly "
             f"between rmin={rmin:.4f} and rmax={rmax:.4f}."
         )
-    k_desc = f", rmin_k={rmin_k:g}" if potential == "modified_lj" else ""
+    k_desc = f", rmin_k={rmin_k:g}"
     print(f"Table bounds: rmin={rmin:.4f}, rmax={rmax:.4f}, "
           f"r_well={r_well:.4f} ({cut_desc}{k_desc}; L/2={bounds['L'] / 2:.4f})")
 
@@ -821,22 +655,18 @@ def run_simulation(
     # hoomd.run rebuilds the table and the neighbor-list cutoff together.
     table = hoomd.md.pair.table(width=width, nlist=nl, name="pair")
     coeff = dict(U_0=U_0, n=n, m=m, r0=r0)
-    extra_coeff = {}
-    if potential == "shifted_mie":
-        coeff["delta"] = delta
-        extra_coeff["delta"] = delta
 
     if plot:
         out_png = os.path.join(outdir, "potential_plot.png")
         plot_pair_potential(rmin, rmax, width, U_0, n, m, r0, out_png,
-                            pot_fn, extra_coeff=extra_coeff)
+                            modified_LJ)
 
     if n_init:
         table.pair_coeff.set(
             'A', 'A',
             rmin=rmin, rmax=float(r_well),
             func=_repulsive_branch,
-            coeff=dict(coeff, potential=potential),
+            coeff=dict(coeff),
         )
         n_quiet = n_init - int(transient_log_init_steps)
         print(f"Repulsive-branch initialization: t_init={t_init:g} "
@@ -872,7 +702,7 @@ def run_simulation(
     table.pair_coeff.set(
         'A', 'A',
         rmin=rmin, rmax=rmax,
-        func=pot_fn,
+        func=modified_LJ,
         coeff=coeff,
     )
 
@@ -932,7 +762,7 @@ def run_simulation(
         "potential"   : potential,
         "t_init"      : t_init,
         "n_init_steps": n_init,
-        "rmin_k"      : float(rmin_k) if potential == "modified_lj" else None,
+        "rmin_k"      : float(rmin_k),
         "r_well"      : r_well,
         "n_pairs_below_rmin": n_pairs_below_rmin,
         "min_pair_distance" : min_pair_distance,
@@ -948,19 +778,11 @@ import pandas as pd
 
 
 def plot_pair_potential(rmin, rmax, width, U_0, n, m, r0, out_png,
-                        potential_fn, extra_coeff=None):
-    """Plot U(r) for any potential that follows the HOOMD table-function API.
-
-    extra_coeff : dict, optional
-        Additional keyword arguments forwarded to potential_fn beyond the
-        standard (r, rmin, rmax, U_0, n, m, r0) signature (e.g. ``delta``).
-    """
-    extra_coeff = extra_coeff or {}
+                        potential_fn):
+    """Plot U(r) for any potential that follows the HOOMD table-function API."""
     r_vals = np.linspace(rmin, rmax, width)
-    U, _ = potential_fn(r_vals, rmin, rmax, U_0, n, m, r0, **extra_coeff)
+    U, _ = potential_fn(r_vals, rmin, rmax, U_0, n, m, r0)
     label = f"n={n}, m={m}, r0={r0}, U0={U_0}"
-    if extra_coeff:
-        label += ", " + ", ".join(f"{k}={v}" for k, v in extra_coeff.items())
     plt.figure(figsize=(6, 4))
     plt.plot(r_vals, U, label=label)
     plt.xlabel("r"); plt.ylabel("U(r)"); plt.grid(True); plt.legend()
