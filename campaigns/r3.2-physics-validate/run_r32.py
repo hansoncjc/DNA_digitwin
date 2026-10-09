@@ -64,7 +64,7 @@ def parallel_cfg(a):
         "mc_dfm_root": a.mc_dfm_root,
         "poll_interval": 30.0,
         "max_wait": a.max_wait_h * 3600,
-        "max_job_retries": 1,
+        "max_job_retries": a.max_job_retries,
     }
 
 
@@ -78,11 +78,16 @@ def main():
     ap.add_argument("--truth", action="store_true", help="one evaluation at the ground truth")
     ap.add_argument("--sequential", action="store_true", help="no Slurm jobs (local test)")
     ap.add_argument("--device", default=None, help="local test only (default: gpu)")
-    ap.add_argument("--partition", default=os.environ.get("R32_GPU_PARTITION", "gpu-a40"))
+    # GPU jobs go to ckpt-g2 (idle GPUs across UW, jobs <= 6 h, preemptible):
+    # zeelab's own GPU partitions (20 and 4 GPUs, not combinable) cannot run
+    # the 24 jobs of one evaluation at once. The master runs on cpu-g2.
+    ap.add_argument("--partition", default=os.environ.get("R32_GPU_PARTITION", "ckpt-g2"))
     ap.add_argument("--account", default=os.environ.get("R32_ACCOUNT", "zeelab"))
     ap.add_argument("--mem", default="10G")
     ap.add_argument("--job-time", default="03:00:00")
     ap.add_argument("--max-wait-h", type=float, default=6.0)
+    ap.add_argument("--max-job-retries", type=int, default=2,
+                    help="resubmissions of a failed or preempted GPU job before the evaluation fails")
     ap.add_argument("--modules", default=os.environ.get("R32_MODULES", "cuda/11.8"))
     ap.add_argument("--venv", default=os.environ.get("R32_VENV", ""))
     ap.add_argument("--mc-dfm-root", default=os.environ.get(
