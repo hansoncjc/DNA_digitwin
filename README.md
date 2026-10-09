@@ -168,22 +168,21 @@ is emitted if non-default values are supplied).
 
   Each curve's q axis is divided by its own first peak `q1`; the
   simulated intensity is scaled by the high-q `S(q) → 1` band; M4 is the
-  RMS log10 difference on a 512-point log grid over `compare_q_range`
-  (converted to `x = q/q1_tgt`). All parameters go in `metric_kwargs`
-  (see `metrics.shift_mse_params`); defaults reproduce the FCC inverse
-  runs. The HS-fluid target uses
+  RMS log10 difference on a 512-point log grid. With
+  `compare_q_range=None` the window is the overlap of the two curves on
+  `x = q/q1`, minus `overlap_trim` points per end (default 0; the saxs-fft
+  trim already drops 6 bins per end). All parameters go in
+  `metric_kwargs` (see `metrics.shift_mse_params`); the defaults are the
+  task-0b choice (2026-10-08): peak search (0.006, 0.12) Å⁻¹, prominence
+  `0.3 × (max − min)` of the smoothed curve in that window, asymptote band
+  (0.085, 0.100) Å⁻¹, `no_peak="fail"`, both asymptote rules `"fail"`.
 
-  ```python
-  metric_kwargs = {"peak_search_range": (0.015, 0.040),
-                   "peak_baseline_range": (0.012, 0.018),
-                   "asymptote_band": (0.095, 0.120)}
-  ```
+  A curve whose smoothed S stays below `1 + dispersed_delta` in the search
+  window is dispersed: neither curve is aligned (both use
+  `x = q/q1_tgt`) and the spacing term is `dispersed_shift` (0 when both
+  curves are dispersed). `dispersed_delta=0.5` and `dispersed_shift=0` are
+  provisional.
 
-  Rules for the full-q loss study (defaults = previous behaviour):
-  `overlap_trim=k` compares over the curve overlap minus `k` points per
-  end when `compare_q_range=None` (default `None`: error);
-  `no_peak="fallback"|"fail"`; `require_reliable`;
-  `asymptote_fallback="tail"|"fail"`; `asymptote_zero_den="unity"|"fail"`.
   Every eval writes `shift_mse_diagnostics.json` with the parameters,
   both peaks, and which fallbacks fired. A `metrics.MetricFailed` fails
   the evaluation (logged as `METRIC_FAILED`, not given to the GP); in the

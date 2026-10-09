@@ -43,6 +43,13 @@ def fluid_curve(q1=0.027, amp=1.6, decay=0.02, plateau=1.0, upturn=300.0,
 
 
 def flat_curve(level=1.0, q=None):
-    """No peak anywhere: monotonic decay onto a plateau."""
+    """No peak anywhere: monotonic decay onto a plateau (not dispersed)."""
     q = saxsfft_q() if q is None else q
     return np.column_stack([q, level + 50.0 * np.exp(-q / 0.002)])
+
+
+def gas_curve(level=1.0, noise=0.03, seed=0, q=None):
+    """Dispersed: S stays near 1 at every q."""
+    q = saxsfft_q() if q is None else q
+    rng = np.random.default_rng(seed)
+    return np.column_stack([q, level * (1.0 + noise * rng.standard_normal(q.size))])

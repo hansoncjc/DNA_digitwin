@@ -45,5 +45,5 @@ def test_saxsfft_defaults():
     assert d["N_grid"] == 600
     assert d["frames"] == "last:100"
     assert d["step"] == 5
-    assert d["trim"] == slice(3, -3)
+    assert d["trim"] == slice(6, -6)
     assert d["particle_diameter"] == 24.6

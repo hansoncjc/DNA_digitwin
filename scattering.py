@@ -348,7 +348,7 @@ def estimate_saxsfft_n_grid(curve, spacing_rtol=1e-3):
 
 def convert_to_SAXS_fft(save_dir, path=None, particle_diameter=24.6,
                           N_grid=DEFAULT_N_GRID, frames='last:100', step=5,
-                          trim=slice(3, -3)):
+                          trim=slice(6, -6)):
     """
     Compute the structure factor S(q) from a GSD trajectory using saxs-fft (FFT-based).
 
@@ -362,9 +362,9 @@ def convert_to_SAXS_fft(save_dir, path=None, particle_diameter=24.6,
     ``simulation.run_simulation``, are the forward model shared by inverse
     design and mapping training (ground truth and BO): ``N_grid = 600``,
     ``frames = 'last:100'`` with ``step = 5`` (20 of the 450 production
-    frames), ``trim = slice(3, -3)``, ``particle_diameter = 24.6`` nm.
+    frames), ``trim = slice(6, -6)``, ``particle_diameter = 24.6`` nm.
     Changing a default changes the forward model; a saxs-fft target must be
-    made with the same ``N_grid``.
+    made with the same ``N_grid`` and ``trim``.
 
     Parameters
     ----------
@@ -388,8 +388,10 @@ def convert_to_SAXS_fft(save_dir, path=None, particle_diameter=24.6,
     step : int
         Use every ``step``-th frame of the selection. Default 5.
     trim : slice
-        Slice applied to q and S(q) to remove FFT boundary artefacts.
-        Default ``slice(3, -3)`` drops the first and last 3 bins.
+        Slice applied to q and S(q) to remove FFT boundary artefacts and
+        the lowest-q bins. Default ``slice(6, -6)`` drops the first and last
+        6 bins (``slice(3, -3)`` before 2026-10, with ``shift_mse`` trimming
+        3 more at each end).
 
     Outputs
     -------

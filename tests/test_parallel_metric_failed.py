@@ -48,7 +48,7 @@ def fake_pipeline(monkeypatch):
 
 def test_worker_writes_metric_failed(tmp_path, fake_pipeline):
     fake_pipeline.curve = flat_curve()
-    cfg_path, outdir = _worker_cfg(tmp_path, {"no_peak": "fail"})
+    cfg_path, outdir = _worker_cfg(tmp_path, {})
     assert worker.main(["worker.py", str(cfg_path)]) == 0
     assert not (outdir / "DONE").exists() and not (outdir / "FAILED").exists()
     data = json.loads((outdir / "METRIC_FAILED").read_text())
@@ -57,9 +57,9 @@ def test_worker_writes_metric_failed(tmp_path, fake_pipeline):
     assert json.loads((outdir / "shift_mse_diagnostics.json").read_text())["failed"] is True
 
 
-def test_worker_done_with_fallback_default(tmp_path, fake_pipeline):
+def test_worker_done_with_no_peak_fallback(tmp_path, fake_pipeline):
     fake_pipeline.curve = flat_curve()
-    cfg_path, outdir = _worker_cfg(tmp_path, {})
+    cfg_path, outdir = _worker_cfg(tmp_path, {"no_peak": "fallback"})
     assert worker.main(["worker.py", str(cfg_path)]) == 0
     done = json.loads((outdir / "DONE").read_text())
     diag = json.loads((outdir / "shift_mse_diagnostics.json").read_text())

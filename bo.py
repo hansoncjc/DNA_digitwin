@@ -921,6 +921,8 @@ def make_global_objective(
     "compare_q_range":
         q-range used for the final saxsfft loss comparison. This is distinct
         from q_min/q_max used when extracting experimental S(q) from intensity.
+        For ``metric='shift_mse'`` pass None to compare over the curve
+        overlap (the default (0.003, 0.06) is a fixed window).
     "dp_coeff":
         Phase-distance weight for ``metric='apdist'`` (see ``metrics.compare_saxs_curves``).
         Default 0.5. Ignored when ``metric='mse'``.
@@ -929,10 +931,10 @@ def make_global_objective(
         ``eval_XXX/<dataset_id>/apdist_plots/``. Default True.
     "metric" / "metric_kwargs":
         ``metric`` is ``'mse'``, ``'apdist'`` or ``'shift_mse'`` (saxsfft only).
-        ``metric_kwargs`` holds the ``shift_mse`` parameters (peak search and
-        baseline ranges, asymptote band, prominence_frac, min_prom_ratio,
-        n_points, lambda_shift, overlap_trim, no_peak, require_reliable,
-        asymptote fallback rules; see ``metrics.shift_mse_params``); they are
+        ``metric_kwargs`` holds the ``shift_mse`` parameters (peak search
+        range, prominence_frac, dispersed_delta, dispersed_shift, asymptote
+        band, n_points, lambda_shift, overlap_trim, no_peak, asymptote
+        fallback rules; see ``metrics.shift_mse_params``); they are
         validated here and passed unchanged to both execution paths. Each
         eval writes ``shift_mse_diagnostics.json``. A ``metrics.MetricFailed``
         fails the evaluation without rerunning the simulation.

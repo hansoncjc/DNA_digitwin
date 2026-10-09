@@ -11,23 +11,32 @@ md5 63c953ab476cb4b5f139f066e571a78a) on the curves built below with
 driver's ``install_fluid_metric_patches`` overrides (peak search
 (0.015, 0.040), baseline (0.012, 0.018), asymptote band (0.095, 0.120)).
 numpy 2.3.4, scipy 1.16.3.
+
+Since 2026-10-08 the baseline is the smoothed minimum in the search window
+and the defaults are the task-0b choice, so these regressions pass the old
+settings explicitly (OLD_FCC, FLUID). The baseline change does not move any
+of these curves' results.
 """
 import json
 
 import numpy as np
 import pytest
+from scipy.signal import savgol_filter
 
 import bo
 import metrics
 from metrics import MetricFailed, asymptote_scale, shift_mse_loss, shift_mse_params
-from shift_mse_curves import crystal_curve, flat_curve, fluid_curve, saxsfft_q
+from shift_mse_curves import crystal_curve, flat_curve, fluid_curve, gas_curve, saxsfft_q
 
 W_NARROW = (0.004, 0.040)
-FLUID = dict(
-    peak_search_range=(0.015, 0.040),
-    peak_baseline_range=(0.012, 0.018),
-    asymptote_band=(0.095, 0.120),
+OLD_FCC = dict(
+    peak_search_range=(0.006, 0.021),
+    asymptote_band=(0.050, 0.0654),
+    no_peak="fallback",
+    asymptote_fallback="tail",
+    asymptote_zero_den="unity",
 )
+FLUID = dict(OLD_FCC, peak_search_range=(0.015, 0.040), asymptote_band=(0.095, 0.120))
 FLUID_WINDOWS = {"narrow": (0.01, 0.09), "full": (0.001, 0.10)}
 
 FCC_REFS = {
@@ -69,8 +78,9 @@ def _check(ref, loss, diag):
 # ---------------- regression against the driver module ---------------- #
 
 @pytest.mark.parametrize("name", sorted(FCC_REFS))
-def test_defaults_match_driver_module_on_w_narrow(name):
-    loss, diag, *_ = shift_mse_loss(crystal_curve(), FCC_SIMS[name](), W_NARROW)
+def test_old_fcc_params_match_driver_module_on_w_narrow(name):
+    loss, diag, *_ = shift_mse_loss(crystal_curve(), FCC_SIMS[name](), W_NARROW,
+                                    metric_kwargs=OLD_FCC)
     _check(FCC_REFS[name], loss, diag)
 
 
@@ -85,8 +95,8 @@ def test_fluid_params_match_fluid_driver_patch(window, sim):
 
 
 def test_identical_curves_give_zero():
-    loss, diag, *_ = shift_mse_loss(crystal_curve(), crystal_curve(), W_NARROW)
-    assert loss == 0.0 and diag["q1_ratio"] == 1.0
+    loss, diag, *_ = shift_mse_loss(crystal_curve(), crystal_curve(), None)
+    assert loss == 0.0 and diag["q1_ratio"] == 1.0 and diag["aligned"] is True
 
 
 # ---------------- lambda ---------------- #
@@ -95,7 +105,7 @@ def test_identical_curves_give_zero():
 def test_lambda_weights_only_the_shift_term(lam):
     sim = FCC_SIMS["q1_0145"]()
     loss, diag, *_ = shift_mse_loss(crystal_curve(), sim, W_NARROW,
-                                    metric_kwargs={"lambda_shift": lam})
+                                    metric_kwargs=dict(OLD_FCC, lambda_shift=lam))
     ref = FCC_REFS["q1_0145"]
     assert diag["m4"] == pytest.approx(ref["m4"], rel=1e-12)
     assert diag["abs_log_q1_ratio"] == pytest.approx(ref["shift_term"], rel=1e-12)
@@ -105,9 +115,10 @@ def test_lambda_weights_only_the_shift_term(lam):
 
 # ---------------- q_range=None ---------------- #
 
-def test_q_range_none_without_overlap_trim_raises():
+def test_q_range_none_with_overlap_trim_none_raises():
     with pytest.raises(ValueError, match="q_range"):
-        shift_mse_loss(crystal_curve(), FCC_SIMS["q1_0125"](), None)
+        shift_mse_loss(crystal_curve(), FCC_SIMS["q1_0125"](), None,
+                       metric_kwargs={"overlap_trim": None})
 
 
 @pytest.mark.parametrize("k", [0, 3, 10])
@@ -133,28 +144,70 @@ def test_larger_overlap_trim_narrows_window():
 
 # ---------------- no peak ---------------- #
 
-def test_no_peak_fallback_is_default_and_flagged():
-    loss, diag, *_ = shift_mse_loss(crystal_curve(), flat_curve(), W_NARROW)
+def test_no_peak_fallback_is_flagged():
+    loss, diag, *_ = shift_mse_loss(crystal_curve(), flat_curve(), W_NARROW,
+                                    metric_kwargs=OLD_FCC)
     _check(FCC_REFS["flat_sim"], loss, diag)
+    assert diag["dispersed_sim"] is False
     assert diag["peak_sim"]["n_peaks_found"] == 0
     assert diag["fallbacks"]["peak_sim_max_fallback"] is True
     assert diag["fallbacks"]["peak_tgt_max_fallback"] is False
 
 
-def test_no_peak_fail_raises_metric_failed():
+def test_no_peak_fail_is_default():
     with pytest.raises(MetricFailed, match="no simulated peak"):
-        shift_mse_loss(crystal_curve(), flat_curve(), W_NARROW, metric_kwargs={"no_peak": "fail"})
+        shift_mse_loss(crystal_curve(), flat_curve(), W_NARROW)
     loss, *_ = shift_mse_loss(crystal_curve(), FCC_SIMS["q1_0125"](), W_NARROW,
-                              metric_kwargs={"no_peak": "fail"})
+                              metric_kwargs=dict(OLD_FCC, no_peak="fail"))
     assert loss == pytest.approx(FCC_REFS["q1_0125"]["loss"], rel=1e-12)
 
 
-def test_require_reliable():
-    weak = crystal_curve(q1=0.0128, amp=0.8)
-    loss, diag, *_ = shift_mse_loss(crystal_curve(), weak, W_NARROW)
-    assert diag["q1_sim_reliable"] is False and np.isfinite(loss)
-    with pytest.raises(MetricFailed, match="not reliable"):
-        shift_mse_loss(crystal_curve(), weak, W_NARROW, metric_kwargs={"require_reliable": True})
+# ---------------- baseline and dispersed curves ---------------- #
+
+def test_baseline_is_smoothed_minimum_in_search_window():
+    curve = metrics._sanitize_curve(crystal_curve())
+    pk = metrics.detect_first_peak(curve)
+    q, s = curve[:, 0], curve[:, 1]
+    lo, hi = metrics.SHIFT_MSE_DEFAULTS["peak_search_range"]
+    smooth = savgol_filter(s[(q >= lo) & (q <= hi)], window_length=5, polyorder=2)
+    assert pk.baseline == pytest.approx(smooth.min())
+    assert pk.s_max == pytest.approx(smooth.max())
+    assert pk.dispersed is False and pk.n_peaks_found > 0
+
+
+def test_dispersed_is_s_max_minus_one_below_delta():
+    gas = metrics._sanitize_curve(gas_curve())
+    pk = metrics.detect_first_peak(gas)
+    assert pk.dispersed is True and np.isnan(pk.q1)
+    assert pk.s_max - 1.0 < metrics.SHIFT_MSE_DEFAULTS["dispersed_delta"]
+    assert metrics.detect_first_peak(gas, dispersed_delta=0.0).dispersed is False
+
+
+def test_dispersed_sim_is_not_aligned():
+    exp, gas = crystal_curve(), gas_curve()
+    loss, diag, *_ = shift_mse_loss(exp, gas, None)
+    assert diag["aligned"] is False and diag["dispersed_sim"] is True
+    assert diag["q1_sim"] is None and diag["q1_ratio"] is None
+    assert diag["x_scale_sim"] == diag["x_scale_tgt"] == pytest.approx(diag["q1_tgt"])
+    assert diag["shift_term"] == 0.0 and loss == pytest.approx(diag["m4"])
+    loss2, diag2, *_ = shift_mse_loss(exp, gas, None, metric_kwargs={"dispersed_shift": 0.7})
+    assert diag2["m4"] == pytest.approx(diag["m4"], rel=1e-12)
+    assert loss2 == pytest.approx(diag["m4"] + 0.7, rel=1e-12)
+
+
+def test_dispersed_target_uses_absolute_q():
+    loss, diag, *_ = shift_mse_loss(gas_curve(), crystal_curve(), None,
+                                    metric_kwargs={"dispersed_shift": 0.7})
+    assert diag["dispersed_tgt"] is True and diag["dispersed_sim"] is False
+    assert diag["x_scale_tgt"] == diag["x_scale_sim"] == 1.0
+    assert diag["shift_term"] == 0.7
+
+
+def test_both_dispersed_have_no_shift_term():
+    loss, diag, *_ = shift_mse_loss(gas_curve(seed=1), gas_curve(seed=2), None,
+                                    metric_kwargs={"dispersed_shift": 0.7})
+    assert diag["dispersed_tgt"] and diag["dispersed_sim"]
+    assert diag["shift_term"] == 0.0 and loss == pytest.approx(diag["m4"])
 
 
 def test_too_few_search_points_always_fails():
@@ -166,8 +219,9 @@ def test_too_few_search_points_always_fails():
 
 # ---------------- asymptote band ---------------- #
 
-def test_asymptote_tail_fallback_is_default_and_flagged():
-    loss, diag, *_ = shift_mse_loss(crystal_curve(), FCC_SIMS["truncated_sim"](), W_NARROW)
+def test_asymptote_tail_fallback_is_flagged():
+    loss, diag, *_ = shift_mse_loss(crystal_curve(), FCC_SIMS["truncated_sim"](), W_NARROW,
+                                    metric_kwargs=OLD_FCC)
     _check(FCC_REFS["truncated_sim"], loss, diag)
     assert diag["fallbacks"]["asymptote_sim_tail_fallback"] is True
     assert diag["fallbacks"]["asymptote_exp_tail_fallback"] is False
@@ -177,10 +231,10 @@ def test_asymptote_tail_fallback_is_default_and_flagged():
 def test_asymptote_tail_fallback_fail_and_tail_frac():
     sim = FCC_SIMS["truncated_sim"]()
     with pytest.raises(MetricFailed, match="asymptote band"):
-        shift_mse_loss(crystal_curve(), sim, W_NARROW, metric_kwargs={"asymptote_fallback": "fail"})
+        shift_mse_loss(crystal_curve(), sim, W_NARROW)
     exp = metrics._sanitize_curve(crystal_curve())
     s = metrics._sanitize_curve(sim)
-    scale, info = asymptote_scale(exp, s, tail_frac=0.9)
+    scale, info = asymptote_scale(exp, s, band=(0.050, 0.0654), fallback="tail", tail_frac=0.9)
     band = (exp[:, 0] >= 0.050) & (exp[:, 0] <= 0.0654)
     tail = s[:, 0] >= 0.9 * s[:, 0].max()
     assert scale == pytest.approx(exp[band, 1].mean() / s[tail, 1].mean())
@@ -191,10 +245,10 @@ def test_asymptote_zero_denominator_rule():
     exp = metrics._sanitize_curve(crystal_curve())
     sim = exp.copy()
     sim[:, 1] = 0.0
-    scale, info = asymptote_scale(exp, sim)
+    scale, info = asymptote_scale(exp, sim, zero_den="unity")
     assert scale == 1.0 and info["zero_den"] is True
     with pytest.raises(MetricFailed, match="asymptote band mean"):
-        asymptote_scale(exp, sim, zero_den="fail")
+        asymptote_scale(exp, sim)
 
 
 # ---------------- parameters and JSON ---------------- #
@@ -207,21 +261,27 @@ def test_params_validation_and_json_lists():
         shift_mse_params({"peak_range": (0.01, 0.02)})
     with pytest.raises(ValueError, match="no_peak"):
         shift_mse_params({"no_peak": "skip"})
+    for removed in ("peak_baseline_range", "min_prom_ratio", "require_reliable"):
+        with pytest.raises(ValueError, match="Unknown"):
+            shift_mse_params({removed: None})
+    with pytest.raises(ValueError, match="dispersed_delta"):
+        shift_mse_params({"dispersed_delta": -0.1})
 
 
 def test_compare_writes_diagnostics_json(tmp_path):
     loss = metrics.compare_to_exp_saxsfft(
         crystal_curve(), FCC_SIMS["q1_0125"](), str(tmp_path),
-        metric="shift_mse", q_range=W_NARROW,
+        metric="shift_mse", q_range=W_NARROW, metric_kwargs=OLD_FCC,
     )
     data = json.loads((tmp_path / "shift_mse_diagnostics.json").read_text())
     assert loss == pytest.approx(FCC_REFS["q1_0125"]["loss"], rel=1e-12)
     old_fields = {"mse", "m4", "shift_term", "q1_ratio", "q1_tgt", "q1_sim",
-                  "q1_tgt_reliable", "q1_sim_reliable", "anchor_scale", "window_abs",
+                  "anchor_scale", "window_abs",
                   "x_lo", "x_hi", "n_points", "grid_lo", "grid_hi", "metric"}
     assert old_fields <= set(data)
     assert {"params", "fallbacks", "lambda_shift", "abs_log_q1_ratio",
-            "peak_tgt", "peak_sim", "asymptote"} <= set(data)
+            "peak_tgt", "peak_sim", "asymptote", "aligned",
+            "dispersed_tgt", "dispersed_sim"} <= set(data)
     assert data["failed"] is False and data["mse"] == pytest.approx(loss)
     assert metrics.load_shift_mse_components(str(tmp_path)) == {
         "rmse": pytest.approx(data["m4"]), "shift": pytest.approx(data["shift_term"]),
@@ -233,7 +293,7 @@ def test_compare_failure_writes_json_and_raises(tmp_path):
     with pytest.raises(MetricFailed):
         metrics.compare_to_exp_saxsfft(
             crystal_curve(), flat_curve(), str(tmp_path), metric="shift_mse",
-            q_range=W_NARROW, metric_kwargs={"no_peak": "fail"},
+            q_range=W_NARROW,
         )
     data = json.loads((tmp_path / "shift_mse_diagnostics.json").read_text())
     assert data["failed"] is True and "no simulated peak" in data["reason"]
@@ -257,10 +317,10 @@ def _ps():
 
 def test_objective_rejects_shift_mse_without_window():
     with pytest.raises(ValueError, match="overlap_trim"):
-        bo.make_global_objective([], _ps(), ffpath="", mode="map",
-                                 metric="shift_mse", compare_q_range=None)
+        bo.make_global_objective([], _ps(), ffpath="", mode="map", metric="shift_mse",
+                                 compare_q_range=None, metric_kwargs={"overlap_trim": None})
     bo.make_global_objective([], _ps(), ffpath="", mode="map", metric="shift_mse",
-                             compare_q_range=None, metric_kwargs={"overlap_trim": 3})
+                             compare_q_range=None)
 
 
 def test_objective_rejects_bad_metric_kwargs():
