@@ -1,9 +1,10 @@
 """
-R3.2: physics-based mapping trained on a virtual ground truth (task 0c-1, 2026-10-09).
+R3.1: virtual ground truth for the physics-based mapping (task 0c-1, 2026-10-09).
 
-Single source for the condition set, the ground-truth coefficients, the BO
-search box and the run settings. Used by ``make_ground_truth.py``,
-``qc_ground_truth.py``, ``run_r32.py`` and ``tests/test_physics_map.py``.
+Single source for the condition set, the ground-truth coefficients and the
+forward-model settings of the ground truth. Used by ``make_ground_truth.py``,
+``qc_ground_truth.py``, ``../r3.2-physics-validate/`` and
+``tests/test_physics_map.py``.
 
 Mapping (``datasets.physics_map``)::
 
@@ -46,27 +47,7 @@ ALL_CONDITIONS = TRAIN + HELDOUT
 # a_m, delta give n, m = 12.6, 6.3 at L_bridge = 20 (close to the old 12-6).
 GROUND_TRUTH = {"k": 0.65, "A": 1.2, "K_s": 0.07, "a_m": 3.2, "delta": 3.2}
 
-# Search box. Lower bounds of A, a_m, delta keep U0 >= 0.5, m >= 4, n >= 5.5,
-# n - m >= 1 for every condition above (smallest g = 1.375 at k = 0.9,
-# L_bridge = 120); tests/test_physics_map.py checks this on a grid.
-# Initial point: datasets.py defaults for k, A, K_s; a_m = delta such that
-# n = 12, m = 6 at L_bridge = 20 and k = 0.76.
-PARAM_CFG = {
-    "global": {
-        "k":     {"bounds": (0.40, 0.90), "init": 0.76},
-        "A":     {"bounds": (0.85, 2.50), "init": 2.0},
-        "K_s":   {"bounds": (0.00, 0.10), "init": 0.05},
-        "a_m":   {"bounds": (2.91, 4.00), "init": 3.2727},
-        "delta": {"bounds": (1.09, 4.00), "init": 3.2727},
-    },
-    "local": {},
-}
-
 # ---------------------------------------------------------------- run settings
 DENSITY = 0.005   # sigma^-3, Chiang et al. 2025 simulations
 N = 5000          # forward model: everything else at function defaults
-GT_SEED = 1       # ground truth; BO evaluations use the run_simulation default (42)
-BO_SEED = 0       # torch seed of run_bo
-N_ITERS = 200     # upper bound; the master walltime ends the run earlier
-
-METRIC = "shift_rmse"   # default shift_rmse parameters; compare over the curve overlap
+GT_SEED = 1       # ground truth; R3.2 evaluations use the run_simulation default (42)

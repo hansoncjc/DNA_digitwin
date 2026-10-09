@@ -11,12 +11,12 @@ Before resuming a run that was killed mid-evaluation, rename the last
 OUT_ROOT/eval_XXX folder that has no trajectory block: it keeps the old
 candidate's DONE flags and its id is reused.
 
---truth evaluates the objective once at config.GROUND_TRUTH (BO seed 42,
+--truth evaluates the objective once at the R3.1 ground truth (BO seed 42,
 ground truth seed 1); the per-condition loss is the stochastic floor used
 to set the success threshold. It does not run BO.
 
 Cluster settings (partition, account, venv, MC-DFM path) come from the
-command line or the environment; see run_r32.sbatch.
+command line or the environment (defaults: the klone paths); see run_r32.sbatch.
 """
 import argparse
 import os
@@ -28,7 +28,7 @@ REPO = HERE.parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(HERE))
 
-import config  # noqa: E402
+import train_config as config  # noqa: E402
 
 
 def build_datasets(gt_root, ids=None):
@@ -85,7 +85,8 @@ def main():
     ap.add_argument("--max-wait-h", type=float, default=6.0)
     ap.add_argument("--modules", default=os.environ.get("R32_MODULES", "cuda/11.8"))
     ap.add_argument("--venv", default=os.environ.get("R32_VENV", ""))
-    ap.add_argument("--mc-dfm-root", default=os.environ.get("MC_DFM_ROOT", ""))
+    ap.add_argument("--mc-dfm-root", default=os.environ.get(
+        "MC_DFM_ROOT", "/gscratch/zeelab/hanson/codes/DNA_lipid_silica/MC-DFM"))
     a = ap.parse_args()
 
     if a.mc_dfm_root:

@@ -22,7 +22,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1]))
 sys.path.insert(0, str(HERE))
 
-import config  # noqa: E402
+import gt_config as config  # noqa: E402
 from metrics import SHIFT_RMSE_DEFAULTS, _sanitize_curve, detect_first_peak, shift_rmse_loss  # noqa: E402
 
 NEAR = 0.25

@@ -33,7 +33,8 @@ DNA_digitwin/
 ├── scattering.py         # GSD → I(q)/S(q): convert_to_SAXS, convert_to_SAXS_fft, extract_exp_sq
 ├── metrics.py            # compare_saxs_curves, compare_to_exp[_saxsfft] (MSE / weighted APDist + plots)
 ├── campaigns/
-│   └── r32_physics/      # R3.2: ground truth, QC and BO driver for the physics-based mapping
+│   ├── r3.1-gt/          # R3.1: virtual ground truth (conditions, coefficients, generation, QC)
+│   └── r3.2-physics-validate/  # R3.2: BO training of the physics-based mapping on it
 ├── parallel/             # Slurm launcher: submits 1 GPU job per dataset per BO iteration
 │   ├── __init__.py
 │   ├── submit_parallel.py
@@ -346,7 +347,8 @@ The script below has the layout of the 9-sample test
 rewritten for the physics-based mapping (2026-10-09): it fits two
 mapping coefficients (`k`, `A`) over 9 experimental conditions with the
 other three frozen. The full R3.2 campaign (24 conditions, all five
-coefficients) is `campaigns/r32_physics/`. Each BO iteration submits 9 GPU jobs
+coefficients) is `campaigns/r3.1-gt/` (ground truth) and
+`campaigns/r3.2-physics-validate/` (training). Each BO iteration submits 9 GPU jobs
 in parallel through `DNA_digitwin/parallel/`; the master process runs
 on a CPU node.
 

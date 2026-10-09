@@ -1,12 +1,12 @@
 """
-Ground truth for R3.2: one simulation per condition with the ground-truth
-coefficients (``config.GROUND_TRUTH``), forward model at function defaults
-except ``N`` and ``seed = config.GT_SEED``.
+R3.1 ground truth: one simulation per condition with the ground-truth
+coefficients (``gt_config.GROUND_TRUTH``), forward model at function defaults
+except ``N`` and ``seed = gt_config.GT_SEED``.
 
     python make_ground_truth.py --list                      # mapped parameters, no simulation
     python make_ground_truth.py --index I --out GT_ROOT     # one condition (Slurm array task)
 
-Condition I is ``config.ALL_CONDITIONS[I]`` (0-23 training, 24-28 held-out).
+Condition I is ``gt_config.ALL_CONDITIONS[I]`` (0-23 training, 24-28 held-out).
 Writes ``GT_ROOT/<id>/`` (trajectory, S(q), ``gt_params.json``) and copies the
 S(q) to ``GT_ROOT/<id>.npy``, the file the BO datasets read (trim_tail=0).
 ``--steps`` and ``--device`` are for smoke tests only.
@@ -24,7 +24,7 @@ REPO = HERE.parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(HERE))
 
-import config  # noqa: E402
+import gt_config as config  # noqa: E402
 from datasets import check_mapped_params, physics_map  # noqa: E402
 
 

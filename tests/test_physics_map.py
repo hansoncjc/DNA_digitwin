@@ -16,8 +16,8 @@ from datasets import (
 from shift_rmse_curves import crystal_curve
 from simulation import resolve_table_bounds
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "campaigns" / "r32_physics"))
-import config as r32  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "campaigns" / "r3.2-physics-validate"))
+import train_config as r32  # noqa: E402  (re-exports the R3.1 ground truth)
 
 
 def _ds(ds_id, L_bridge, C_chol, C_NaCl, exp_path="/dev/null/x.npy", density=0.005):
