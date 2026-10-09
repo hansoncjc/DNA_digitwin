@@ -33,7 +33,10 @@ def main():
     ap.add_argument("--gt", default="ground_truth")
     ap.add_argument("--csv", default=None)
     a = ap.parse_args()
-    gt = Path(a.gt)
+    gt = Path(a.gt).resolve()
+    if not gt.is_dir():
+        sys.exit(f"ground-truth folder not found: {gt} (run from the GT folder or pass --gt)")
+    print(f"ground truth: {gt}")
     delta = SHIFT_RMSE_DEFAULTS["dispersed_delta"]
 
     rows, bad = [], 0
