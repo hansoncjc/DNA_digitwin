@@ -256,7 +256,7 @@ def compare_saxs_curves(
     return distance, q_ref, I_exp_resampled, I_sim_scaled, da, dp
 
 
-# ------------------------- shift_mse ------------------------- #
+# ------------------------- shift_rmse ------------------------- #
 #
 # L = M4 + lambda * |ln(q1_sim / q1_tgt)|, where M4 is the log10 RMSE on the
 # reduced axis x = q / q1 (each curve divided by its own first peak) after
@@ -269,11 +269,16 @@ def compare_saxs_curves(
 # aligned (both use x = q / q1_tgt) and the spacing term is replaced by
 # ``dispersed_shift`` (0 when both curves are dispersed).
 #
-# Defaults are the task-0b choice (2026-10-08). ``dispersed_delta`` and
-# ``dispersed_shift`` are provisional until the cluster check on the
-# saved inverse-run curves.
+# Defaults are the task-0b choice (2026-10-08). On the 407 saved curves of
+# the FCC, BCC and two HS-fluid inverse runs, s_max - 1 is <= 0.089 for the
+# 17 flat curves and >= 0.746 for every curve with a peak, so
+# ``dispersed_delta = 0.5`` sits in that gap. ``dispersed_shift = 0`` keeps
+# the loss free of a step at the dispersed boundary, which matters for
+# mapping ground truth that contains dispersed conditions; skipping the
+# alignment alone already ranks flat curves outside the top 20 of both
+# fluid runs.
 
-SHIFT_MSE_DEFAULTS = {
+SHIFT_RMSE_DEFAULTS = {
     "peak_search_range": (0.006, 0.12),
     "prominence_frac": 0.3,
     "dispersed_delta": 0.5,
@@ -289,17 +294,17 @@ SHIFT_MSE_DEFAULTS = {
     "asymptote_zero_den": "fail",
 }
 
-_SHIFT_MSE_RANGES = ("peak_search_range", "asymptote_band")
-_SHIFT_MSE_CHOICES = {
+_SHIFT_RMSE_RANGES = ("peak_search_range", "asymptote_band")
+_SHIFT_RMSE_CHOICES = {
     "no_peak": ("fallback", "fail"),
     "asymptote_fallback": ("tail", "fail"),
     "asymptote_zero_den": ("unity", "fail"),
 }
 
 
-def shift_mse_params(metric_kwargs=None):
+def shift_rmse_params(metric_kwargs=None):
     """
-    Return the full ``shift_mse`` parameter dict: defaults overridden by
+    Return the full ``shift_rmse`` parameter dict: defaults overridden by
     ``metric_kwargs``. Lists (from JSON) become tuples. Unknown keys or
     invalid choices raise ``ValueError``.
 
@@ -341,29 +346,29 @@ def shift_mse_params(metric_kwargs=None):
         Simulated band mean non-finite or below 1e-12: scale 1.0 or fail.
         "fail".
     """
-    unknown = set(metric_kwargs or {}) - set(SHIFT_MSE_DEFAULTS)
+    unknown = set(metric_kwargs or {}) - set(SHIFT_RMSE_DEFAULTS)
     if unknown:
-        raise ValueError(f"Unknown shift_mse metric_kwargs: {sorted(unknown)}")
-    p = dict(SHIFT_MSE_DEFAULTS)
+        raise ValueError(f"Unknown shift_rmse metric_kwargs: {sorted(unknown)}")
+    p = dict(SHIFT_RMSE_DEFAULTS)
     p.update(metric_kwargs or {})
-    for key in _SHIFT_MSE_RANGES:
+    for key in _SHIFT_RMSE_RANGES:
         lo, hi = p[key]
         p[key] = (float(lo), float(hi))
-    for key, choices in _SHIFT_MSE_CHOICES.items():
+    for key, choices in _SHIFT_RMSE_CHOICES.items():
         if p[key] not in choices:
-            raise ValueError(f"shift_mse {key} must be one of {choices}; got {p[key]!r}")
+            raise ValueError(f"shift_rmse {key} must be one of {choices}; got {p[key]!r}")
     p["n_points"] = int(p["n_points"])
     p["asymptote_min_points"] = int(p["asymptote_min_points"])
     if p["overlap_trim"] is not None:
         p["overlap_trim"] = int(p["overlap_trim"])
         if p["overlap_trim"] < 0:
-            raise ValueError("shift_mse overlap_trim must be >= 0")
+            raise ValueError("shift_rmse overlap_trim must be >= 0")
     for key in ("prominence_frac", "dispersed_delta", "dispersed_shift",
                 "lambda_shift", "asymptote_tail_frac"):
         p[key] = float(p[key])
     for key in ("dispersed_delta", "dispersed_shift"):
         if p[key] < 0.0:
-            raise ValueError(f"shift_mse {key} must be >= 0")
+            raise ValueError(f"shift_rmse {key} must be >= 0")
     return p
 
 
@@ -380,9 +385,9 @@ class PeakInfo:
 
 def detect_first_peak(
     curve,
-    search_range=SHIFT_MSE_DEFAULTS["peak_search_range"],
-    prominence_frac=SHIFT_MSE_DEFAULTS["prominence_frac"],
-    dispersed_delta=SHIFT_MSE_DEFAULTS["dispersed_delta"],
+    search_range=SHIFT_RMSE_DEFAULTS["peak_search_range"],
+    prominence_frac=SHIFT_RMSE_DEFAULTS["prominence_frac"],
+    dispersed_delta=SHIFT_RMSE_DEFAULTS["dispersed_delta"],
 ):
     """
     Lowest-q peak of a sanitized (N, 2) curve with sub-grid refinement.
@@ -437,11 +442,11 @@ def detect_first_peak(
 def asymptote_scale(
     exp_curve,
     sim_curve,
-    band=SHIFT_MSE_DEFAULTS["asymptote_band"],
-    min_points=SHIFT_MSE_DEFAULTS["asymptote_min_points"],
-    fallback=SHIFT_MSE_DEFAULTS["asymptote_fallback"],
-    tail_frac=SHIFT_MSE_DEFAULTS["asymptote_tail_frac"],
-    zero_den=SHIFT_MSE_DEFAULTS["asymptote_zero_den"],
+    band=SHIFT_RMSE_DEFAULTS["asymptote_band"],
+    min_points=SHIFT_RMSE_DEFAULTS["asymptote_min_points"],
+    fallback=SHIFT_RMSE_DEFAULTS["asymptote_fallback"],
+    tail_frac=SHIFT_RMSE_DEFAULTS["asymptote_tail_frac"],
+    zero_den=SHIFT_RMSE_DEFAULTS["asymptote_zero_den"],
 ):
     """
     Intensity scale ``mean_band(S_exp) / mean_band(S_sim)`` in absolute q.
@@ -459,7 +464,7 @@ def asymptote_scale(
         if mask.sum() < min_points:
             if fallback == "fail":
                 raise MetricFailed(
-                    f"shift_mse: {tag} curve has {int(mask.sum())} points in "
+                    f"shift_rmse: {tag} curve has {int(mask.sum())} points in "
                     f"asymptote band {band} (< {min_points})"
                 )
             mask = q >= tail_frac * float(q.max())
@@ -470,7 +475,7 @@ def asymptote_scale(
     info["zero_den"] = bool(not np.isfinite(den) or abs(den) < 1e-12)
     if info["zero_den"]:
         if zero_den == "fail":
-            raise MetricFailed(f"shift_mse: simulated asymptote band mean is {den}")
+            raise MetricFailed(f"shift_rmse: simulated asymptote band mean is {den}")
         return 1.0, info
     return num / den, info
 
@@ -488,13 +493,13 @@ def _resample_reduced(exp_curve, sim_curve, window, exp_scale, sim_scale, n_poin
     lo = max(qe.min(), qs.min(), window[0])
     hi = min(qe.max(), qs.max(), window[1])
     if not (hi > lo):
-        raise MetricFailed(f"shift_mse: empty comparison window [{lo}, {hi}]")
+        raise MetricFailed(f"shift_rmse: empty comparison window [{lo}, {hi}]")
 
     me = (qe >= lo) & (qe <= hi)
     ms = (qs >= lo) & (qs <= hi)
     if int(me.sum()) < 4 or int(ms.sum()) < 4:
         raise MetricFailed(
-            f"shift_mse: too few points in window: exp={int(me.sum())}, sim={int(ms.sum())}"
+            f"shift_rmse: too few points in window: exp={int(me.sum())}, sim={int(ms.sum())}"
         )
 
     grid = np.logspace(np.log10(lo), np.log10(hi), int(n_points))
@@ -525,7 +530,7 @@ def _peak_json(peak):
             for k, v in asdict(peak).items()}
 
 
-def shift_mse_loss(exp_data, sim_data, q_range, metric_kwargs=None):
+def shift_rmse_loss(exp_data, sim_data, q_range, metric_kwargs=None):
     """
     ``L = M4 + lambda_shift * |ln(q1_sim / q1_tgt)|``.
 
@@ -540,12 +545,12 @@ def shift_mse_loss(exp_data, sim_data, q_range, metric_kwargs=None):
         Absolute comparison window, converted to x with the target scale.
         None compares over the trimmed overlap (``overlap_trim``).
     metric_kwargs : dict, optional
-        Overrides of :data:`SHIFT_MSE_DEFAULTS`.
+        Overrides of :data:`SHIFT_RMSE_DEFAULTS`.
 
     Returns
     -------
     loss, diag, grid, log_exp, log_sim
-        ``diag`` holds every field written to ``shift_mse_diagnostics.json``.
+        ``diag`` holds every field written to ``shift_rmse_diagnostics.json``.
 
     Raises
     ------
@@ -556,10 +561,10 @@ def shift_mse_loss(exp_data, sim_data, q_range, metric_kwargs=None):
     ValueError
         ``q_range is None`` with ``overlap_trim=None`` (configuration error).
     """
-    p = shift_mse_params(metric_kwargs)
+    p = shift_rmse_params(metric_kwargs)
     if q_range is None and p["overlap_trim"] is None:
         raise ValueError(
-            "shift_mse requires an absolute q_range window, or "
+            "shift_rmse requires an absolute q_range window, or "
             "metric_kwargs['overlap_trim'] for the curve overlap"
         )
     exp_curve = _sanitize_curve(exp_data)
@@ -577,10 +582,10 @@ def shift_mse_loss(exp_data, sim_data, q_range, metric_kwargs=None):
         if pk.dispersed:
             continue
         if not np.isfinite(pk.q1):
-            raise MetricFailed(f"shift_mse: failed to detect {label} first Bragg peak")
+            raise MetricFailed(f"shift_rmse: failed to detect {label} first Bragg peak")
         if p["no_peak"] == "fail" and pk.n_peaks_found == 0:
             raise MetricFailed(
-                f"shift_mse: no {label} peak found in {p['peak_search_range']} "
+                f"shift_rmse: no {label} peak found in {p['peak_search_range']} "
                 "(no_peak='fail')"
             )
 
@@ -602,7 +607,7 @@ def shift_mse_loss(exp_data, sim_data, q_range, metric_kwargs=None):
         k = p["overlap_trim"]
         qe, qs = exp_curve[:, 0], sim_curve[:, 0]
         if qe.size <= 2 * k or qs.size <= 2 * k:
-            raise MetricFailed(f"shift_mse: overlap_trim={k} leaves no points")
+            raise MetricFailed(f"shift_rmse: overlap_trim={k} leaves no points")
         x_lo = max(qe[k] / tgt_scale, qs[k] / sim_scale)
         x_hi = min(qe[-1 - k] / tgt_scale, qs[-1 - k] / sim_scale)
         window_abs = (x_lo * tgt_scale, x_hi * tgt_scale)
@@ -637,7 +642,7 @@ def shift_mse_loss(exp_data, sim_data, q_range, metric_kwargs=None):
     peak_fallback = {tag: (not peaks[tag].dispersed and peaks[tag].n_peaks_found == 0)
                      for tag in peaks}
     diag = {
-        "mse": loss,
+        "loss": loss,
         "m4": m4,
         "shift_term": shift_term,
         "abs_log_q1_ratio": abs_log,
@@ -674,23 +679,23 @@ def shift_mse_loss(exp_data, sim_data, q_range, metric_kwargs=None):
     return loss, diag, grid, log_exp, log_sim
 
 
-def _compare_shift_mse(experimental_data, simulated_data, save_dir, q_range, metric_kwargs):
-    """Compute shift_mse, write ``shift_mse_diagnostics.json`` and the overlay plot."""
+def _compare_shift_rmse(experimental_data, simulated_data, save_dir, q_range, metric_kwargs):
+    """Compute shift_rmse, write ``shift_rmse_diagnostics.json`` and the overlay plot."""
     os.makedirs(save_dir, exist_ok=True)
     try:
-        loss, diag, grid, log_exp, log_sim = shift_mse_loss(
+        loss, diag, grid, log_exp, log_sim = shift_rmse_loss(
             experimental_data, simulated_data, q_range, metric_kwargs=metric_kwargs,
         )
     except MetricFailed as exc:
-        with open(os.path.join(save_dir, "shift_mse_diagnostics.json"), "w") as fh:
-            json.dump({"metric": "shift_mse", "failed": True, "reason": str(exc),
+        with open(os.path.join(save_dir, "shift_rmse_diagnostics.json"), "w") as fh:
+            json.dump({"metric": "shift_rmse", "failed": True, "reason": str(exc),
                        "params": {k: (list(v) if isinstance(v, tuple) else v)
-                                  for k, v in shift_mse_params(metric_kwargs).items()}},
+                                  for k, v in shift_rmse_params(metric_kwargs).items()}},
                       fh, indent=2)
         raise
-    diag["metric"] = "shift_mse"
+    diag["metric"] = "shift_rmse"
     diag["failed"] = False
-    with open(os.path.join(save_dir, "shift_mse_diagnostics.json"), "w") as fh:
+    with open(os.path.join(save_dir, "shift_rmse_diagnostics.json"), "w") as fh:
         json.dump(diag, fh, indent=2)
 
     if diag["aligned"]:
@@ -721,9 +726,9 @@ def _compare_shift_mse(experimental_data, simulated_data, save_dir, q_range, met
     return loss
 
 
-def load_shift_mse_components(save_dir):
+def load_shift_rmse_components(save_dir):
     """Return ``{"rmse": M4, "shift": shift_term}`` from a diagnostics JSON, or {}."""
-    path = os.path.join(save_dir, "shift_mse_diagnostics.json")
+    path = os.path.join(save_dir, "shift_rmse_diagnostics.json")
     try:
         with open(path) as fh:
             data = json.load(fh)
@@ -823,8 +828,8 @@ def compare_to_exp_saxsfft(
 
     ``mse`` / ``apdist`` use the same :func:`compare_saxs_curves` engine as
     :func:`compare_to_exp`, with a wider default window ``[0.003, 0.06]``
-    A^-1. ``shift_mse`` uses :func:`shift_mse_loss` and writes
-    ``shift_mse_diagnostics.json`` to ``save_dir``.
+    A^-1. ``shift_rmse`` uses :func:`shift_rmse_loss` and writes
+    ``shift_rmse_diagnostics.json`` to ``save_dir``.
 
     Parameters
     ----------
@@ -835,7 +840,7 @@ def compare_to_exp_saxsfft(
     save_dir : str
         Directory for diagnostic plots.
     metric : str
-        ``'mse'``, ``'apdist'`` or ``'shift_mse'``.
+        ``'mse'``, ``'apdist'`` or ``'shift_rmse'``.
     q_range : tuple(float, float) or None
         Optional (q_min, q_max) comparison window.
     dp_coeff : float
@@ -844,7 +849,7 @@ def compare_to_exp_saxsfft(
         When True and ``metric='apdist'``, save phase-warp plots under
         ``save_dir/apdist_plots/``.
     metric_kwargs : dict, optional
-        ``shift_mse`` parameters (see :func:`shift_mse_params`). Must be
+        ``shift_rmse`` parameters (see :func:`shift_rmse_params`). Must be
         empty for the other metrics.
 
     Returns
@@ -855,16 +860,16 @@ def compare_to_exp_saxsfft(
     Raises
     ------
     MetricFailed
-        ``shift_mse`` could not compute a loss from these curves.
+        ``shift_rmse`` could not compute a loss from these curves.
     """
     _warn_apdist_kwargs_ignored(metric, dp_coeff, plot_apdist)
 
-    if metric == "shift_mse":
-        return _compare_shift_mse(
+    if metric == "shift_rmse":
+        return _compare_shift_rmse(
             experimental_data, simulated_data, save_dir, q_range, metric_kwargs,
         )
     if metric_kwargs:
-        raise ValueError(f"metric_kwargs are only used by metric='shift_mse' (got {metric!r})")
+        raise ValueError(f"metric_kwargs are only used by metric='shift_rmse' (got {metric!r})")
 
     loss, q_ref, I_exp_resampled, I_sim_resampled, da, dp = compare_saxs_curves(
         experimental_data,

@@ -8,7 +8,7 @@ import pytest
 import bo
 from parallel import submit_parallel as sp
 from parallel import worker
-from shift_mse_curves import crystal_curve, flat_curve
+from shift_rmse_curves import crystal_curve, flat_curve
 
 
 def _worker_cfg(tmp_path, metric_kwargs):
@@ -21,7 +21,7 @@ def _worker_cfg(tmp_path, metric_kwargs):
         "scattering": {"method": "saxsfft", "kwargs": {}},
         "loss": {
             "exp_path": str(exp_path), "trim_tail": 0, "datatype": "sq",
-            "ffpath": "", "metric": "shift_mse", "scattering_method": "saxsfft",
+            "ffpath": "", "metric": "shift_rmse", "scattering_method": "saxsfft",
             "compare_q_range": [0.004, 0.040], "dp_coeff": 0.5, "plot_apdist": True,
             "metric_kwargs": metric_kwargs,
         },
@@ -54,7 +54,7 @@ def test_worker_writes_metric_failed(tmp_path, fake_pipeline):
     data = json.loads((outdir / "METRIC_FAILED").read_text())
     assert "no simulated peak" in data["reason"]
     assert data["result"]["n_pairs_below_rmin"] == "2"
-    assert json.loads((outdir / "shift_mse_diagnostics.json").read_text())["failed"] is True
+    assert json.loads((outdir / "shift_rmse_diagnostics.json").read_text())["failed"] is True
 
 
 def test_worker_done_with_no_peak_fallback(tmp_path, fake_pipeline):
@@ -62,8 +62,8 @@ def test_worker_done_with_no_peak_fallback(tmp_path, fake_pipeline):
     cfg_path, outdir = _worker_cfg(tmp_path, {"no_peak": "fallback"})
     assert worker.main(["worker.py", str(cfg_path)]) == 0
     done = json.loads((outdir / "DONE").read_text())
-    diag = json.loads((outdir / "shift_mse_diagnostics.json").read_text())
-    assert done["loss"] == pytest.approx(diag["mse"])
+    diag = json.loads((outdir / "shift_rmse_diagnostics.json").read_text())
+    assert done["loss"] == pytest.approx(diag["loss"])
     assert diag["fallbacks"]["peak_sim_max_fallback"] is True
 
 

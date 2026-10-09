@@ -64,8 +64,8 @@ from metrics import (
     MetricFailed,
     compare_to_exp,
     compare_to_exp_saxsfft,
-    load_shift_mse_components,
-    shift_mse_params,
+    load_shift_rmse_components,
+    shift_rmse_params,
 )
 
 # ------------------------- Evaluation failures ------------------------- #
@@ -294,7 +294,7 @@ def _write_iteration_block(filepath: str, iteration: int, total_loss: float, rec
 
     The audit columns (``AUDIT_COLUMNS``) are per (eval, dataset): in map
     mode each dataset has its own U0, hence its own cutoff. ``rmse`` and
-    ``shift`` are filled only for ``metric='shift_mse'``. Each block carries
+    ``shift`` are filled only for ``metric='shift_rmse'``. Each block carries
     its own header row, so readers that look columns up by name also read
     older blocks without these columns.
     """
@@ -337,12 +337,12 @@ def _audit_fields(sim_result: Optional[Dict[str, Any]], r0: float, save_dir: str
 
     ``sim_result`` is the ``run_simulation`` dict (sequential) or the
     stringified ``result`` from the worker's DONE flag (parallel). ``rmse``
-    (M4) and ``shift`` come from ``save_dir/shift_mse_diagnostics.json`` and
+    (M4) and ``shift`` come from ``save_dir/shift_rmse_diagnostics.json`` and
     are blank for other metrics.
     """
     sim_result = sim_result or {}
     rmax = _audit_value(sim_result.get("rmax"))
-    comps = load_shift_mse_components(save_dir)
+    comps = load_shift_rmse_components(save_dir)
     return {
         "rmax": rmax,
         "rmax_over_r0": rmax / float(r0) if rmax != "" else "",
@@ -359,8 +359,8 @@ def _append_loss_components(
     """
     Append one row per dataset to ``out_root/loss_components.txt`` (CSV):
     iteration, dataset_id, rmse (M4), shift (lambda*|ln q1 ratio|), loss
-    (= rmse + shift for shift_mse), and the iteration's weighted total_loss.
-    Components are blank for metrics other than shift_mse.
+    (= rmse + shift for shift_rmse), and the iteration's weighted total_loss.
+    Components are blank for metrics other than shift_rmse.
     """
     path = os.path.join(out_root, "loss_components.txt")
     write_header = not os.path.exists(path)
@@ -921,7 +921,7 @@ def make_global_objective(
     "compare_q_range":
         q-range used for the final saxsfft loss comparison. This is distinct
         from q_min/q_max used when extracting experimental S(q) from intensity.
-        For ``metric='shift_mse'`` pass None to compare over the curve
+        For ``metric='shift_rmse'`` pass None to compare over the curve
         overlap (the default (0.003, 0.06) is a fixed window).
     "dp_coeff":
         Phase-distance weight for ``metric='apdist'`` (see ``metrics.compare_saxs_curves``).
@@ -930,13 +930,13 @@ def make_global_objective(
         When True and ``metric='apdist'``, save phase-warp diagnostic plots under
         ``eval_XXX/<dataset_id>/apdist_plots/``. Default True.
     "metric" / "metric_kwargs":
-        ``metric`` is ``'mse'``, ``'apdist'`` or ``'shift_mse'`` (saxsfft only).
-        ``metric_kwargs`` holds the ``shift_mse`` parameters (peak search
+        ``metric`` is ``'mse'``, ``'apdist'`` or ``'shift_rmse'`` (saxsfft only).
+        ``metric_kwargs`` holds the ``shift_rmse`` parameters (peak search
         range, prominence_frac, dispersed_delta, dispersed_shift, asymptote
         band, n_points, lambda_shift, overlap_trim, no_peak, asymptote
-        fallback rules; see ``metrics.shift_mse_params``); they are
+        fallback rules; see ``metrics.shift_rmse_params``); they are
         validated here and passed unchanged to both execution paths. Each
-        eval writes ``shift_mse_diagnostics.json``. A ``metrics.MetricFailed``
+        eval writes ``shift_rmse_diagnostics.json``. A ``metrics.MetricFailed``
         fails the evaluation without rerunning the simulation.
     "scattering_kwargs":
         Passed to ``convert_to_SAXS_fft`` / ``convert_to_SAXS``. In
@@ -955,17 +955,17 @@ def make_global_objective(
     if mode == "sim" and scattering_method == "saxsfft":
         _check_target_n_grid(datasets, scattering_kwargs, trim_tail)
     metric_kwargs = dict(metric_kwargs or {})
-    if metric == "shift_mse":
+    if metric == "shift_rmse":
         if scattering_method != "saxsfft":
-            raise ValueError("metric='shift_mse' requires scattering_method='saxsfft'")
-        params = shift_mse_params(metric_kwargs)
+            raise ValueError("metric='shift_rmse' requires scattering_method='saxsfft'")
+        params = shift_rmse_params(metric_kwargs)
         if compare_q_range is None and params["overlap_trim"] is None:
             raise ValueError(
-                "metric='shift_mse' with compare_q_range=None needs "
+                "metric='shift_rmse' with compare_q_range=None needs "
                 "metric_kwargs['overlap_trim']"
             )
     elif metric_kwargs:
-        raise ValueError(f"metric_kwargs are only used by metric='shift_mse' (got {metric!r})")
+        raise ValueError(f"metric_kwargs are only used by metric='shift_rmse' (got {metric!r})")
 
     def objective(x_unit: torch.Tensor, ffpath: str) -> torch.Tensor:
         objective._eval_failed = False

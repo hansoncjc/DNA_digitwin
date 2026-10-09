@@ -42,7 +42,7 @@ Expected JSON config layout::
           "scattering_method":"saxsfft",
           "q_min":            0.02,
           "q_max":            0.03,
-          "metric_kwargs":    {}       # shift_mse parameters (metrics.shift_mse_params)
+          "metric_kwargs":    {}       # shift_rmse parameters (metrics.shift_rmse_params)
       }
     }
 

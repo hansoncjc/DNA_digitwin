@@ -1,4 +1,4 @@
-"""Deterministic synthetic S(q) curves for the shift_mse tests.
+"""Deterministic synthetic S(q) curves for the shift_rmse tests.
 
 All curves sit on the saxs-fft q grid of a cubic box (N_grid = 600,
 L = 100 sigma, 24.6 nm particles, trim 3 bins at each end), which is the

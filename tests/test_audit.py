@@ -10,7 +10,7 @@ import torch
 
 import bo
 from parallel import submit_parallel as sp
-from shift_mse_curves import crystal_curve
+from shift_rmse_curves import crystal_curve
 from simulation import resolve_table_bounds
 
 W_NARROW = (0.004, 0.040)
@@ -59,7 +59,7 @@ def _read_blocks(path):
     return blocks
 
 
-def _objective(tmp_path, datasets, metric="shift_mse"):
+def _objective(tmp_path, datasets, metric="shift_rmse"):
     ps = bo.ParamSpace({"global": {"n": {"bounds": (11.0, 13.0), "init": 12.0}}, "local": {}},
                        dataset_ids=[d.id for d in datasets])
     obj = bo.make_global_objective(
@@ -70,8 +70,8 @@ def _objective(tmp_path, datasets, metric="shift_mse"):
 
 
 def test_audit_fields_from_sim_dict_and_done_strings(tmp_path):
-    (tmp_path / "shift_mse_diagnostics.json").write_text(json.dumps(
-        {"failed": False, "m4": 0.25, "shift_term": 0.03, "mse": 0.28}))
+    (tmp_path / "shift_rmse_diagnostics.json").write_text(json.dumps(
+        {"failed": False, "m4": 0.25, "shift_term": 0.03, "loss": 0.28}))
     sim = {"rmax": 4.946506116169816, "t_tol_lj": 0.1 / 3.0, "n_pairs_below_rmin": 2}
     a = bo._audit_fields(sim, 2.5, str(tmp_path))
     b = bo._audit_fields({k: str(v) for k, v in sim.items()}, 2.5, str(tmp_path))
@@ -96,10 +96,10 @@ def test_sequential_records_audit_per_dataset(tmp_path, stub_pipeline):
         assert float(r["rmax_over_r0"]) == pytest.approx(b["rmax"] / 2.5)
         assert float(r["t_tol_lj"]) == pytest.approx(0.1 / ds.sim.U0)
         assert r["n_pairs_below_rmin"] == "3"
-        diag = json.loads((tmp_path / "eval_000" / ds.id / "shift_mse_diagnostics.json").read_text())
+        diag = json.loads((tmp_path / "eval_000" / ds.id / "shift_rmse_diagnostics.json").read_text())
         assert float(r["rmse"]) == pytest.approx(diag["m4"])
         assert float(r["shift"]) == pytest.approx(diag["shift_term"])
-        assert float(r["loss"]) == pytest.approx(diag["mse"])
+        assert float(r["loss"]) == pytest.approx(diag["loss"])
     assert rows["d0"]["rmax"] != rows["d1"]["rmax"]
     assert "mu_b" in block["rows"][0] and "sigma_b" in block["rows"][0]
 
@@ -112,7 +112,7 @@ def test_sequential_records_audit_per_dataset(tmp_path, stub_pipeline):
         assert c["iteration"] == "0"
 
 
-def test_non_shift_mse_leaves_components_blank(tmp_path, stub_pipeline):
+def test_non_shift_rmse_leaves_components_blank(tmp_path, stub_pipeline):
     obj, ps = _objective(tmp_path, [_DS("d0", 3.0, 0.0129)], metric="mse")
     obj(ps.init_unit(), ffpath="")
     (block,) = _read_blocks(tmp_path / "bo_trajectory.csv")
@@ -145,8 +145,8 @@ def test_parallel_collector_records_audit(tmp_path):
     result = {"rmax": "4.946506116169816", "t_tol_lj": "0.03333333333333333",
               "n_pairs_below_rmin": "5", "L": "100.0"}
     (sim_dir / "DONE").write_text(json.dumps({"loss": 0.28, "result": result}))
-    (sim_dir / "shift_mse_diagnostics.json").write_text(json.dumps(
-        {"failed": False, "m4": 0.25, "shift_term": 0.03, "mse": 0.28}))
+    (sim_dir / "shift_rmse_diagnostics.json").write_text(json.dumps(
+        {"failed": False, "m4": 0.25, "shift_term": 0.03, "loss": 0.28}))
     job = sp.Job(idx=0, name="j", ds_id="d0", sim_dir=sim_dir, config_path=sim_dir / "c",
                  sbatch_path=sim_dir / "s", out_path=sim_dir / "o", done_status="DONE")
     plan = dict(ds=SimpleNamespace(id="d0", weight=1.0), density=0.005, n=12.0, m=6.0,

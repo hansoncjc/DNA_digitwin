@@ -390,7 +390,7 @@ def convert_to_SAXS_fft(save_dir, path=None, particle_diameter=24.6,
     trim : slice
         Slice applied to q and S(q) to remove FFT boundary artefacts and
         the lowest-q bins. Default ``slice(6, -6)`` drops the first and last
-        6 bins (``slice(3, -3)`` before 2026-10, with ``shift_mse`` trimming
+        6 bins (``slice(3, -3)`` before 2026-10, with ``shift_rmse`` trimming
         3 more at each end).
 
     Outputs

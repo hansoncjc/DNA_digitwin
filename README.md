@@ -159,7 +159,7 @@ the eval directory. Pass `plot_apdist=False` to skip the warp plots.
 When `metric="mse"`, `dp_coeff` and `plot_apdist` are ignored (a warning
 is emitted if non-default values are supplied).
 
-- **`shift_mse`** (saxs-fft only) – peak-aligned log10 RMSE plus a
+- **`shift_rmse`** (saxs-fft only) – peak-aligned log10 RMSE plus a
   first-peak spacing term:
 
   ```
@@ -172,7 +172,7 @@ is emitted if non-default values are supplied).
   `compare_q_range=None` the window is the overlap of the two curves on
   `x = q/q1`, minus `overlap_trim` points per end (default 0; the saxs-fft
   trim already drops 6 bins per end). All parameters go in
-  `metric_kwargs` (see `metrics.shift_mse_params`); the defaults are the
+  `metric_kwargs` (see `metrics.shift_rmse_params`); the defaults are the
   task-0b choice (2026-10-08): peak search (0.006, 0.12) Å⁻¹, prominence
   `0.3 × (max − min)` of the smoothed curve in that window, asymptote band
   (0.085, 0.100) Å⁻¹, `no_peak="fail"`, both asymptote rules `"fail"`.
@@ -180,10 +180,16 @@ is emitted if non-default values are supplied).
   A curve whose smoothed S stays below `1 + dispersed_delta` in the search
   window is dispersed: neither curve is aligned (both use
   `x = q/q1_tgt`) and the spacing term is `dispersed_shift` (0 when both
-  curves are dispersed). `dispersed_delta=0.5` and `dispersed_shift=0` are
-  provisional.
+  curves are dispersed). `dispersed_delta=0.5` sits in the gap between
+  flat curves (`s_max − 1 ≤ 0.089`) and curves with a peak (`≥ 0.746`) on
+  the saved inverse-run curves; `dispersed_shift=0` avoids a step in the
+  loss at the dispersed boundary (mapping ground truth contains
+  dispersed conditions).
 
-  Every eval writes `shift_mse_diagnostics.json` with the parameters,
+  The diagnostics key `loss` is the total `M4 + shift_term` (it was `mse`
+  before 2026-10-08, when the metric was named `shift_mse`).
+
+  Every eval writes `shift_rmse_diagnostics.json` with the parameters,
   both peaks, and which fallbacks fired. A `metrics.MetricFailed` fails
   the evaluation (logged as `METRIC_FAILED`, not given to the GP); in the
   parallel path the worker writes a `METRIC_FAILED` flag and the job is
@@ -295,15 +301,15 @@ path), `density` and the potential parameters:
    - `apdist_plots/` – phase-warp diagnostics (when `metric="apdist"`)
    - `sim_params_<id>.csv` – the resolved sim inputs for that eval
 
-   - `shift_mse_diagnostics.json` – loss components, peaks, parameters
-     and fallbacks (when `metric="shift_mse"`)
+   - `shift_rmse_diagnostics.json` – loss components, peaks, parameters
+     and fallbacks (when `metric="shift_rmse"`)
 
    Plus, at the run root:
    - `bo_trajectory.csv` – per-iteration block of every dataset's
      parameters and loss, with the iteration's total loss in the
      header line. Each dataset row also carries the audit columns
      `rmax`, `rmax_over_r0`, `t_tol_lj`, `n_pairs_below_rmin` and, for
-     `shift_mse`, `rmse` (M4) and `shift`. Older trajectories without
+     `shift_rmse`, `rmse` (M4) and `shift`. Older trajectories without
      these columns still load in `load_warm_start_from_trajectory`.
    - `loss_components.txt` – CSV, one row per successful (iteration,
      dataset): `rmse`, `shift`, `loss` and the iteration's `total_loss`.
