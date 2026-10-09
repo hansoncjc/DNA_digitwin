@@ -34,7 +34,7 @@ def _worker_cfg(tmp_path, metric_kwargs):
 @pytest.fixture
 def fake_pipeline(monkeypatch):
     def fake_sim(outdir, **kw):
-        return {"rmax": 4.9465, "t_tol_lj": 0.1 / kw["U_0"], "n_pairs_below_rmin": 2}
+        return {"rmax": 4.9465, "t_tol": 0.1 / kw["U_0"], "n_pairs_below_rmin": 2}
 
     def fake_saxs(save_dir, **kw):
         d = Path(save_dir) / "S(q)_data"

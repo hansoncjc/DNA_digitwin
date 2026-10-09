@@ -28,7 +28,7 @@ per BO iteration.
 DNA_digitwin/
 ├── bo.py                 # ParamSpace, make_global_objective, run_bo
 ├── datasets.py           # ExperimentalParams, SimulationParams, Dataset
-├── simulation.py         # run_simulation (HOOMD), modified_LJ
+├── simulation.py         # run_simulation (HOOMD), mie_r0
 ├── scattering.py         # GSD → I(q)/S(q): convert_to_SAXS, convert_to_SAXS_fft, extract_exp_sq
 ├── metrics.py            # compare_saxs_curves, compare_to_exp[_saxsfft] (MSE / weighted APDist + plots)
 ├── parallel/             # Slurm launcher: submits 1 GPU job per dataset per BO iteration
@@ -226,15 +226,15 @@ Builds a callable `objective(x_unit, ffpath)` that, for one BO query:
    - `"sim"`: takes `density, r0, U0` directly from the param space
      (local > global > `dataset.sim.*`).
 3. Runs `simulation.run_simulation(...)` (HOOMD). The pair-table
-   cutoff is dynamic by default: `t_tol_lj = tail_energy_cut / U_0`
+   cutoff is dynamic by default: `t_tol = tail_energy_cut / U_0`
    with `tail_energy_cut = 0.1`, i.e. the attractive tail at `rmax` is
-   `0.1 kT` for every `U_0`. For a fixed cutoff put either `t_tol_lj`
+   `0.1 kT` for every `U_0`. For a fixed cutoff put either `t_tol`
    or `rmax` in `sim_defaults` (each conflicts with `tail_energy_cut`).
    Every mode must give `rmax < L/2`, checked before HOOMD starts.
-   The result dict carries `rmax`, `t_tol_lj`, `tail_energy_cut`, `L`.
+   The result dict carries `rmax`, `t_tol`, `tail_energy_cut`, `L`.
    Initialization is a Langevin segment on the repulsive branch of the
    same potential, cut at the well minimum (`t_init = 10`, the production
-   `dt`). `modified_lj` uses `rmin = rmin_k * r0` (`rmin_k = 0.5`).
+   `dt`). `mie_r0` uses `rmin = rmin_k * r0` (`rmin_k = 0.5`).
    The number of pairs with `r < rmin` in the configuration that starts
    production (GSD frame 0) is logged and returned as `n_pairs_below_rmin`,
    with `min_pair_distance`.
@@ -270,7 +270,7 @@ path), `density` and the potential parameters:
 
 | Stage | Defaults |
 |---|---|
-| Pair potential | `modified_lj` table; dynamic cutoff `t_tol_lj = 0.1/U_0`, no fixed `rmax`, `rmax < L/2`, `rmin = rmin_k * r0` with `rmin_k = 0.5` |
+| Pair potential | `mie_r0` table; dynamic cutoff `t_tol = 0.1/U_0`, no fixed `rmax`, `rmax < L/2`, `rmin = rmin_k * r0` with `rmin_k = 0.5` |
 | Initialization | Repulsive branch of that potential, cut at the well, Langevin `t_init = 10` at the production `dt` |
 | Langevin production | `kT = 1`, γ = 1, `dt = 1e-3`, `steps = 22_500_000` (450 GSD frames), `seed = 42` |
 | saxs-fft | `N_grid = 600`, `frames = 'last:100'`, `step = 5`, `trim = slice(3, -3)`, `particle_diameter = 24.6` nm |
@@ -308,7 +308,7 @@ path), `density` and the potential parameters:
    - `bo_trajectory.csv` – per-iteration block of every dataset's
      parameters and loss, with the iteration's total loss in the
      header line. Each dataset row also carries the audit columns
-     `rmax`, `rmax_over_r0`, `t_tol_lj`, `n_pairs_below_rmin` and, for
+     `rmax`, `rmax_over_r0`, `t_tol`, `n_pairs_below_rmin` and, for
      `shift_rmse`, `rmse` (M4) and `shift`. Older trajectories without
      these columns still load in `load_warm_start_from_trajectory`.
    - `loss_components.txt` – CSV, one row per successful (iteration,

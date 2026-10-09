@@ -33,7 +33,7 @@ class _DS:
 def stub_pipeline(monkeypatch):
     def fake_sim(density, U_0, r0, n, m, outdir, **kw):
         b = resolve_table_bounds(U_0, n, m, r0, N=5000, density=density)
-        return {"rmax": b["rmax"], "t_tol_lj": b["t_tol_lj"], "n_pairs_below_rmin": 3}
+        return {"rmax": b["rmax"], "t_tol": b["t_tol"], "n_pairs_below_rmin": 3}
 
     def fake_saxs(save_dir, **kw):
         d = Path(save_dir) / "S(q)_data"
@@ -72,14 +72,14 @@ def _objective(tmp_path, datasets, metric="shift_rmse"):
 def test_audit_fields_from_sim_dict_and_done_strings(tmp_path):
     (tmp_path / "shift_rmse_diagnostics.json").write_text(json.dumps(
         {"failed": False, "m4": 0.25, "shift_term": 0.03, "loss": 0.28}))
-    sim = {"rmax": 4.946506116169816, "t_tol_lj": 0.1 / 3.0, "n_pairs_below_rmin": 2}
+    sim = {"rmax": 4.946506116169816, "t_tol": 0.1 / 3.0, "n_pairs_below_rmin": 2}
     a = bo._audit_fields(sim, 2.5, str(tmp_path))
     b = bo._audit_fields({k: str(v) for k, v in sim.items()}, 2.5, str(tmp_path))
     assert a == b
     assert a["rmax_over_r0"] == pytest.approx(4.946506116169816 / 2.5)
     assert (a["rmse"], a["shift"], a["n_pairs_below_rmin"]) == (0.25, 0.03, 2)
-    fixed = bo._audit_fields({"rmax": "6.0", "t_tol_lj": "None"}, 2.5, str(tmp_path / "x"))
-    assert fixed["t_tol_lj"] == "" and fixed["rmse"] == "" and fixed["n_pairs_below_rmin"] == ""
+    fixed = bo._audit_fields({"rmax": "6.0", "t_tol": "None"}, 2.5, str(tmp_path / "x"))
+    assert fixed["t_tol"] == "" and fixed["rmse"] == "" and fixed["n_pairs_below_rmin"] == ""
 
 
 def test_sequential_records_audit_per_dataset(tmp_path, stub_pipeline):
@@ -94,7 +94,7 @@ def test_sequential_records_audit_per_dataset(tmp_path, stub_pipeline):
         b = resolve_table_bounds(ds.sim.U0, 12.0, 6.0, 2.5, N=5000, density=0.005)
         assert float(r["rmax"]) == pytest.approx(b["rmax"])
         assert float(r["rmax_over_r0"]) == pytest.approx(b["rmax"] / 2.5)
-        assert float(r["t_tol_lj"]) == pytest.approx(0.1 / ds.sim.U0)
+        assert float(r["t_tol"]) == pytest.approx(0.1 / ds.sim.U0)
         assert r["n_pairs_below_rmin"] == "3"
         diag = json.loads((tmp_path / "eval_000" / ds.id / "shift_rmse_diagnostics.json").read_text())
         assert float(r["rmse"]) == pytest.approx(diag["m4"])
@@ -142,7 +142,7 @@ def test_warm_start_reads_old_and_new_blocks(tmp_path, stub_pipeline):
 def test_parallel_collector_records_audit(tmp_path):
     sim_dir = tmp_path / "eval_000" / "d0"
     sim_dir.mkdir(parents=True)
-    result = {"rmax": "4.946506116169816", "t_tol_lj": "0.03333333333333333",
+    result = {"rmax": "4.946506116169816", "t_tol": "0.03333333333333333",
               "n_pairs_below_rmin": "5", "L": "100.0"}
     (sim_dir / "DONE").write_text(json.dumps({"loss": 0.28, "result": result}))
     (sim_dir / "shift_rmse_diagnostics.json").write_text(json.dumps(
@@ -156,5 +156,5 @@ def test_parallel_collector_records_audit(tmp_path):
     assert ok and total == pytest.approx(0.28)
     assert rec["rmax"] == pytest.approx(4.946506116169816)
     assert rec["rmax_over_r0"] == pytest.approx(4.946506116169816 / 2.5)
-    assert rec["t_tol_lj"] == pytest.approx(0.1 / 3.0)
+    assert rec["t_tol"] == pytest.approx(0.1 / 3.0)
     assert (rec["n_pairs_below_rmin"], rec["rmse"], rec["shift"]) == (5, 0.25, 0.03)

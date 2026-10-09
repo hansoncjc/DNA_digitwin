@@ -26,7 +26,7 @@ Expected JSON config layout::
           "density": 0.05,   # number density N/V in particles/σ³ (NOT volume fraction)
           "U_0": 25.0, "r0": 2.2, "n": 12.0, "m": 6.0,
           "N": 5000, "steps": 15000000, "device": "gpu",
-          "potential": "modified_lj", "seed": 42, "plot": false,
+          "potential": "mie_r0", "seed": 42, "plot": false,
           "rmax": 5.0        # optional fixed pair-potential cutoff (σ units)
       },
       "scattering": {

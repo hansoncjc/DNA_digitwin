@@ -5,7 +5,7 @@ import pytest
 from simulation import (
     _repulsive_branch,
     count_close_pairs,
-    modified_LJ,
+    mie_r0,
 )
 
 
@@ -44,11 +44,11 @@ def test_count_is_strictly_below_cut():
     assert count_close_pairs(x, L, 1.5 + 1e-9)[0] == 1
 
 
-def test_modified_lj_branch_matches_the_full_force_below_r0():
+def test_repulsive_branch_matches_the_full_force_below_r0():
     r0, U0, n, m = 2.5, 3.0, 12.0, 6.0
     rmin = 0.5 * r0
     r = np.linspace(rmin, r0, 400, endpoint=False)
-    U, F = modified_LJ(r, rmin, r0, U0, n, m, r0)
+    U, F = mie_r0(r, rmin, r0, U0, n, m, r0)
     Ur, Fr = _repulsive_branch(r, rmin, r0, U0, n, m, r0)
     assert np.allclose(Ur, U + U0)
     assert np.allclose(Fr, F)

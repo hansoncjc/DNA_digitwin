@@ -20,7 +20,7 @@ def _defaults(fn):
 
 def test_simulation_defaults():
     d = _defaults(run_simulation)
-    assert d["potential"] == "modified_lj"
+    assert d["potential"] == "mie_r0"
     assert d["N"] == 5000
     assert d["dt"] == 1e-3
     assert d["steps"] == 22_500_000
@@ -34,7 +34,7 @@ def test_simulation_defaults():
     assert d["log_max_force"] is False
     assert "t_rand" not in d and "dt_hs" not in d and "hs_sigma_follows_rmin" not in d
     assert d["rmax"] is None
-    assert d["t_tol_lj"] is None
+    assert d["t_tol"] is None
     assert d["tail_energy_cut"] is None
     assert simulation.DEFAULT_TAIL_ENERGY_CUT == 0.1
     assert simulation.DEFAULT_RMIN_K == 0.5

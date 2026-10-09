@@ -287,7 +287,7 @@ def _write_iteration_block(filepath: str, iteration: int, total_loss: float, rec
     ------
     # Iteration N,total_loss,<value>
     iteration,dataset_id,loss,k,alpha,A,mu_c,mu_b,sigma_c,sigma_b,K_s,density,n,m,r0,U0,
-        rmax,rmax_over_r0,t_tol_lj,n_pairs_below_rmin,rmse,shift
+        rmax,rmax_over_r0,t_tol,n_pairs_below_rmin,rmse,shift
     N,d0,loss_val,k_val,...
     N,d1,loss_val,k_val,...
     <blank line>
@@ -318,7 +318,7 @@ def _write_iteration_block(filepath: str, iteration: int, total_loss: float, rec
         writer.writerow([])
 
 
-AUDIT_COLUMNS = ("rmax", "rmax_over_r0", "t_tol_lj", "n_pairs_below_rmin", "rmse", "shift")
+AUDIT_COLUMNS = ("rmax", "rmax_over_r0", "t_tol", "n_pairs_below_rmin", "rmse", "shift")
 
 
 def _audit_value(value, cast=float):
@@ -346,7 +346,7 @@ def _audit_fields(sim_result: Optional[Dict[str, Any]], r0: float, save_dir: str
     return {
         "rmax": rmax,
         "rmax_over_r0": rmax / float(r0) if rmax != "" else "",
-        "t_tol_lj": _audit_value(sim_result.get("t_tol_lj")),
+        "t_tol": _audit_value(sim_result.get("t_tol")),
         "n_pairs_below_rmin": _audit_value(sim_result.get("n_pairs_below_rmin"), int),
         "rmse": comps.get("rmse", ""),
         "shift": comps.get("shift", ""),
