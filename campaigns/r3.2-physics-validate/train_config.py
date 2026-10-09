@@ -30,5 +30,5 @@ PARAM_CFG = {
 }
 
 BO_SEED = 0       # torch seed of run_bo; simulations use the run_simulation default seed (42)
-N_ITERS = 200     # upper bound; the master walltime ends the run earlier
+N_ITERS = 99      # acquisitions: 1 initial + 99 = 100 evaluations in total, resumes included
 METRIC = "shift_rmse"   # default shift_rmse parameters; compare over the curve overlap
