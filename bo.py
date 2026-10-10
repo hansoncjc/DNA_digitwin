@@ -453,6 +453,14 @@ def _write_failed_iteration_block(
 
 
 def _failed_trajectory_record(eval_id, ds_id, G, plan=None, reason="FAILED"):
+    """
+    Trajectory row of a dataset that failed in this evaluation.
+
+    ``plan`` holds the resolved density, n, m, r0, U0; both execution paths
+    pass it once ``_resolve_sim_params`` has succeeded, so the row records
+    the values that were simulated. Without it (resolution itself failed)
+    these columns are ``ERROR``.
+    """
     rec = {
         "iteration": eval_id,
         "dataset_id": ds_id,
@@ -1032,9 +1040,11 @@ def make_global_objective(
         # --- Sequential path (original behavior, unchanged) ---
         eval_failed = False
         for ds in datasets:
+            plan = None   # resolved sim inputs, recorded in a failed row
             try:
                 # ---- density, r0, U0, n, m (mapping or direct) ----
                 density, r0, U0, n, m = _resolve_sim_params(ds, G, mode)
+                plan = {"density": density, "n": n, "m": m, "r0": r0, "U0": U0}
 
                 # ---- Output directory ----
                 # New structure: eval_XXX/d0/, eval_XXX/d1/, etc.
@@ -1141,7 +1151,8 @@ def make_global_objective(
                 except Exception:
                     pass
 
-                trajectory_record = _failed_trajectory_record(eval_id, ds.id, G, reason=reason)
+                trajectory_record = _failed_trajectory_record(
+                    eval_id, ds.id, G, plan=plan, reason=reason)
                 objective._iteration_data.append(trajectory_record)
 
         if eval_failed:
