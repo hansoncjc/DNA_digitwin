@@ -246,7 +246,11 @@ Builds a callable `objective(x_unit, ffpath)` that, for one BO query:
      `sim_params_*.csv` carry one column per coefficient, which
      `load_warm_start_from_trajectory` reads back on resume.
    - `"sim"`: takes `density, r0, U0, n, m` directly from the param space,
-     falling back to `dataset.sim.*`.
+     falling back to `dataset.sim.*`. `m_rel` may replace `m`:
+     `m = 4 + m_rel (n - 5)`, so `m_rel` in `[0, 1]` keeps `m` in
+     `[4, n - 1]` while `n` moves. It needs `n` in the param space (free,
+     or `"fixed"`; `n > 5`), excludes `m`, and is written to the `m_rel`
+     column of `bo_trajectory.csv` and `sim_params_*.csv`.
 3. Runs `simulation.run_simulation(...)` (HOOMD). The pair-table
    cutoff is dynamic by default: `t_tol = tail_energy_cut / U_0`
    with `tail_energy_cut = 0.1`, i.e. the attractive tail at `rmax` is
@@ -331,10 +335,68 @@ path), `density` and the potential parameters:
      parameters and loss, with the iteration's total loss in the
      header line. Each dataset row also carries the audit columns
      `rmax`, `rmax_over_r0`, `t_tol`, `n_pairs_below_rmin` and, for
-     `shift_rmse`, `rmse` (M4) and `shift`. Older trajectories without
-     these columns still load in `load_warm_start_from_trajectory`.
+     `shift_rmse`, `rmse` (M4) and `shift`, and `m_rel` (blank unless
+     the param space holds it). Older trajectories without these columns
+     still load in `load_warm_start_from_trajectory`; a missing `m_rel` is
+     reconstructed as `(m - 4)/(n - 5)`.
    - `loss_components.txt` – CSV, one row per successful (iteration,
      dataset): `rmse`, `shift`, `loss` and the iteration's `total_loss`.
+
+---
+
+## Resuming a run (walltime, maintenance, preemption)
+
+`bo.run_bo_resumable(objective, ps, ffpath, out_root, n_iters=..., gp_log_dir=...)`
+is the entry point for a fresh start and for every restart. Resubmitting the
+same master with the same `out_root` continues the run; no eval folder has
+to be renamed or deleted by hand.
+
+What a restart does:
+
+- Loads every successful block of `out_root/bo_trajectory.csv` into the GP.
+- Cap: `n_iters + 1` successful evaluations in total (initial point plus
+  `n_iters` acquisitions), resumes included. Failed evaluations are logged
+  and do not count. A restart that finds the cap reached returns at once.
+- Never reuses an eval id: the next id is one past the largest id in the
+  trajectory or among the `eval_XXX` folders.
+- The folder of the evaluation that was running when the master stopped has
+  no trajectory block. It gets an `ABANDONED` block in `bo_trajectory.csv`
+  and an `ABANDONED` flag file, keeps all its files (its candidate is in
+  `sim_params_<id>.csv`), and is never read again. Every eval id therefore
+  has exactly one block.
+- Appends to `gp_log_dir/gp_log.jsonl` and `gp_log_dir/states/`; the GP
+  `iteration` (number of training points) continues from the loaded count.
+- If the kill cut the last line of `bo_trajectory.csv` or `gp_log.jsonl`,
+  adds the missing newline so the next record starts on its own line. A cut
+  trajectory row is not used; a cut `gp_log.jsonl` line makes `read_gp_log`
+  raise and has to be deleted by hand.
+- Raises before any evaluation if a recorded point lies outside the current
+  search box or a `"fixed"` value differs from the trajectory: the settings
+  changed since the run started. Resume with the original settings or use a
+  new `out_root`.
+- Reseeds torch with `seed`. The run continues on the same data but does not
+  replay the candidates an uninterrupted run would have chosen.
+
+Steps after maintenance, a walltime end or a preemption:
+
+1. Check that the old master has stopped (`squeue -u $USER`). Run one master
+   per `out_root`.
+2. With `parallel=True`, GPU jobs of the last evaluation outlive a master
+   that hit its walltime. Their names are `i<eval>_d<k>`, e.g. `i37_d00`
+   for eval 37, dataset `d0` (retries add `_r<n>`); list them with
+   `squeue -u $USER -o "%i %j"` and `scancel` them. Left running they only
+   write into the abandoned folder.
+3. Resubmit the same sbatch script, from the same repo copy, with the same
+   settings and `out_root`.
+4. Check the first lines of the new master's log:
+   `[resume] .../bo_trajectory.csv: N successful, M failed or abandoned evaluation(s)`,
+   `[resume] eval_XXX has no trajectory block: ABANDONED, not reused, not read`,
+   `[resume] next eval_id=...; successful evaluations N of <cap>; acquisitions left ...`.
+   `bo.inspect_resume(out_root)` gives the same numbers without writing.
+
+Runs started from a commit before this rule (R3.2, pinned at `c54865a`)
+reuse the id of the abandoned folder; follow their driver's note and rename
+that folder by hand before resubmitting.
 
 ---
 
@@ -471,6 +533,6 @@ behaviour changes.
 ### Switching mode
 
 Replace the mapping coefficients in `param_cfg` with
-sim parameters (e.g. `"density"`, `"r0"`, `"U0"`, `"n"`, `"m"`) and pass `mode="sim"` to
+sim parameters (e.g. `"density"`, `"r0"`, `"U0"`, `"n"`, `"m"` or `"m_rel"`) and pass `mode="sim"` to
 `make_global_objective`. `bo._validate_param_mode` rejects any name the mode does not allow
 (e.g. mapping coefficients in `"sim"` mode, or sim parameters in `"map"` mode).

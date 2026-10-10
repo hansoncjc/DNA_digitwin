@@ -11,7 +11,7 @@ Issues already closed are listed at the bottom for context.
 
 ## D. `remaining_bo_iters` assumes every recorded success is an acquisition step
 
-**Where** `bo.py:1103`.
+**Where** `bo.remaining_bo_iters`.
 
 **What** Not a bug in the current code, but a constraint worth remembering:
 
@@ -39,36 +39,23 @@ the Sobol batch, so their `bo_trajectory.csv` files contain `eval_001..008` as
 successful non-acquisition evaluations. Resuming those specific runs would
 mis-count remaining iterations.
 
----
-
-## E. `ParamSpace.phys_to_unit` does not clamp to the unit cube
-
-**Where** `bo.py:212-214`.
-
-**What** The mapping is a plain affine rescale with no bounds check:
-
-```python
-return (x_phys - self._lo_t) / (self._hi_t - self._lo_t)
-```
-
-A physical value outside the current `bounds` maps outside `[0, 1]`.
-
-**When it triggers** Resuming from a `bo_trajectory.csv` that was produced with
-different (wider) bounds than the current `ParamSpace`. The out-of-range points
-are fed to the GP as training data, while `optimize_acqf` still searches only
-`[0, 1]`, so the surrogate is conditioned on regions the optimizer cannot
-propose. Nothing crashes; the search just behaves oddly.
-
-**Why we have never hit it** Each campaign uses its own `OUT_ROOT`, so a
-trajectory is never reused across a bounds change. The narrow/full variants of
-the same campaign are separate directories.
-
-**Possible fix** Clamp to `[0, 1]` and warn when a value is out of range, so a
-bounds mismatch is visible instead of silent.
+**Resume check (2026-10-09)** The assumption holds for `run_bo_resumable`:
+the only successful blocks it writes are the initial point and acquisitions.
+Failed evaluations and the `ABANDONED` blocks written on resume are not
+counted, so the cap of `n_iters + 1` successful evaluations is right across
+any number of restarts.
 
 ---
 
 ## Fixed in this review
+
+- **E.** `ParamSpace.phys_to_unit` does not clamp, so a warm start from a
+  trajectory run with a wider box fed the GP points outside the unit cube
+  that `optimize_acqf` cannot propose. Closed on 2026-10-09:
+  `load_warm_start_from_trajectory` raises when a point is outside the
+  current bounds by more than `WARM_START_UNIT_TOL` (1e-6 in the unit cube;
+  smaller round-off is clamped) and when a fixed value differs from the one
+  recorded in the trajectory. `phys_to_unit` itself is unchanged.
 
 - **C.** `load_warm_start_from_trajectory` could not restore non-fixed
   `local` parameters: `ps._names` labelled them `U0:d0`, while

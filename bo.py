@@ -37,11 +37,13 @@ print("Best params (physical):", ps.decode(best))
 """
 
 import os
+import re
 import json
 import random
 import traceback
 import numpy as np
 import torch
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
 import csv
@@ -74,21 +76,81 @@ DEFAULT_MAX_ACQ_ATTEMPTS = 5
 
 # ------------------------- Modes & param types ------------------------- #
 
-# Parameters that mode="sim" may optimize directly (simulation inputs)
-_SIM_PARAMS = {"density", "r0", "U0", "n", "m"}
+# Parameters that mode="sim" may optimize directly (simulation inputs).
+# m_rel replaces m (see m_from_m_rel); it needs n in the ParamSpace.
+_SIM_PARAMS = {"density", "r0", "U0", "n", "m", "m_rel"}
 
 # Parameters that correspond to mapping coefficients (datasets.physics_map)
 _MAP_PARAMS = set(PHYSICS_COEFFS)
 
 # Coefficient columns of bo_trajectory.csv and sim_params_*.csv, then the
-# simulation parameters. Written in both modes (blank coefficients in "sim").
+# simulation parameters. Written in both modes (blank coefficients in "sim",
+# blank m_rel unless the ParamSpace holds it).
 _TRAJECTORY_PARAM_COLUMNS = ("iteration", "dataset_id", "loss", *PHYSICS_COEFFS,
-                             "density", "n", "m", "r0", "U0")
+                             "density", "n", "m", "r0", "U0", "m_rel")
+
+# m_rel parameterization of the Mie exponent m (mode="sim"):
+#     m = 4 + m_rel (n - 5),   m_rel = (m - 4) / (n - 5)
+# so m_rel in [0, 1] spans m in [4, n - 1] for every n > 5. Same convention
+# as the 2026-08/09 inverse-design drivers (ParamSpaceConstrainedNM).
+M_REL_M_MIN = 4.0
+M_REL_N_MIN = M_REL_M_MIN + 1.0
+
+
+def m_from_m_rel(n: float, m_rel: float) -> float:
+    """``m = 4 + m_rel (n - 5)``; ``n`` must be > 5."""
+    n = float(n)
+    if not n > M_REL_N_MIN:
+        raise ValueError(f"m_rel needs n > {M_REL_N_MIN:g}; got n={n}")
+    return M_REL_M_MIN + float(m_rel) * (n - M_REL_N_MIN)
+
+
+def m_rel_from_m(n: float, m: float) -> float:
+    """``m_rel = (m - 4) / (n - 5)``, the inverse of :func:`m_from_m_rel`."""
+    n = float(n)
+    if not n > M_REL_N_MIN:
+        raise ValueError(f"Cannot reconstruct m_rel from n={n} (needs n > {M_REL_N_MIN:g})")
+    return (float(m) - M_REL_M_MIN) / (n - M_REL_N_MIN)
 
 
 def _coeff_columns(G: Dict[str, Any]) -> Dict[str, Any]:
     """Mapping-coefficient columns for one trajectory / sim_params row."""
     return {name: G.get(name, "") for name in PHYSICS_COEFFS}
+
+
+def _m_rel_column(G: Dict[str, Any]) -> Dict[str, Any]:
+    """``m_rel`` column: the BO value when the ParamSpace holds it, else blank."""
+    return {"m_rel": float(G["m_rel"]) if "m_rel" in G else ""}
+
+
+def _spec_range(spec: Dict[str, Any]) -> Tuple[float, float]:
+    """(lo, hi) of a ParamSpace spec; a fixed spec gives (value, value)."""
+    if "fixed" in spec:
+        v = float(spec["fixed"])
+        return v, v
+    lo, hi = spec["bounds"]
+    return float(lo), float(hi)
+
+
+def _validate_m_rel(cfg: Dict[str, Dict[str, Any]]) -> None:
+    """mode="sim" with m_rel: no m, n present with n > 5, m_rel within [0, 1]."""
+    if "m_rel" not in cfg:
+        return
+    if "m" in cfg:
+        raise ValueError("ParamSpace: give m or m_rel, not both (m = 4 + m_rel (n - 5))")
+    if "n" not in cfg:
+        raise ValueError(
+            "ParamSpace: m_rel needs n in the ParamSpace, free or fixed "
+            "(e.g. \"n\": {\"fixed\": 12.0}); dataset.sim.n is not used with m_rel"
+        )
+    n_lo, _ = _spec_range(cfg["n"])
+    if not n_lo > M_REL_N_MIN:
+        raise ValueError(f"ParamSpace: m_rel needs n > {M_REL_N_MIN:g}; n lower bound is {n_lo}")
+    lo, hi = _spec_range(cfg["m_rel"])
+    if lo < 0.0 or hi > 1.0:
+        raise ValueError(
+            f"ParamSpace: m_rel must lie in [0, 1] (m in [4, n - 1]); got [{lo}, {hi}]"
+        )
 
 
 def _validate_param_mode(ps, mode: str) -> None:
@@ -98,8 +160,8 @@ def _validate_param_mode(ps, mode: str) -> None:
     mode = "map": exactly the physics-based mapping coefficients
         (``datasets.PHYSICS_COEFFS``), each free or "fixed".
         n, m, r0, U0 come from the mapping; density from ``dataset.sim``.
-    mode = "sim": only direct simulation parameters (density, r0, U0, n, m)
-        are allowed.
+    mode = "sim": only direct simulation parameters (density, r0, U0, n, m,
+        or m_rel in place of m) are allowed.
     """
     if mode not in ("map", "sim"):
         raise ValueError(f"Unknown mode '{mode}'. Expected 'map' or 'sim'.")
@@ -124,6 +186,9 @@ def _validate_param_mode(ps, mode: str) -> None:
                 "ParamSpace configuration is inconsistent with mode='sim': "
                 f"not allowed: {sorted(illegal)}; allowed: {sorted(_SIM_PARAMS)}."
             )
+        _validate_m_rel(ps.cfg)
+
+
 def describe_training_config(ps, mode: str) -> str:
     """
     Return a human-readable description of what the BO objective will train,
@@ -267,12 +332,13 @@ def _write_iteration_block(filepath: str, iteration: int, total_loss: float, rec
     records : List[Dict[str, Any]]
         List of parameter/loss records for each dataset in this iteration.
         Each record should have keys: iteration, dataset_id, loss, the
-        mapping coefficients (PHYSICS_COEFFS), density, n, m, r0, U0, audit columns.
+        mapping coefficients (PHYSICS_COEFFS), density, n, m, r0, U0, m_rel,
+        audit columns.
 
     Format
     ------
     # Iteration N,total_loss,<value>
-    iteration,dataset_id,loss,k,A,K_s,a_m,delta,density,n,m,r0,U0,
+    iteration,dataset_id,loss,k,A,K_s,a_m,delta,density,n,m,r0,U0,m_rel,
         rmax,rmax_over_r0,t_tol,n_pairs_below_rmin,rmse,shift
     N,d0,loss_val,k_val,...
     N,d1,loss_val,k_val,...
@@ -366,14 +432,19 @@ def _write_failed_iteration_block(
     iteration: int,
     records: List[Dict[str, Any]],
     reason: str = "",
+    status: str = "FAILED",
 ):
-    """Append a trajectory block for a failed evaluation (not used by the GP)."""
+    """Append a trajectory block for a failed evaluation (not used by the GP).
+
+    ``status`` is ``FAILED``, or ``ABANDONED`` for an evaluation that a
+    resume found without a block (``run_bo_resumable``; no rows).
+    """
     write_header = not os.path.exists(filepath)
     with open(filepath, "a", newline="") as f:
         writer = csv.writer(f)
         if write_header:
             writer.writerow(list(_TRAJECTORY_PARAM_COLUMNS))
-        writer.writerow([f"# Iteration {iteration}", "EVALUATION", "FAILED", reason])
+        writer.writerow([f"# Iteration {iteration}", "EVALUATION", status, reason])
         if records:
             writer.writerows([
                 [r.get(c, "") for c in _TRAJECTORY_PARAM_COLUMNS]
@@ -392,6 +463,7 @@ def _failed_trajectory_record(eval_id, ds_id, G, plan=None, reason="FAILED"):
         "m": "ERROR",
         "r0": "ERROR",
         "U0": "ERROR",
+        **_m_rel_column(G),
     }
     if plan is not None:
         rec.update({
@@ -435,6 +507,8 @@ def _resolve_sim_params(ds, G: Dict[str, Any], mode: str):
     which fails the evaluation (it is logged, not fed to the GP).
 
     mode="sim": density, r0, U0, n, m from the ParamSpace, then ``dataset.sim``.
+    With ``m_rel`` in the ParamSpace, ``m = 4 + m_rel (n - 5)`` (``n`` from the
+    ParamSpace; ``_validate_m_rel``).
     """
     if mode == "map":
         if getattr(ds.sim, "density", None) is None:
@@ -447,7 +521,12 @@ def _resolve_sim_params(ds, G: Dict[str, Any], mode: str):
         return float(ds.sim.density), p["r0"], p["U0"], p["n"], p["m"]
 
     n = float(G["n"]) if "n" in G else float(ds.sim.n)
-    m = float(G["m"]) if "m" in G else float(ds.sim.m)
+    if "m_rel" in G:
+        if "m" in G or "n" not in G:
+            raise ValueError("m_rel needs n and excludes m in the ParamSpace")
+        m = m_from_m_rel(n, G["m_rel"])
+    else:
+        m = float(G["m"]) if "m" in G else float(ds.sim.m)
     values = {}
     for name in ("density", "r0", "U0"):
         if name in G:
@@ -506,6 +585,7 @@ def _parallel_prepare_eval_jobs(
                 "m": float(m),
                 "r0": float(r0),
                 "U0": float(U0),
+                **_m_rel_column(G),
             }
             param_path = os.path.join(save_dir, f"sim_params_{ds.id}.csv")
             with open(param_path, "w", newline="") as f:
@@ -628,6 +708,7 @@ def _collect_parallel_eval_loss(
                 "m":       float(plan["m"]),
                 "r0":      float(plan["r0"]),
                 "U0":      float(plan["U0"]),
+                **_m_rel_column(G),
                 **_audit_fields(done_data.get("result"), plan["r0"], str(job.sim_dir)),
             })
         elif job is not None and job.done_status == "METRIC_FAILED":
@@ -825,7 +906,10 @@ def make_global_objective(
         limits fails the evaluation.
     "sim":
         density, r0, U0, n, m from the ParamSpace, then dataset.sim.*.
-        Only these five names are allowed.
+        Only these five names are allowed, or ``m_rel`` in place of ``m``:
+        ``m = 4 + m_rel (n - 5)``, so ``m_rel`` in [0, 1] keeps m in
+        [4, n - 1]. ``m_rel`` needs ``n`` in the ParamSpace (free or fixed,
+        n > 5) and is written to the ``m_rel`` trajectory column.
 
     "trim_tail":
         number of points to drop from the end of the curve returned by
@@ -969,6 +1053,7 @@ def make_global_objective(
                     "m": float(m),
                     "r0": float(r0),
                     "U0": float(U0),
+                    **_m_rel_column(G),
                 }
                 param_path = os.path.join(save_dir, f"sim_params_{ds.id}.csv")
                 with open(param_path, "w", newline="") as f:
@@ -1042,6 +1127,7 @@ def make_global_objective(
                     "m": float(m),
                     "r0": float(r0),
                     "U0": float(U0),
+                    **_m_rel_column(G),
                     **_audit_fields(sim_result, r0, save_dir),
                 }
                 objective._iteration_data.append(trajectory_record)
@@ -1094,6 +1180,23 @@ def make_global_objective(
 
 
 # ------------------------- Warm start from trajectory ------------------------- #
+#
+# Resume rules (run_bo_resumable):
+# - The evaluation cap counts successful evaluations, resumes included: one
+#   initial point plus ``n_iters`` acquisitions. Failed evaluations are logged
+#   and do not count.
+# - Eval ids are never reused: the next id is one past the largest id in
+#   bo_trajectory.csv or among the eval_XXX folders.
+# - An eval_XXX folder without a trajectory block (the run stopped during that
+#   evaluation) is left as it is, gets an ABANDONED flag and an ABANDONED
+#   trajectory block, and is never read again.
+# - Every successful point must lie inside the current search box, and fixed
+#   values must match the trajectory; otherwise the resume raises.
+
+WARM_START_UNIT_TOL = 1e-6
+ABANDONED_FLAG = "ABANDONED"
+_EVAL_DIR_RE = re.compile(r"^eval_(\d+)$")
+
 
 def remaining_bo_iters(n_iters: int, n_successful: int) -> int:
     """
@@ -1108,33 +1211,19 @@ def remaining_bo_iters(n_iters: int, n_successful: int) -> int:
     return max(0, n_iters - (n_successful - 1))
 
 
-def load_warm_start_from_trajectory(
-    trajectory_path: os.PathLike,
-    ps: ParamSpace,
-    *,
-    loss_penalty_threshold: float = 1e8,
-    m_rel: bool = False,
-) -> Optional[Tuple[torch.Tensor, torch.Tensor, int]]:
+def _read_trajectory(
+    path: Path, loss_penalty_threshold: float,
+) -> Tuple[List[Tuple[int, float, Dict[str, str]]], set]:
     """
-    Build ``run_bo`` warm-start tensors from ``bo_trajectory.csv``.
+    Parse ``bo_trajectory.csv``.
 
-    Returns ``(train_x, train_y, next_eval_id)`` or ``None`` if no successful
-    iterations are found. Failed blocks (penalty loss, ERROR rows, EVALUATION
-    FAILED headers) are skipped for the GP but still advance ``next_eval_id`` so
-    eval folder indices do not collide with prior attempts.
-
-    Parameters
-    ----------
-    m_rel
-        If True, reconstruct ``m_rel`` from trajectory ``m`` and ``n`` via
-        ``m_rel = (m - 3) / (n - 4)`` (``ParamSpaceConstrainedNM`` convention).
+    Returns ``(successful, block_ids)``: one ``(iteration, total_loss, row)``
+    per successful block (its first dataset row, as ``{column: value}``) and
+    the ids of every block, failed ones included. A row shorter than its
+    header (a block cut off when the run was killed) is not used.
     """
-    path = Path(trajectory_path)
-    if not path.is_file():
-        return None
-
     successful: List[Tuple[int, float, Dict[str, str]]] = []
-    max_eval_id = -1
+    block_ids = set()
     pending_iter: Optional[int] = None
     pending_loss: Optional[float] = None
     header: Optional[Dict[str, int]] = None
@@ -1156,7 +1245,7 @@ def load_warm_start_from_trajectory(
                     pending_loss = None
                     continue
 
-                max_eval_id = max(max_eval_id, iter_num)
+                block_ids.add(iter_num)
                 pending_iter = None
                 pending_loss = None
 
@@ -1181,8 +1270,15 @@ def load_warm_start_from_trajectory(
             if str(row[0]) != str(pending_iter):
                 continue
 
-            rec = {name: row[idx] for name, idx in header.items() if idx < len(row)}
-            if rec.get("loss") in ("ERROR", "FAILED") or rec.get("n") == "ERROR":
+            if len(row) < len(header):
+                print(f"[warm start] eval {pending_iter}: trajectory row is incomplete; not used")
+                pending_iter = None
+                pending_loss = None
+                continue
+
+            rec = {name: row[idx] for name, idx in header.items()}
+            if (rec.get("loss") in ("ERROR", "FAILED", "METRIC_FAILED")
+                    or rec.get("n") == "ERROR"):
                 pending_iter = None
                 pending_loss = None
                 continue
@@ -1191,41 +1287,183 @@ def load_warm_start_from_trajectory(
             pending_iter = None
             pending_loss = None
 
+    successful.sort(key=lambda item: item[0])
+    return successful, block_ids
+
+
+def _warm_start_value(name: str, rec: Dict[str, str], iter_num: int) -> float:
+    """Physical value of vector entry ``name`` for one trajectory row."""
+    if name != "m_rel":
+        return float(rec[name])
+    recon = m_rel_from_m(rec["n"], rec["m"])
+    stored = rec.get("m_rel", "")
+    if stored == "":
+        # Trajectories without the m_rel column (the 2026-08/09 drivers)
+        # used the same convention.
+        return recon
+    value = float(stored)
+    if abs(value - recon) > 1e-9:
+        raise ValueError(
+            f"bo_trajectory.csv eval {iter_num}: m_rel={value} but "
+            f"(m - 4)/(n - 5) = {recon} for n={rec['n']}, m={rec['m']}"
+        )
+    return value
+
+
+def _check_fixed_values(ps: ParamSpace, rec: Dict[str, str], iter_num: int) -> None:
+    """A fixed parameter must have the value the trajectory was run with."""
+    for name, value in ps._fixed.items():
+        stored = rec.get(name, "")
+        if stored in ("", "ERROR"):
+            continue
+        if not np.isclose(float(stored), value, rtol=1e-9, atol=1e-12):
+            raise ValueError(
+                f"bo_trajectory.csv eval {iter_num}: {name}={stored}, but the "
+                f"ParamSpace fixes {name}={value}. Resume with the settings the run "
+                "was started with, or start a new out_root."
+            )
+
+
+def _unit_point(ps: ParamSpace, phys_vals: List[float], iter_num: int) -> torch.Tensor:
+    """Unit-cube point of a trajectory row; raises if it is outside the box."""
+    x_unit = ps.phys_to_unit(torch.tensor(phys_vals, dtype=torch.float64))
+    outside = (x_unit < -WARM_START_UNIT_TOL) | (x_unit > 1.0 + WARM_START_UNIT_TOL)
+    if bool(outside.any()):
+        details = ", ".join(
+            f"{name}={val:g} not in [{lo:g}, {hi:g}]"
+            for name, val, lo, hi, bad in zip(ps._names, phys_vals, ps._lo, ps._hi,
+                                              outside.tolist())
+            if bad
+        )
+        raise ValueError(
+            f"bo_trajectory.csv eval {iter_num}: {details}. The search box differs "
+            "from the one the run was started with; resume with the original "
+            "bounds or start a new out_root."
+        )
+    # Round-off from the CSV round trip only.
+    return x_unit.clamp(0.0, 1.0)
+
+
+def load_warm_start_from_trajectory(
+    trajectory_path: os.PathLike,
+    ps: ParamSpace,
+    *,
+    loss_penalty_threshold: float = 1e8,
+) -> Optional[Tuple[torch.Tensor, torch.Tensor, int]]:
+    """
+    Build ``run_bo`` warm-start tensors from ``bo_trajectory.csv``.
+
+    Returns ``(train_x, train_y, next_eval_id)`` or ``None`` if no successful
+    iterations are found. Failed blocks (penalty loss, ERROR rows, EVALUATION
+    FAILED headers) are skipped for the GP but still advance ``next_eval_id`` so
+    eval folder indices do not collide with prior attempts.
+
+    ``m_rel`` (when the ParamSpace holds it) is read from the ``m_rel`` column
+    and checked against ``(m - 4)/(n - 5)``; trajectories without that column
+    are reconstructed with the same formula.
+
+    Raises ``ValueError`` when a successful point lies outside the current
+    bounds (beyond round-off, ``WARM_START_UNIT_TOL`` in the unit cube) or a
+    fixed parameter differs from the trajectory: the run was started with
+    another box or another fixed value.
+    """
+    path = Path(trajectory_path)
+    if not path.is_file():
+        return None
+
+    successful, block_ids = _read_trajectory(path, loss_penalty_threshold)
     if not successful:
         return None
 
-    successful.sort(key=lambda item: item[0])
     x_rows: List[torch.Tensor] = []
     y_rows: List[float] = []
 
-    for _iter_num, total_loss, rec in successful:
-        n_val = float(rec["n"])
-        m_val = float(rec["m"])
-        phys_vals: List[float] = []
-        for name in ps._names:
-            if name == "m_rel":
-                if not m_rel:
-                    raise ValueError(
-                        "ParamSpace uses m_rel but load_warm_start_from_trajectory "
-                        "was called with m_rel=False"
-                    )
-                span = n_val - 4.0
-                if span <= 0.0:
-                    raise ValueError(
-                        f"Cannot reconstruct m_rel from trajectory n={n_val}"
-                    )
-                phys_vals.append((m_val - 3.0) / span)
-            else:
-                phys_vals.append(float(rec[name]))
-
-        x_phys = torch.tensor(phys_vals, dtype=torch.float64)
-        x_rows.append(ps.phys_to_unit(x_phys))
+    for iter_num, total_loss, rec in successful:
+        _check_fixed_values(ps, rec, iter_num)
+        phys_vals = [_warm_start_value(name, rec, iter_num) for name in ps._names]
+        x_rows.append(_unit_point(ps, phys_vals, iter_num))
         y_rows.append(-float(total_loss))
 
     train_x = torch.stack(x_rows)
     train_y = torch.tensor(y_rows, dtype=torch.float64).reshape(-1, 1)
-    next_eval_id = max_eval_id + 1
+    next_eval_id = max(block_ids) + 1
     return train_x, train_y, next_eval_id
+
+
+def _eval_dirs(out_root: os.PathLike) -> Dict[int, Path]:
+    """``{id: path}`` of the ``eval_XXX`` folders (other names are ignored)."""
+    root = Path(out_root)
+    out: Dict[int, Path] = {}
+    if root.is_dir():
+        for p in root.iterdir():
+            m = _EVAL_DIR_RE.match(p.name)
+            if m and p.is_dir():
+                out[int(m.group(1))] = p
+    return out
+
+
+def inspect_resume(out_root: os.PathLike) -> Dict[str, Any]:
+    """
+    What a resume of ``out_root`` would start from, without changing anything.
+
+    Returns a dict with ``n_successful`` (successful blocks in
+    ``bo_trajectory.csv``), ``failed_ids`` (blocks that failed), ``folder_ids``
+    (``eval_XXX`` folders), ``orphan_ids`` (folders without a trajectory
+    block) and ``next_eval_id`` (one past every id seen).
+    """
+    traj = Path(out_root) / "bo_trajectory.csv"
+    successful, block_ids = (
+        _read_trajectory(traj, 1e8) if traj.is_file() else ([], set())
+    )
+    folders = _eval_dirs(out_root)
+    ok_ids = {item[0] for item in successful}
+    return {
+        "n_successful": len(successful),
+        "failed_ids": sorted(block_ids - ok_ids),
+        "folder_ids": sorted(folders),
+        "orphan_ids": sorted(set(folders) - block_ids),
+        "next_eval_id": max([-1, *block_ids, *folders]) + 1,
+    }
+
+
+def _mark_abandoned(out_root: os.PathLike, eval_ids: List[int], next_eval_id: int) -> None:
+    """
+    Record each eval folder that has no trajectory block: an ``ABANDONED``
+    block in ``bo_trajectory.csv`` (so every eval id has a block) and an
+    ``ABANDONED`` flag in the folder. Nothing in the folder is changed.
+    """
+    folders = _eval_dirs(out_root)
+    reason = "no bo_trajectory.csv block when the run was resumed"
+    for eval_id in eval_ids:
+        flag = folders[eval_id] / ABANDONED_FLAG
+        if not flag.exists():
+            flag.write_text(json.dumps({
+                "eval_id": eval_id,
+                "reason": reason,
+                "marked_at": datetime.now().isoformat(timespec="seconds"),
+                "resumed_at_eval_id": next_eval_id,
+            }) + "\n")
+        _write_failed_iteration_block(
+            os.path.join(out_root, "bo_trajectory.csv"), eval_id, [],
+            reason=reason, status=ABANDONED_FLAG,
+        )
+        print(f"[resume] eval_{eval_id:03d} has no trajectory block: "
+              f"{ABANDONED_FLAG}, not reused, not read")
+
+
+def _ensure_trailing_newline(path: os.PathLike) -> None:
+    """A write cut by a kill can leave a last line without its newline; the
+    next append would then join it. Add the newline (nothing is removed)."""
+    p = Path(path)
+    if not p.is_file() or p.stat().st_size == 0:
+        return
+    with open(p, "rb") as fh:
+        fh.seek(-1, os.SEEK_END)
+        last = fh.read(1)
+    if last != b"\n":
+        with open(p, "ab") as fh:
+            fh.write(b"\n")
+        print(f"[resume] {p}: last line had no newline (write interrupted); added one")
 
 
 def run_bo_resumable(
@@ -1236,15 +1474,30 @@ def run_bo_resumable(
     n_iters: int = 20,
     seed: int = 0,
     *,
-    m_rel: bool = False,
     max_acq_attempts: int = DEFAULT_MAX_ACQ_ATTEMPTS,
     gp_log_dir: Optional[str] = None,
 ) -> Tuple[torch.Tensor, List[float]]:
     """
     Run ``run_bo``, resuming from ``<out_root>/bo_trajectory.csv`` when present.
 
-    Sets ``objective_fn._eval_id`` so the next eval folder index does not collide
-    with prior attempts (including failed iterations).
+    The single entry point for a fresh start and for every restart, whatever
+    stopped the previous master (walltime, maintenance, preemption):
+
+    - At most ``n_iters + 1`` successful evaluations in total (initial point
+      plus ``n_iters`` acquisitions), resumes included. Failed evaluations
+      do not count.
+    - ``objective_fn._eval_id`` is set one past every id in the trajectory and
+      every ``eval_XXX`` folder, so no eval id is reused.
+    - A folder without a trajectory block gets an ``ABANDONED`` flag and an
+      ``ABANDONED`` trajectory block, and is not read again; its files stay
+      where they are.
+    - With ``gp_log_dir``, ``gp_log.jsonl`` and ``states/`` are appended to;
+      the GP ``iteration`` continues from the loaded count.
+    - Raises ``ValueError`` if a recorded point is outside the current box or
+      a fixed value changed (``load_warm_start_from_trajectory``).
+
+    A resumed run reseeds torch with ``seed``; it continues the same data but
+    does not replay the candidates an uninterrupted run would have chosen.
 
     Parameters
     ----------
@@ -1253,31 +1506,41 @@ def run_bo_resumable(
         requested iteration, ``run_bo`` is not called and nothing new is written.
     """
     trajectory_path = os.path.join(out_root, "bo_trajectory.csv")
-    warm = load_warm_start_from_trajectory(trajectory_path, ps, m_rel=m_rel)
+    _ensure_trailing_newline(trajectory_path)
+    if gp_log_dir is not None:
+        _ensure_trailing_newline(os.path.join(os.fspath(gp_log_dir), "gp_log.jsonl"))
+
+    state = inspect_resume(out_root)
+    warm = load_warm_start_from_trajectory(trajectory_path, ps)
+    next_eval_id = max(int(getattr(objective_fn, "_eval_id", 0)), state["next_eval_id"])
+    objective_fn._eval_id = next_eval_id
 
     warm_start = None
     remaining = n_iters
     if warm is not None:
-        train_x, train_y, next_eval_id = warm
+        train_x, train_y, _ = warm
         warm_start = (train_x, train_y)
-        objective_fn._eval_id = next_eval_id
         remaining = remaining_bo_iters(n_iters, train_x.shape[0])
+    n_loaded = 0 if warm is None else int(warm[0].shape[0])
+    if state["folder_ids"] or n_loaded or state["failed_ids"]:
         print(
-            f"[warm start] loaded {train_x.shape[0]} successful eval(s) from "
-            f"{trajectory_path}"
+            f"[resume] {trajectory_path}: {n_loaded} successful, "
+            f"{len(state['failed_ids'])} failed or abandoned evaluation(s)"
         )
-        print(
-            f"[warm start] next eval_id={next_eval_id}, "
-            f"remaining BO iterations={remaining}"
-        )
+    _mark_abandoned(out_root, state["orphan_ids"], next_eval_id)
+    print(
+        f"[resume] next eval_id={next_eval_id}; successful evaluations "
+        f"{n_loaded} of {n_iters + 1}; acquisitions left {remaining}"
+        + ("" if warm is not None else " (cold start: initial point first)")
+    )
 
-        if remaining == 0:
-            y = train_y.squeeze(-1).detach().cpu().numpy()
-            history = [-float(v) for v in y]
-            best_idx = int(np.argmin(history))
-            best_x_phys = ps.unit_to_phys(train_x[best_idx])
-            print("[warm start] target iteration count already reached; skipping run_bo")
-            return best_x_phys, history
+    if warm is not None and remaining == 0:
+        y = train_y.squeeze(-1).detach().cpu().numpy()
+        history = [-float(v) for v in y]
+        best_idx = int(np.argmin(history))
+        best_x_phys = ps.unit_to_phys(train_x[best_idx])
+        print("[resume] evaluation cap already reached; skipping run_bo")
+        return best_x_phys, history
 
     return run_bo(
         objective_fn=objective_fn,
