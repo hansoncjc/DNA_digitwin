@@ -2,14 +2,20 @@
 R3.2 driver: BO over the physics-based mapping coefficients against the
 ground truth in GT_ROOT, one GPU job per training condition per evaluation.
 
-    python run_r32.py --gt GT_ROOT --out OUT_ROOT [--n-iters 200]
+    python run_r32.py --gt GT_ROOT --out OUT_ROOT [--n-iters N]   # default train_config.N_ITERS
     python run_r32.py --gt GT_SMOKE --out OUT_SMOKE --smoke --steps 200000
     python run_r32.py --gt GT_ROOT --out OUT_TRUTH --truth      # one evaluation at the ground truth
 
-Resumes from OUT_ROOT/bo_trajectory.csv when it exists (run_bo_resumable).
-Before resuming a run that was killed mid-evaluation, rename the last
-OUT_ROOT/eval_XXX folder that has no trajectory block: it keeps the old
-candidate's DONE flags and its id is reused.
+Resumes from OUT_ROOT/bo_trajectory.csv when it exists (run_bo_resumable):
+resubmit the same command after a walltime, maintenance or preemption. The
+evaluation that was cut off is marked ABANDONED and never read, the next id is
+past every existing eval_XXX folder, and the cap of N_ITERS + 1 successful
+evaluations counts the earlier ones. ``bo.inspect_resume(OUT_ROOT)`` shows what
+a restart would load without writing anything.
+
+Loss: shift_rmse with its defaults. The flat hold at the low-q end of the
+overlap was fixed on 2026-10-09; the first R3.2 attempt ran before the fix
+and was discarded.
 
 --truth evaluates the objective once at the R3.1 ground truth (BO seed 42,
 ground truth seed 1); the per-condition loss is the stochastic floor used

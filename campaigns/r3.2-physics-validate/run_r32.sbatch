@@ -2,8 +2,9 @@
 # R3.2 master (CPU): submits one GPU job per training condition per evaluation.
 # Run it from a checkout pinned at the commit it was started with (R32_REPO), so
 # pulls into the working clone do not change the code of later GPU jobs.
-# Walltime must end before the 2026-10-13 09:00 maintenance; resubmit after it
-# to resume (see run_r32.py about the last eval folder).
+# Walltime must end before the 2026-10-13 09:00 maintenance; resubmit the same
+# command from the same run directory to resume (run_bo_resumable marks a cut-off
+# evaluation ABANDONED and continues; see run_r32.py).
 #   sbatch $REPO/campaigns/r3.2-physics-validate/run_r32.sbatch
 # Smoke test: sbatch --time=04:00:00 --export=ALL,R32_ARGS="--smoke --steps 200000",R32_GT=gt_smoke,R32_OUT=out_smoke ...
 #SBATCH -J r32_master

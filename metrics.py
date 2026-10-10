@@ -483,7 +483,14 @@ def asymptote_scale(
 def _resample_reduced(exp_curve, sim_curve, window, exp_scale, sim_scale, n_points):
     """Resample both curves onto a log grid in reduced x = q / scale.
 
-    Out-of-range grid points hold the first/last in-window intensity.
+    The grid spans the window [lo, hi] (overlap of both curves); each curve
+    is interpolated from all of its samples, so a grid point between a
+    curve's last sample below lo and its first sample inside the window is
+    interpolated, not held. Until 2026-10-09 the interpolators used only the
+    in-window samples and held the first in-window value down to lo: the
+    curve whose first sample fell just below lo was flat over its whole
+    first q bin (about 30 of 512 points at the low-q end), and which curve
+    that was flipped with the sign of ln(q1_sim / q1_tgt) near 0.
     """
     qe = exp_curve[:, 0] / exp_scale
     ie = exp_curve[:, 1]
@@ -503,13 +510,15 @@ def _resample_reduced(exp_curve, sim_curve, window, exp_scale, sim_scale, n_poin
         )
 
     grid = np.logspace(np.log10(lo), np.log10(hi), int(n_points))
+    # The grid lies inside both data ranges, so the end-value fill only
+    # absorbs rounding at lo / hi.
     i_exp = interp1d(
-        qe[me], ie[me], kind="linear", bounds_error=False,
-        fill_value=(float(ie[me][0]), float(ie[me][-1])),
+        qe, ie, kind="linear", bounds_error=False,
+        fill_value=(float(ie[0]), float(ie[-1])),
     )(grid)
     i_sim = interp1d(
-        qs[ms], isim[ms], kind="linear", bounds_error=False,
-        fill_value=(float(isim[ms][0]), float(isim[ms][-1])),
+        qs, isim, kind="linear", bounds_error=False,
+        fill_value=(float(isim[0]), float(isim[-1])),
     )(grid)
     eps = 1e-10
     i_exp = np.clip(i_exp, eps, None)

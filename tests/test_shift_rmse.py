@@ -1,21 +1,12 @@
 """
 shift_rmse (metrics.shift_rmse_loss / compare_to_exp_saxsfft) on synthetic curves.
 
-Reference values
-----------------
-FCC_REFS and FLUID_REFS were generated on 2026-10-06 by running
-``aligned_log_mse(exp, sim, window, n_points=512)`` from the inverse-driver
-module ``shift_mse_metric.py`` (cluster copy, 11060 bytes,
-md5 63c953ab476cb4b5f139f066e571a78a) on the curves built below with
-``tests/shift_rmse_curves.py``. FLUID_REFS used that module with the HS-fluid
-driver's ``install_fluid_metric_patches`` overrides (peak search
-(0.015, 0.040), baseline (0.012, 0.018), asymptote band (0.095, 0.120)).
-numpy 2.3.4, scipy 1.16.3.
-
-Since 2026-10-08 the baseline is the smoothed minimum in the search window
-and the defaults are the task-0b choice, so these regressions pass the old
-settings explicitly (OLD_FCC, FLUID). The baseline change does not move any
-of these curves' results.
+OLD_FCC and FLUID are the peak-search, asymptote and fallback settings of the
+2026-08/09 inverse-design drivers, used here only as non-default parameters.
+The bit-for-bit regressions against the driver module ``shift_mse_metric.py``
+(FCC_REFS, FLUID_REFS, 2026-10-06) were removed on 2026-10-09: that module
+interpolated only in-window samples and held the low-q end flat, which the
+repo no longer does (tests/test_resample_overlap.py).
 """
 import json
 
@@ -39,20 +30,6 @@ OLD_FCC = dict(
 FLUID = dict(OLD_FCC, peak_search_range=(0.015, 0.040), asymptote_band=(0.095, 0.120))
 FLUID_WINDOWS = {"narrow": (0.01, 0.09), "full": (0.001, 0.10)}
 
-FCC_REFS = {
-    "q1_0125": dict(loss=0.09268197323970943, m4=0.060884449807211166, shift_term=0.03179752343249827, q1_tgt=0.012899780349579502, q1_sim=0.012496052077544085, anchor_scale=1.258531353940096),
-    "q1_0145": dict(loss=0.1729841948320401, m4=0.0571883306388539, shift_term=0.1157958641931862, q1_tgt=0.012899780349579502, q1_sim=0.014483443192848427, anchor_scale=1.2510478211077305),
-    "flat_sim": dict(loss=1.288674754867407, m4=0.5235955154302656, shift_term=0.7650792394371413, q1_tgt=0.012899780349579502, q1_sim=0.006002229866614646, anchor_scale=0.999999999912206),
-    "truncated_sim": dict(loss=0.02712444101961923, m4=0.011388265062968592, shift_term=0.015736175956650635, q1_tgt=0.012899780349579502, q1_sim=0.013104379142261714, anchor_scale=0.999999999999609),
-}
-FLUID_REFS = {
-    "narrow_q1_025": dict(loss=0.22656555307456194, m4=0.1853728561637912, shift_term=0.04119269691077073, q1_tgt=0.025658148360582524, q1_sim=0.024622693042949728, anchor_scale=1.0004849572539856),
-    "narrow_q1_029": dict(loss=0.17899961976316545, m4=0.13001923942132632, shift_term=0.04898038034183914, q1_tgt=0.025658148360582524, q1_sim=0.026946180890546602, anchor_scale=0.9034145374748166),
-    "full_q1_025": dict(loss=0.17408427693252151, m4=0.13289158002175078, shift_term=0.04119269691077073, q1_tgt=0.025658148360582524, q1_sim=0.024622693042949728, anchor_scale=1.0004849572539856),
-    "full_q1_029": dict(loss=0.15451971484038038, m4=0.10553933449854125, shift_term=0.04898038034183914, q1_tgt=0.025658148360582524, q1_sim=0.026946180890546602, anchor_scale=0.9034145374748166),
-}
-
-
 def _qa():
     return saxsfft_q()
 
@@ -69,31 +46,6 @@ FLUID_SIMS = {
 }
 
 
-def _check(ref, loss, diag):
-    assert loss == pytest.approx(ref["loss"], rel=1e-12, abs=1e-14)
-    for key in ("m4", "shift_term", "q1_tgt", "q1_sim", "anchor_scale"):
-        assert diag[key] == pytest.approx(ref[key], rel=1e-12, abs=1e-14), key
-
-
-# ---------------- regression against the driver module ---------------- #
-
-@pytest.mark.parametrize("name", sorted(FCC_REFS))
-def test_old_fcc_params_match_driver_module_on_w_narrow(name):
-    loss, diag, *_ = shift_rmse_loss(crystal_curve(), FCC_SIMS[name](), W_NARROW,
-                                    metric_kwargs=OLD_FCC)
-    _check(FCC_REFS[name], loss, diag)
-
-
-@pytest.mark.parametrize("window", sorted(FLUID_WINDOWS))
-@pytest.mark.parametrize("sim", sorted(FLUID_SIMS))
-def test_fluid_params_match_fluid_driver_patch(window, sim):
-    loss, diag, *_ = shift_rmse_loss(
-        fluid_curve(), FLUID_SIMS[sim](), FLUID_WINDOWS[window], metric_kwargs=FLUID,
-    )
-    _check(FLUID_REFS[f"{window}_{sim}"], loss, diag)
-    assert diag["params"]["peak_search_range"] == [0.015, 0.040]
-
-
 def test_identical_curves_give_zero():
     loss, diag, *_ = shift_rmse_loss(crystal_curve(), crystal_curve(), None)
     assert loss == 0.0 and diag["q1_ratio"] == 1.0 and diag["aligned"] is True
@@ -104,13 +56,14 @@ def test_identical_curves_give_zero():
 @pytest.mark.parametrize("lam", [0.0, 1.0, 2.5])
 def test_lambda_weights_only_the_shift_term(lam):
     sim = FCC_SIMS["q1_0145"]()
+    ref = shift_rmse_loss(crystal_curve(), sim, W_NARROW,
+                          metric_kwargs=dict(OLD_FCC, lambda_shift=0.0))[1]
     loss, diag, *_ = shift_rmse_loss(crystal_curve(), sim, W_NARROW,
                                     metric_kwargs=dict(OLD_FCC, lambda_shift=lam))
-    ref = FCC_REFS["q1_0145"]
     assert diag["m4"] == pytest.approx(ref["m4"], rel=1e-12)
-    assert diag["abs_log_q1_ratio"] == pytest.approx(ref["shift_term"], rel=1e-12)
-    assert diag["shift_term"] == pytest.approx(lam * ref["shift_term"], rel=1e-12)
-    assert loss == pytest.approx(ref["m4"] + lam * ref["shift_term"], rel=1e-12)
+    assert diag["abs_log_q1_ratio"] == pytest.approx(abs(np.log(diag["q1_sim"] / diag["q1_tgt"])))
+    assert diag["shift_term"] == pytest.approx(lam * diag["abs_log_q1_ratio"], rel=1e-12)
+    assert loss == pytest.approx(ref["m4"] + lam * diag["abs_log_q1_ratio"], rel=1e-12)
 
 
 # ---------------- q_range=None ---------------- #
@@ -147,7 +100,7 @@ def test_larger_overlap_trim_narrows_window():
 def test_no_peak_fallback_is_flagged():
     loss, diag, *_ = shift_rmse_loss(crystal_curve(), flat_curve(), W_NARROW,
                                     metric_kwargs=OLD_FCC)
-    _check(FCC_REFS["flat_sim"], loss, diag)
+    assert np.isfinite(loss) and diag["shift_term"] > 0
     assert diag["dispersed_sim"] is False
     assert diag["peak_sim"]["n_peaks_found"] == 0
     assert diag["fallbacks"]["peak_sim_max_fallback"] is True
@@ -159,7 +112,9 @@ def test_no_peak_fail_is_default():
         shift_rmse_loss(crystal_curve(), flat_curve(), W_NARROW)
     loss, *_ = shift_rmse_loss(crystal_curve(), FCC_SIMS["q1_0125"](), W_NARROW,
                               metric_kwargs=dict(OLD_FCC, no_peak="fail"))
-    assert loss == pytest.approx(FCC_REFS["q1_0125"]["loss"], rel=1e-12)
+    same, *_ = shift_rmse_loss(crystal_curve(), FCC_SIMS["q1_0125"](), W_NARROW,
+                              metric_kwargs=OLD_FCC)
+    assert loss == pytest.approx(same, rel=1e-12)   # a curve with a peak: no_peak irrelevant
 
 
 # ---------------- baseline and dispersed curves ---------------- #
@@ -222,7 +177,7 @@ def test_too_few_search_points_always_fails():
 def test_asymptote_tail_fallback_is_flagged():
     loss, diag, *_ = shift_rmse_loss(crystal_curve(), FCC_SIMS["truncated_sim"](), W_NARROW,
                                     metric_kwargs=OLD_FCC)
-    _check(FCC_REFS["truncated_sim"], loss, diag)
+    assert np.isfinite(loss)
     assert diag["fallbacks"]["asymptote_sim_tail_fallback"] is True
     assert diag["fallbacks"]["asymptote_exp_tail_fallback"] is False
     assert diag["asymptote"]["sim_band_points"] < 3
@@ -274,7 +229,9 @@ def test_compare_writes_diagnostics_json(tmp_path):
         metric="shift_rmse", q_range=W_NARROW, metric_kwargs=OLD_FCC,
     )
     data = json.loads((tmp_path / "shift_rmse_diagnostics.json").read_text())
-    assert loss == pytest.approx(FCC_REFS["q1_0125"]["loss"], rel=1e-12)
+    direct, *_ = shift_rmse_loss(crystal_curve(), FCC_SIMS["q1_0125"](), W_NARROW,
+                                 metric_kwargs=OLD_FCC)
+    assert loss == pytest.approx(direct, rel=1e-12)
     old_fields = {"loss", "m4", "shift_term", "q1_ratio", "q1_tgt", "q1_sim",
                   "anchor_scale", "window_abs",
                   "x_lo", "x_hi", "n_points", "grid_lo", "grid_hi", "metric"}
