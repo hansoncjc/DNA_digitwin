@@ -147,8 +147,9 @@ form-factor division itself. The simulated side always produces an
 S(q), so the choice only affects how the experimental curve is read.
 
 Use `trim_tail=N` on `make_global_objective` to drop the last `N`
-points of the loaded experimental curve before comparison (useful for
-noisy I(q) tails; set `0` for clean S(q) files).
+points of the loaded experimental curve before comparison. The default
+is `0`, which is what every S(q) target (ground truth, inverse-design
+targets) needs; pass e.g. `200` only for a measured I(q) with a noisy tail.
 
 ### Curve metrics (`metrics.py`)
 
@@ -297,7 +298,7 @@ path), `density` and the potential parameters:
 | Pair potential | `mie_r0` table; dynamic cutoff `t_tol = 0.1/U_0`, no fixed `rmax`, `rmax < L/2`, `rmin = rmin_k * r0` with `rmin_k = 0.5` |
 | Initialization | Repulsive branch of that potential, cut at the well, Langevin `t_init = 10` at the production `dt` |
 | Langevin production | `kT = 1`, γ = 1, `dt = 1e-3`, `steps = 22_500_000` (450 GSD frames), `seed = 42` |
-| saxs-fft | `N_grid = 600`, `frames = 'last:100'`, `step = 5`, `trim = slice(3, -3)`, `particle_diameter = 24.6` nm |
+| saxs-fft | `N_grid = 600`, `frames = 'last:100'`, `step = 5`, `trim = slice(6, -6)`, `particle_diameter = 24.6` nm |
 
 `tests/test_forward_model.py` pins these values.
 
@@ -382,7 +383,7 @@ import bo
 OUT_ROOT = "./Optimization_Results"
 
 CANDIDATES = [
-    # (L_bridge [nt], C_chol [molecules/siNP], experimental S(q) file)
+    # (L_bridge [bp], C_chol [molecules/siNP], experimental S(q) file)
     (20.0,  95.0, "/path/to/exp/d0_sq.npy"),
     (40.0,  95.0, "/path/to/exp/d1_sq.npy"),
     (80.0,  95.0, "/path/to/exp/d2_sq.npy"),

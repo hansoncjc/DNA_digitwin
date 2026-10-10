@@ -325,6 +325,13 @@ def prepare_jobs(cfg: LauncherConfig, job_specs: Iterable[dict]) -> List[Job]:
         sim_dir = Path(worker_cfg["outdir"])
         if not sim_dir.exists():
             sim_dir.mkdir(parents=True)
+        # A resumed run reuses eval_XXX/<ds>/. A flag left by a job killed
+        # mid-evaluation would be read as this job's result before the new
+        # worker starts, so clear it before submitting.
+        stale = [n for n in (*TERMINAL_FLAGS, "RUNNING") if (sim_dir / n).exists()]
+        if stale:
+            print(f"[launcher] {sim_dir}: removing stale flag(s) {', '.join(stale)}")
+            clear_job_flags(sim_dir)
 
         job = Job(
             idx=i,

@@ -830,7 +830,7 @@ def make_global_objective(
     ps: ParamSpace,
     ffpath: str,
     out_root: str = "Optimization_Results",
-    trim_tail: int = 200,
+    trim_tail: int = 0,
     sim_defaults: Dict[str, Any] = None,
     mode: str = "map",
     scattering_method: str = "saxsfft",
@@ -863,9 +863,9 @@ def make_global_objective(
         from GLOBAL, then dataset.sim. Mapping coefficients are not allowed.
 
     "trim_tail":
-        number of points to drop from the end of the experimental intensity 
-            curve returned by Dataset.load_exp_curve.
-        If exp_path already points to a processed S(q), set trim_tail=0.
+        number of points to drop from the end of the curve returned by
+            Dataset.load_exp_curve. Default 0, as every S(q) target needs;
+            a positive value is only for a measured I(q) with a noisy tail.
     "compare_q_range":
         q-range used for the final saxsfft loss comparison. This is distinct
         from q_min/q_max used when extracting experimental S(q) from intensity.

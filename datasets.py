@@ -119,7 +119,7 @@ class ExperimentalParams:
     L_poly : float
         Length of ssDNA spacer (nt). Default: 10.0
     L_bridge : float or None
-        Length of DNA bridge (nt). No default; set when used in mappings.
+        Length of DNA bridge (bp). No default; set when used in mappings.
     L_HBP : float
         Length of hybridizing base pairs (bp). Default: 18.0
 
@@ -242,14 +242,15 @@ class Dataset:
         self.datatype = datatype
         self._exp_curve_cache = None  # in-memory cache for the .npy
 
-    def load_exp_curve(self, trim_tail=200):
+    def load_exp_curve(self, trim_tail=0):
         """
         Load the experimental curve from .npy (first two columns as [q, I]) and cache it.
 
         Parameters
         ----------
-        trim_tail : int, default 200
-            Number of rows to drop from the end after loading.
+        trim_tail : int, default 0
+            Number of rows to drop from the end after loading. Keep 0 for an
+            S(q) target; a positive value is only for a measured I(q) tail.
 
         Returns
         -------
