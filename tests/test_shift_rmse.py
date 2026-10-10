@@ -313,7 +313,7 @@ def test_metric_kwargs_rejected_for_other_metrics(tmp_path):
 
 def _ps():
     fixed = {name: {"fixed": 1.0} for name in bo.PHYSICS_COEFFS}
-    return bo.ParamSpace({"global": fixed, "local": {}}, dataset_ids=["d0"])
+    return bo.ParamSpace(fixed)
 
 
 def test_objective_rejects_shift_rmse_without_window():

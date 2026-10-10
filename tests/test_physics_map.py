@@ -81,7 +81,7 @@ def test_r32_condition_set():
 
 
 def test_r32_ground_truth_and_init_inside_box():
-    g = r32.PARAM_CFG["global"]
+    g = r32.PARAM_CFG
     assert set(g) == set(PHYSICS_COEFFS)
     for name, spec in g.items():
         lo, hi = spec["bounds"]
@@ -99,7 +99,7 @@ def test_r32_ground_truth_inside_inverse_box():
 
 def test_r32_box_keeps_every_condition_in_range():
     """Grid over the 5-D search box x all conditions: limits hold, rmax < L/2, rmax <= 15."""
-    g = r32.PARAM_CFG["global"]
+    g = r32.PARAM_CFG
     axes = [np.linspace(*g[name]["bounds"], 6) for name in PHYSICS_COEFFS]
     worst_rmax = 0.0
     for values in itertools.product(*axes):
@@ -114,12 +114,12 @@ def test_r32_box_keeps_every_condition_in_range():
 
 # ---------------- bo.py map mode ---------------- #
 
-def _ps(dataset_ids, cfg=None):
-    return bo.ParamSpace(cfg or r32.PARAM_CFG, dataset_ids=dataset_ids)
+def _ps(cfg=None):
+    return bo.ParamSpace(cfg or r32.PARAM_CFG)
 
 
 def test_map_mode_rejects_old_and_incomplete_spaces():
-    base = dict(r32.PARAM_CFG["global"])
+    base = dict(r32.PARAM_CFG)
     bad_cfgs = [
         {**base, "alpha": {"bounds": (1.0, 5.0), "init": 3.0}},
         {**base, "n": {"bounds": (6.0, 20.0), "init": 12.0}},
@@ -127,30 +127,42 @@ def test_map_mode_rejects_old_and_incomplete_spaces():
     ]
     for cfg in bad_cfgs:
         with pytest.raises(ValueError, match="mode='map'"):
-            bo._validate_param_mode(_ps(["d0"], {"global": cfg, "local": {}}), "map")
-    with pytest.raises(ValueError, match="mode='map'"):
-        bo._validate_param_mode(
-            _ps(["d0"], {"global": base, "local": {"U0": {"bounds": (1, 2), "init": 1.5}}}), "map")
+            bo._validate_param_mode(_ps(cfg), "map")
     with pytest.raises(ValueError, match="mode='sim'"):
-        bo._validate_param_mode(_ps(["d0"], {"global": {"k": {"fixed": 0.6}}, "local": {}}), "sim")
+        bo._validate_param_mode(_ps({"k": {"fixed": 0.6}}), "sim")
+    with pytest.raises(ValueError, match="mode='sim'"):
+        bo._validate_param_mode(_ps({"foo": {"bounds": (0.0, 1.0)}}), "sim")
+    bo._validate_param_mode(_ps({"n": {"bounds": (6.0, 15.0)}, "m": {"fixed": 4.0}}), "sim")
+
+
+@pytest.mark.parametrize("spec", [
+    {"k": {"bounds": (0.4, 0.9)}},          # a nested block is not a spec
+    {"bounds": (0.9, 0.4)},                  # lo >= hi
+    {"init": 0.5},                           # neither bounds nor fixed
+    {"bounds": (0.4, 0.9), "lo": 0.4},       # unknown key
+    0.76,                                    # not a dict
+])
+def test_paramspace_rejects_malformed_spec(spec):
+    with pytest.raises(ValueError, match="ParamSpace: parameter"):
+        bo.ParamSpace({"x": spec})
 
 
 def test_resolve_map_params_and_density():
     ds = _ds("d0", 80.0, 140.0, 40.0)
-    out = bo._resolve_sim_params(ds, dict(r32.GROUND_TRUTH), {"d0": {}}, "map")
+    out = bo._resolve_sim_params(ds, dict(r32.GROUND_TRUTH), "map")
     p = ds.physics_params(**r32.GROUND_TRUTH)
     assert out == (0.005, p["r0"], p["U0"], p["n"], p["m"])
     ds.sim.density = None
     with pytest.raises(ValueError, match="density"):
-        bo._resolve_sim_params(ds, dict(r32.GROUND_TRUTH), {"d0": {}}, "map")
+        bo._resolve_sim_params(ds, dict(r32.GROUND_TRUTH), "map")
     low = {**r32.GROUND_TRUTH, "A": 0.5}
     with pytest.raises(ValueError, match="U0"):
-        bo._resolve_sim_params(_ds("d0", 20.0, 60.0, 0.0), low, {"d0": {}}, "map")
+        bo._resolve_sim_params(_ds("d0", 20.0, 60.0, 0.0), low, "map")
 
 
 def _prepare(datasets, G, tmp_path):
     return bo._parallel_prepare_eval_jobs(
-        datasets=datasets, eval_id=0, G=G, L={d.id: {} for d in datasets},
+        datasets=datasets, eval_id=0, G=G,
         out_root=str(tmp_path), trim_tail=0, sim_defaults={"N": 5000},
         mode="map", scattering_method="saxsfft", scattering_kwargs={},
         metric="shift_rmse", compare_q_range=None, dp_coeff=0.5, plot_apdist=False,
@@ -196,7 +208,7 @@ def test_map_mode_trajectory_and_warm_start(tmp_path, stub_pipeline):
         path = tmp_path / f"{c['id']}.npy"
         np.save(path, crystal_curve(q1=0.0129))
         datasets.append(_ds(c["id"], c["L_bridge"], c["C_chol"], c["C_NaCl"], exp_path=path))
-    ps = _ps([d.id for d in datasets])
+    ps = _ps()
     out = tmp_path / "run"
     out.mkdir()
     obj = bo.make_global_objective(

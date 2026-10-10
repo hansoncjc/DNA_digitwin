@@ -5,41 +5,7 @@ is currently reachable from the campaigns we run, which is why they have never
 shown up in a real run. Recorded here so they are not rediscovered from
 scratch.
 
-Two issues found in the same review are already fixed and are listed at the
-bottom for context.
-
----
-
-## C. `load_warm_start_from_trajectory` cannot restore `local` parameters
-
-**Where** `bo.py:1224`, inside `load_warm_start_from_trajectory`.
-
-**What** The loader rebuilds a physical parameter vector by looking each
-`ParamSpace` entry up as a CSV column:
-
-```python
-for name in ps._names:
-    ...
-    phys_vals.append(float(rec[name]))
-```
-
-`ps._names` labels per-dataset local parameters as `f"{lname}:{dsid}"`
-(`bo.py:196`), e.g. `U0:d0`. `bo_trajectory.csv` only ever has bare parameter
-columns (`U0`, `r0`, `n`, ...), because each CSV row is already one dataset.
-So the lookup raises `KeyError: 'U0:d0'`.
-
-**When it triggers** Any `run_bo_resumable` call, or any `run_bo(warm_start=...)`
-built from a trajectory, where the `ParamSpace` has a `local` block whose
-entries are not `fixed`. Cold starts are unaffected.
-
-**Why we have never hit it** Every campaign so far optimizes global
-coefficients only; local entries are either absent or declared `fixed`, and
-`fixed` locals never enter `ps._names`.
-
-**Possible fix** Either read locals from the matching `dataset_id` row of the
-same iteration block (the block already contains one row per dataset), or
-detect the situation up front and raise a message that names the unsupported
-parameters instead of a bare `KeyError`.
+Issues already closed are listed at the bottom for context.
 
 ---
 
@@ -103,6 +69,13 @@ bounds mismatch is visible instead of silent.
 ---
 
 ## Fixed in this review
+
+- **C.** `load_warm_start_from_trajectory` could not restore non-fixed
+  `local` parameters: `ps._names` labelled them `U0:d0`, while
+  `bo_trajectory.csv` only has bare columns, so the lookup raised
+  `KeyError`. Closed on 2026-10-09: `ParamSpace` takes a flat
+  `{name: spec}` config with no global/local split, so every vector label
+  is a bare column name.
 
 - **A.** `_collect_parallel_eval_loss` matched finished Slurm jobs by comparing
   `plan["save_dir"]` against `str(job.sim_dir)`. `pathlib` normalizes away the

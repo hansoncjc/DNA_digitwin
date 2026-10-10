@@ -101,7 +101,7 @@ def main():
 
     ids = {"d0", "d23"} if a.smoke else None
     datasets = build_datasets(a.gt, ids)
-    ps = bo.ParamSpace(config.PARAM_CFG, dataset_ids=[d.id for d in datasets])
+    ps = bo.ParamSpace(config.PARAM_CFG)
     print(bo.describe_training_config(ps, mode="map"))
 
     sim_defaults = {"N": config.N, "plot": False}
@@ -134,7 +134,7 @@ def main():
         objective, ps, ffpath, a.out, n_iters=n_iters, seed=config.BO_SEED,
         gp_log_dir=os.path.join(a.out, "gp_log"),
     )
-    print("[r32] best:", ps.decode(best)["global"], "loss:", min(history))
+    print("[r32] best:", ps.decode(best), "loss:", min(history))
 
 
 if __name__ == "__main__":

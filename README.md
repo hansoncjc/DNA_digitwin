@@ -217,29 +217,26 @@ is emitted if non-default values are supplied).
   not resubmitted, since the simulation itself succeeded.
 
 ### `ParamSpace` (`bo.py`)
-Declarative description of the BO search vector. Each parameter is
-either **global** (one value shared by all datasets) or **local**
-(one value per dataset). Each entry takes `bounds` and an `init`; add
-`"fixed": value` to bypass optimization while still feeding the value
-into the mappings/sim. The vector is optimized in `[0, 1]^D` and
-mapped back to physical bounds internally.
+Declarative description of the BO search vector: one entry per
+parameter, each value shared by all datasets. Each entry takes `bounds`
+(lo < hi) and an optional `init`, or `"fixed": value` to bypass
+optimization while still feeding the value into the mappings/sim; any
+other key raises. Which names are allowed depends on `mode`. The vector
+is optimized in `[0, 1]^D` and mapped back to physical bounds internally.
 
 ```python
-param_cfg = {   # mode="map": exactly the five global coefficients
-    "global": {
-        "k":     {"bounds": (0.4, 0.9),  "init": 0.76},
-        "A":     {"bounds": (0.85, 2.5), "init": 2.0},
-        "K_s":   {"bounds": (0.0, 0.10), "init": 0.05},
-        "a_m":   {"bounds": (2.91, 4.0), "init": 3.27},
-        "delta": {"bounds": (1.09, 4.0), "init": 3.27, "fixed": 3.2},  # "fixed" freezes one
-    },
-    "local": {},
+param_cfg = {   # mode="map": exactly the five mapping coefficients
+    "k":     {"bounds": (0.4, 0.9),  "init": 0.76},
+    "A":     {"bounds": (0.85, 2.5), "init": 2.0},
+    "K_s":   {"bounds": (0.0, 0.10), "init": 0.05},
+    "a_m":   {"bounds": (2.91, 4.0), "init": 3.27},
+    "delta": {"bounds": (1.09, 4.0), "init": 3.27, "fixed": 3.2},  # "fixed" freezes one
 }
 ```
 
 ### `make_global_objective(...)` (`bo.py`)
 Builds a callable `objective(x_unit, ffpath)` that, for one BO query:
-1. Decodes the unit vector into globals + locals.
+1. Decodes the unit vector into the global parameters.
 2. For every `Dataset`, resolves `(density, r0, U0, n, m)` according
    to `mode`:
    - `"map"`: `dataset.physics_params(k, A, K_s, a_m, delta)` gives
@@ -248,8 +245,8 @@ Builds a callable `objective(x_unit, ffpath)` that, for one BO query:
      these five global coefficients; `bo_trajectory.csv` and
      `sim_params_*.csv` carry one column per coefficient, which
      `load_warm_start_from_trajectory` reads back on resume.
-   - `"sim"`: takes `density, r0, U0` directly from the param space
-     (local > global > `dataset.sim.*`).
+   - `"sim"`: takes `density, r0, U0, n, m` directly from the param space,
+     falling back to `dataset.sim.*`.
 3. Runs `simulation.run_simulation(...)` (HOOMD). The pair-table
    cutoff is dynamic by default: `t_tol = tail_energy_cut / U_0`
    with `tail_energy_cut = 0.1`, i.e. the attractive tail at `rmax` is
@@ -410,16 +407,11 @@ for idx, (L_bridge, C_chol, exp_path) in enumerate(CANDIDATES):
 FIXED = {"K_s": 0.07, "a_m": 3.2, "delta": 3.2}
 
 param_cfg = {
-    "global": {
-        "k": {"bounds": (0.4, 0.9),  "init": 0.76},
-        "A": {"bounds": (0.85, 2.5), "init": 2.0},
-
-        **{name: {"bounds": (v, v), "init": v, "fixed": v}
-           for name, v in FIXED.items()},
-    },
-    "local": {},
+    "k": {"bounds": (0.4, 0.9),  "init": 0.76},
+    "A": {"bounds": (0.85, 2.5), "init": 2.0},
+    **{name: {"fixed": v} for name, v in FIXED.items()},
 }
-ps = bo.ParamSpace(param_cfg, dataset_ids=[d.id for d in datasets])
+ps = bo.ParamSpace(param_cfg)
 
 print(bo.describe_training_config(ps, mode="map"))
 
@@ -462,7 +454,7 @@ best_x_phys, history = bo.run_bo(
     seed         = 42,
 )
 
-best = ps.decode(best_x_phys)["global"]
+best = ps.decode(best_x_phys)
 print(f"Optimized k = {best['k']:.4f}")
 print(f"Optimized A = {best['A']:.4f}")
 print(f"Best loss   = {history[-1]:.6f}")
@@ -478,8 +470,7 @@ behaviour changes.
 
 ### Switching mode
 
-Replace the mapping-coefficient block in `param_cfg["global"]` with
-sim parameters (e.g. `"density"`, `"r0"`, `"U0"`, `"n"`, `"m"`) – or
-move `"r0"` / `"U0"` into `"local"` – and pass `mode="sim"` to
-`make_global_objective`. `bo._validate_param_mode` will reject mixed
-configurations (mapping coeffs in `"sim"` mode, or vice versa).
+Replace the mapping coefficients in `param_cfg` with
+sim parameters (e.g. `"density"`, `"r0"`, `"U0"`, `"n"`, `"m"`) and pass `mode="sim"` to
+`make_global_objective`. `bo._validate_param_mode` rejects any name the mode does not allow
+(e.g. mapping coefficients in `"sim"` mode, or sim parameters in `"map"` mode).

@@ -60,8 +60,7 @@ def _read_blocks(path):
 
 
 def _objective(tmp_path, datasets, metric="shift_rmse"):
-    ps = bo.ParamSpace({"global": {"n": {"bounds": (11.0, 13.0), "init": 12.0}}, "local": {}},
-                       dataset_ids=[d.id for d in datasets])
+    ps = bo.ParamSpace({"n": {"bounds": (11.0, 13.0), "init": 12.0}})
     obj = bo.make_global_objective(
         datasets, ps, ffpath="", out_root=str(tmp_path), trim_tail=0, mode="sim",
         metric=metric, compare_q_range=W_NARROW,

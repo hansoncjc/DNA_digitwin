@@ -1,36 +1,32 @@
 """
-Bayesian Optimization (BO) utilities for global + per-dataset fitting.
+Bayesian Optimization (BO) utilities for fitting parameters shared by all datasets.
 
 What this gives you
 -------------------
-1) A simple way to declare which parameters are optimized and whether they are:
-   - GLOBAL (one value shared by all datasets), or
-   - LOCAL (a separate value per dataset).
+1) A simple way to declare which parameters are optimized. Each parameter has
+   one value shared by all datasets.
 
 2) A generic BO loop using BoTorch (SingleTaskGP + qLogEI) that minimizes an
    objective you define via dataset simulation → SAXS → compare_to_exp → sum loss.
 
 3) A pack/unpack system that maps an optimizer vector x ∈ [0,1]^D to a dict of
-   named parameters (globals + locals) with your bounds.
+   named parameters with your bounds.
 
 Minimal usage (mode="map", physics-based mapping)
 -------------------------------------------------
-Every coefficient of ``datasets.PHYSICS_COEFFS`` must be in "global", free
+Every coefficient of ``datasets.PHYSICS_COEFFS`` must be in param_cfg, free
 or "fixed". Density is ``dataset.sim.density`` (fixed, not mapped).
 
 param_cfg = {
-    "global": {
-        "k":     {"bounds": (0.4, 0.9),   "init": 0.76},  # r0
-        "A":     {"bounds": (0.85, 2.5),  "init": 2.0},   # U0 at C_ref, no salt
-        "K_s":   {"bounds": (0.0, 0.10),  "init": 0.05},  # salt slope (1/mM)
-        "a_m":   {"bounds": (2.91, 4.0),  "init": 3.27},  # m = a_m g
-        "delta": {"bounds": (1.09, 4.0),  "init": 3.27},  # n = (a_m + delta) g
-    },
-    "local": {},
+    "k":     {"bounds": (0.4, 0.9),   "init": 0.76},  # r0
+    "A":     {"bounds": (0.85, 2.5),  "init": 2.0},   # U0 at C_ref, no salt
+    "K_s":   {"bounds": (0.0, 0.10),  "init": 0.05},  # salt slope (1/mM)
+    "a_m":   {"bounds": (2.91, 4.0),  "init": 3.27},  # m = a_m g
+    "delta": {"bounds": (1.09, 4.0),  "init": 3.27},  # n = (a_m + delta) g
 }
 
 from bo import ParamSpace, make_global_objective, run_bo_resumable
-ps = ParamSpace(param_cfg, dataset_ids=[d.id for d in datasets])
+ps = ParamSpace(param_cfg)
 
 obj = make_global_objective(datasets, ps, ffpath, out_root="Optimization_Results",
                             trim_tail=0, sim_defaults={"N": 5000},
@@ -78,11 +74,8 @@ DEFAULT_MAX_ACQ_ATTEMPTS = 5
 
 # ------------------------- Modes & param types ------------------------- #
 
-# Parameters that correspond to direct simulation inputs
-_SIM_PARAMS = {"density", "r0", "U0"}
-
-# Simulation parameters that only mode="sim" may optimize directly
-_ALWAYS_OK_SIM = {"n", "m"}
+# Parameters that mode="sim" may optimize directly (simulation inputs)
+_SIM_PARAMS = {"density", "r0", "U0", "n", "m"}
 
 # Parameters that correspond to mapping coefficients (datasets.physics_map)
 _MAP_PARAMS = set(PHYSICS_COEFFS)
@@ -103,7 +96,7 @@ def _validate_param_mode(ps, mode: str) -> None:
     Ensure that the ParamSpace configuration is consistent with the chosen mode.
 
     mode = "map": exactly the physics-based mapping coefficients
-        (``datasets.PHYSICS_COEFFS``), all GLOBAL, each free or "fixed".
+        (``datasets.PHYSICS_COEFFS``), each free or "fixed".
         n, m, r0, U0 come from the mapping; density from ``dataset.sim``.
     mode = "sim": only direct simulation parameters (density, r0, U0, n, m)
         are allowed.
@@ -111,26 +104,25 @@ def _validate_param_mode(ps, mode: str) -> None:
     if mode not in ("map", "sim"):
         raise ValueError(f"Unknown mode '{mode}'. Expected 'map' or 'sim'.")
 
-    g_names = set(ps.cfg.get("global", {}).keys())
-    l_names = set(ps.cfg.get("local", {}).keys())
+    g_names = set(ps.cfg)
 
     if mode == "map":
-        extra = (g_names | l_names) - _MAP_PARAMS
+        extra = g_names - _MAP_PARAMS
         missing = _MAP_PARAMS - g_names
-        if l_names or extra or missing:
+        if extra or missing:
             raise ValueError(
                 "ParamSpace configuration is inconsistent with mode='map': it must hold "
-                f"exactly the global coefficients {list(PHYSICS_COEFFS)} (free or fixed). "
-                f"Local: {sorted(l_names)}; not allowed: {sorted(extra)}; "
+                f"exactly the coefficients {list(PHYSICS_COEFFS)} (free or fixed). "
+                f"Not allowed: {sorted(extra)}; "
                 f"missing: {sorted(missing)}. Density is dataset.sim.density "
                 "(alpha was removed 2026-10-09)."
             )
     else:  # mode == "sim"
-        illegal = (g_names | l_names) & _MAP_PARAMS
+        illegal = g_names - _SIM_PARAMS
         if illegal:
             raise ValueError(
-                "ParamSpace configuration is inconsistent with mode='sim'. "
-                f"These mapping parameters are not allowed here: {sorted(illegal)}"
+                "ParamSpace configuration is inconsistent with mode='sim': "
+                f"not allowed: {sorted(illegal)}; allowed: {sorted(_SIM_PARAMS)}."
             )
 def describe_training_config(ps, mode: str) -> str:
     """
@@ -139,16 +131,14 @@ def describe_training_config(ps, mode: str) -> str:
 
     You can simply print(describe_training_config(ps, mode)) from your script.
     """
-    g_names = set(ps.cfg.get("global", {}).keys())
-    l_names = set(ps.cfg.get("local", {}).keys())
+    g_names = set(ps.cfg)
 
-    map_params = (g_names | l_names) & _MAP_PARAMS
-    sim_params     = (g_names | l_names) & _SIM_PARAMS
+    map_params = g_names & _MAP_PARAMS
+    sim_params     = g_names & _SIM_PARAMS
 
     lines = []
     lines.append(f"Training mode: {mode}")
-    lines.append(f"  Global params: {sorted(g_names)}")
-    lines.append(f"  Local  params: {sorted(l_names)}")
+    lines.append(f"  Params: {sorted(g_names)}")
     lines.append(f"  Recognized map params: {sorted(map_params)}")
     lines.append(f"  Recognized sim params:     {sorted(sim_params)}")
     if mode == "map" and sim_params:
@@ -160,76 +150,72 @@ def describe_training_config(ps, mode: str) -> str:
 # ------------------------- Parameter packing ------------------------- #
 class ParamSpace:
     """
-    Pack/unpack parameters for BO with global + per-dataset roles.
+    Pack/unpack the BO search vector.
 
-    param_cfg schema:
+    param_cfg schema, one entry per parameter:
         {
-          "global": {
-             "k":       {"bounds": (0.4, 0.9),  "init": 0.76},
-             "n":       {"bounds": (6.0, 20.0), "init": 12.0},
-             "m":       {"bounds": (4.0, 12.0), "init": 6.0},
-             # You can also "freeze" any param:
-             # "k": {"bounds": (0.5,1.2), "init": 0.76, "fixed": 0.76}
-          },
-          "local": {
-             # example for Stage 2:
-             # "U0": {"bounds": (0.1, 150.0), "init": 50.0},
-             # "r0": {"bounds": (2.0, 2.5),   "init": 2.2},
-          }
+          "k": {"bounds": (0.4, 0.9),  "init": 0.76},
+          "A": {"bounds": (0.85, 2.5), "init": 2.0},
+          # "fixed" freezes a parameter:
+          # "k": {"bounds": (0.5, 1.2), "init": 0.76, "fixed": 0.76}
         }
 
     Notes
     -----
-    - GLOBAL params appear once in the vector.
-    - LOCAL params appear once **per dataset**, ordered by dataset_ids.
-      e.g., for local "U0" and dataset_ids ["d1","d2"], the vector holds
-      ["U0:d1", "U0:d2"] (after the globals).
+    - Each parameter has one value shared by all datasets and, unless fixed,
+      one entry in the vector, in declaration order.
+    - A spec holds "bounds" (lo < hi) and an optional "init", or "fixed".
+      Any other key raises ValueError. Which names are allowed depends on
+      the mode (``_validate_param_mode``).
     - "fixed" bypasses optimization (not placed in the vector) but the fixed
-      value is exposed in decode()/unpack() so your objective can use it.
+      value is exposed in decode() so your objective can use it.
     """
 
-    def __init__(self, param_cfg: Dict[str, Dict[str, Dict[str, float]]],
-                 dataset_ids: List[str]):
-        self.cfg = {"global": dict(param_cfg.get("global", {})),
-                    "local":  dict(param_cfg.get("local",  {}))}
-        self.dataset_ids = list(dataset_ids)
+    _SPEC_KEYS = {"bounds", "init", "fixed"}
+
+    def __init__(self, param_cfg: Dict[str, Dict[str, Any]]):
+        self.cfg = dict(param_cfg)
 
         # Build ordered vector schema
         self._names: List[str] = []          # vector labels (for debug)
         self._lo: List[float] = []
         self._hi: List[float] = []
         self._init: List[float] = []
-        self._fixed_globals: Dict[str, float] = {}
-        self._fixed_locals: Dict[Tuple[str, str], float] = {}  # (name, dsid) -> val
+        self._fixed: Dict[str, float] = {}
 
-        # Globals first
-        for name, spec in self.cfg["global"].items():
+        for name, spec in self.cfg.items():
+            self._check_spec(name, spec)
             if "fixed" in spec:
-                self._fixed_globals[name] = float(spec["fixed"])
+                self._fixed[name] = float(spec["fixed"])
             else:
                 lo, hi = spec["bounds"]
                 self._names.append(name)
                 self._lo.append(float(lo)); self._hi.append(float(hi))
                 self._init.append(float(spec.get("init", (lo + hi) / 2)))
 
-        # Then locals, expanded per dataset
-        for lname, spec in self.cfg["local"].items():
-            if "fixed" in spec:
-                # one fixed value applies to all datasets
-                for dsid in self.dataset_ids:
-                    self._fixed_locals[(lname, dsid)] = float(spec["fixed"])
-            else:
-                lo, hi = spec["bounds"]
-                for dsid in self.dataset_ids:
-                    label = f"{lname}:{dsid}"
-                    self._names.append(label)
-                    self._lo.append(float(lo)); self._hi.append(float(hi))
-                    self._init.append(float(spec.get("init", (lo + hi) / 2)))
-
         self.d = len(self._names)
         self._lo_t = torch.tensor(self._lo, dtype=torch.float64)
         self._hi_t = torch.tensor(self._hi, dtype=torch.float64)
         self._init_t = torch.tensor(self._init, dtype=torch.float64)
+
+    @classmethod
+    def _check_spec(cls, name: str, spec: Any) -> None:
+        if not isinstance(spec, dict):
+            raise ValueError(f"ParamSpace: parameter {name!r}: spec must be a dict, got {spec!r}")
+        unknown = set(spec) - cls._SPEC_KEYS
+        if unknown:
+            raise ValueError(
+                f"ParamSpace: parameter {name!r}: unknown spec keys {sorted(unknown)}; "
+                f"expected {sorted(cls._SPEC_KEYS)}"
+            )
+        if "fixed" in spec:
+            return
+        bounds = spec.get("bounds")
+        if bounds is None or len(bounds) != 2 or not float(bounds[0]) < float(bounds[1]):
+            raise ValueError(
+                f"ParamSpace: parameter {name!r}: needs \"bounds\" (lo, hi) with lo < hi, "
+                f"or \"fixed\"; got {spec!r}"
+            )
 
     # ---- scaling helpers ---- #
 
@@ -255,29 +241,14 @@ class ParamSpace:
 
     def decode(self, x_phys: torch.Tensor) -> Dict[str, Any]:
         """
-        Convert a physical vector into structured dicts:
-        {
-          "global": {name: val, ...},
-          "local":  {dsid: {lname: val, ...}, ...}
-        }
-        Includes fixed params.
+        Convert a physical vector into ``{name: val, ...}``, fixed params
+        included.
         """
         x = x_phys.detach().cpu().numpy().tolist()
-        out_g: Dict[str, float] = dict(self._fixed_globals)
-        out_l: Dict[str, Dict[str, float]] = {dsid: {} for dsid in self.dataset_ids}
-
+        out: Dict[str, float] = dict(self._fixed)
         for label, val in zip(self._names, x):
-            if ":" in label:
-                pname, dsid = label.split(":")
-                out_l[dsid][pname] = float(val)
-            else:
-                out_g[label] = float(val)
-
-        # include fixed locals
-        for (lname, dsid), v in self._fixed_locals.items():
-            out_l[dsid][lname] = float(v)
-        return {"global": out_g, "local": out_l}
-
+            out[label] = float(val)
+        return out
 
 # ------------------------- Objective factory ------------------------- #
 
@@ -454,17 +425,16 @@ def _launcher_config_from_pcfg(pcfg: Dict[str, Any], run_dir: Path):
     )
 
 
-def _resolve_sim_params(ds, G: Dict[str, Any], L: Dict[str, Any], mode: str):
+def _resolve_sim_params(ds, G: Dict[str, Any], mode: str):
     """
     Simulation inputs ``(density, r0, U0, n, m)`` for one dataset.
 
-    mode="map": ``dataset.physics_params`` with the global coefficients
+    mode="map": ``dataset.physics_params`` with the mapping coefficients
     (``datasets.PHYSICS_COEFFS``); density is ``dataset.sim.density``. A
     mapped point outside ``datasets.check_mapped_params`` raises ValueError,
     which fails the evaluation (it is logged, not fed to the GP).
 
-    mode="sim": each of density, r0, U0 from LOCAL, then GLOBAL, then
-    ``dataset.sim``; n, m from GLOBAL, then ``dataset.sim``.
+    mode="sim": density, r0, U0, n, m from the ParamSpace, then ``dataset.sim``.
     """
     if mode == "map":
         if getattr(ds.sim, "density", None) is None:
@@ -480,9 +450,7 @@ def _resolve_sim_params(ds, G: Dict[str, Any], L: Dict[str, Any], mode: str):
     m = float(G["m"]) if "m" in G else float(ds.sim.m)
     values = {}
     for name in ("density", "r0", "U0"):
-        if name in L[ds.id]:
-            values[name] = float(L[ds.id][name])
-        elif name in G:
+        if name in G:
             values[name] = float(G[name])
         elif getattr(ds.sim, name, None) is not None:
             values[name] = float(getattr(ds.sim, name))
@@ -499,7 +467,6 @@ def _parallel_prepare_eval_jobs(
     datasets: List[Any],
     eval_id: int,
     G: Dict[str, Any],
-    L: Dict[str, Any],
     out_root: str,
     trim_tail: int,
     sim_defaults: Dict[str, Any],
@@ -525,7 +492,7 @@ def _parallel_prepare_eval_jobs(
 
     for ds in datasets:
         try:
-            density, r0, U0, n, m = _resolve_sim_params(ds, G, L, mode)
+            density, r0, U0, n, m = _resolve_sim_params(ds, G, mode)
 
             save_dir = os.path.join(out_root, f"eval_{eval_id:03d}", ds.id)
             os.makedirs(save_dir, exist_ok=True)
@@ -697,7 +664,6 @@ def _run_objective_parallel(
     datasets: List[Any],
     eval_id: int,
     G: Dict[str, Any],
-    L: Dict[str, Any],
     out_root: str,
     ffpath: str,
     trim_tail: int,
@@ -728,7 +694,6 @@ def _run_objective_parallel(
         datasets=datasets,
         eval_id=eval_id,
         G=G,
-        L=L,
         out_root=out_root,
         trim_tail=trim_tail,
         sim_defaults=sim_defaults,
@@ -845,7 +810,7 @@ def make_global_objective(
 ):
     """
     Create an objective(x_unit) that:
-      - unpacks GLOBAL and LOCAL parameters from x_unit,
+      - unpacks the parameters from x_unit,
       - runs sim → SAXS → compare_to_exp on each dataset,
       - returns the weighted sum of losses.
 
@@ -854,13 +819,13 @@ def make_global_objective(
     "map" (default):
         r0, U0, n, m come from the physics-based mapping
         ``dataset.physics_params(k, A, K_s, a_m, delta)``; the ParamSpace must
-        hold exactly these GLOBAL coefficients (free or fixed). Density is
+        hold exactly these coefficients (free or fixed). Density is
         ``dataset.sim.density`` (fixed; the former ``alpha`` coefficient was
         removed 2026-10-09). A mapped point below ``datasets.check_mapped_params``
         limits fails the evaluation.
     "sim":
-        density, r0, U0 from LOCAL, then GLOBAL, then dataset.sim.*; n, m
-        from GLOBAL, then dataset.sim. Mapping coefficients are not allowed.
+        density, r0, U0, n, m from the ParamSpace, then dataset.sim.*.
+        Only these five names are allowed.
 
     "trim_tail":
         number of points to drop from the end of the curve returned by
@@ -930,10 +895,8 @@ def make_global_objective(
         x_unit = x_unit.reshape(-1)
         # 1) map [0,1] → physical
         x_phys = ps.unit_to_phys(x_unit)
-        # 2) decode into globals/locals
-        decoded = ps.decode(x_phys)
-        G = decoded["global"]
-        L = decoded["local"]
+        # 2) decode into named parameters
+        G = ps.decode(x_phys)
 
         total_loss = 0.0
 
@@ -947,7 +910,6 @@ def make_global_objective(
                     datasets=datasets,
                     eval_id=eval_id,
                     G=G,
-                    L=L,
                     out_root=out_root,
                     ffpath=ffpath,
                     trim_tail=trim_tail,
@@ -988,7 +950,7 @@ def make_global_objective(
         for ds in datasets:
             try:
                 # ---- density, r0, U0, n, m (mapping or direct) ----
-                density, r0, U0, n, m = _resolve_sim_params(ds, G, L, mode)
+                density, r0, U0, n, m = _resolve_sim_params(ds, G, mode)
 
                 # ---- Output directory ----
                 # New structure: eval_XXX/d0/, eval_XXX/d1/, etc.

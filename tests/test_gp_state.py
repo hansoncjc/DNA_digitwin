@@ -15,22 +15,18 @@ import bo
 
 
 def _space():
-    """Globals then per-dataset locals, which is ParamSpace vector order."""
+    """Declaration order is ParamSpace vector order."""
     return bo.ParamSpace(
         {
-            "global": {
-                "n": {"bounds": (0.0, 1.0), "init": 0.2},
-                "m": {"bounds": (0.0, 1.0), "init": 0.4},
-            },
-            "local": {
-                "U0": {"bounds": (0.0, 1.0), "init": 0.5},
-            },
-        },
-        dataset_ids=["fcc", "fluid"],
+            "n": {"bounds": (0.0, 1.0), "init": 0.2},
+            "m": {"bounds": (0.0, 1.0), "init": 0.4},
+            "U0": {"bounds": (0.0, 1.0), "init": 0.5},
+            "r0": {"bounds": (0.0, 1.0), "init": 0.6},
+        }
     )
 
 
-_NAMES = ["n", "m", "U0:fcc", "U0:fluid"]
+_NAMES = ["n", "m", "U0", "r0"]
 
 
 class _ToyGP(torch.nn.Module):
@@ -134,10 +130,7 @@ def test_resumable_forwards_gp_log_dir(monkeypatch, tmp_path):
         return torch.zeros(1, dtype=torch.float64), [0.0]
 
     monkeypatch.setattr(bo, "run_bo", fake_run_bo)
-    ps = bo.ParamSpace(
-        {"global": {"n": {"bounds": (1.0, 2.0), "init": 1.5}}, "local": {}},
-        dataset_ids=["d0"],
-    )
+    ps = bo.ParamSpace({"n": {"bounds": (1.0, 2.0), "init": 1.5}})
     log = tmp_path / "gp_log"
     bo.run_bo_resumable(
         lambda *a, **k: None,
@@ -304,13 +297,9 @@ def _analytic(store):
 def _bo_space():
     return bo.ParamSpace(
         {
-            "global": {
-                "alpha": {"bounds": (0.2, 5.0), "init": 1.0},
-                "n": {"bounds": (6.0, 20.0), "init": 12.0},
-            },
-            "local": {},
-        },
-        dataset_ids=["d0"],
+            "alpha": {"bounds": (0.2, 5.0), "init": 1.0},
+            "n": {"bounds": (6.0, 20.0), "init": 12.0},
+        }
     )
 
 

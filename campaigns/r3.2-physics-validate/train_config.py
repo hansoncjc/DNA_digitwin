@@ -19,14 +19,11 @@ from gt_config import (  # noqa: E402,F401
 # Initial point: datasets.py defaults for k, A, K_s; a_m = delta such that
 # n = 12, m = 6 at L_bridge = 20 and k = 0.76.
 PARAM_CFG = {
-    "global": {
-        "k":     {"bounds": (0.40, 0.90), "init": 0.76},
-        "A":     {"bounds": (0.85, 2.50), "init": 2.0},
-        "K_s":   {"bounds": (0.00, 0.10), "init": 0.05},
-        "a_m":   {"bounds": (2.91, 4.00), "init": 3.2727},
-        "delta": {"bounds": (1.09, 4.00), "init": 3.2727},
-    },
-    "local": {},
+    "k":     {"bounds": (0.40, 0.90), "init": 0.76},
+    "A":     {"bounds": (0.85, 2.50), "init": 2.0},
+    "K_s":   {"bounds": (0.00, 0.10), "init": 0.05},
+    "a_m":   {"bounds": (2.91, 4.00), "init": 3.2727},
+    "delta": {"bounds": (1.09, 4.00), "init": 3.2727},
 }
 
 BO_SEED = 0       # torch seed of run_bo; simulations use the run_simulation default seed (42)
