@@ -12,7 +12,7 @@
 #SBATCH -p cpu-g2
 #SBATCH -c 2
 #SBATCH --mem=16G
-#SBATCH --time=84:00:00
+#SBATCH --time=80:00:00
 #SBATCH -o r32_master_%j.out
 #SBATCH -e r32_master_%j.out
 
