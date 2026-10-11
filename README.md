@@ -276,7 +276,8 @@ Builds a callable `objective(x_unit, ffpath)` that, for one BO query:
    raises before the first simulation if it differs from
    `scattering_kwargs["N_grid"]` by more than 5 %.
 5. Compares against the experimental curve in log-space with `mse`
-   (default) or weighted `apdist` (see **Curve metrics** above).
+   (default), weighted `apdist` or `shift_rmse` (see **Curve metrics** above;
+   the campaigns use `shift_rmse` with `compare_q_range=None`).
 6. Sums `weight · loss` across datasets and appends a row block to
    `out_root/bo_trajectory.csv`.
 
@@ -319,7 +320,7 @@ path), `density` and the potential parameters:
    `"fixed"`.
 3. **Make the objective.** Choose `mode` (`"map"` or `"sim"`),
    `scattering_method` (`"saxsfft"` or `"mcdfm"`), `metric`
-   (`"mse"` or `"apdist"`), `dp_coeff`, `plot_apdist`, `trim_tail`,
+   (`"mse"`, `"apdist"` or `"shift_rmse"`), `dp_coeff`, `plot_apdist`, `trim_tail`,
    and `sim_defaults` (`steps`, `N`, `device`, `plot`, …).
 4. **Run BO.** `bo.run_bo(objective, ps, ffpath=..., n_iters=...)`.
 5. **Inspect outputs.** Each evaluation writes to
@@ -398,8 +399,8 @@ Steps after maintenance, a walltime end or a preemption:
    `[resume] next eval_id=...; successful evaluations N of <cap>; acquisitions left ...`.
    `bo.inspect_resume(out_root)` gives the same numbers without writing.
 
-Runs started from a commit before this rule (R3.2, pinned at `c54865a`)
-reuse the id of the abandoned folder; follow their driver's note and rename
+Runs started from a commit before this rule (before `449be0e`,
+2026-10-09) reuse the id of the abandoned folder; for such a run, rename
 that folder by hand before resubmitting.
 
 ---

@@ -1,12 +1,21 @@
 """
-Curve comparison utilities.
+Curve comparison utilities: target vs simulated S(q) (or I(q)) in log space.
 
-This module provides the same behavior as the original script:
-- Crop curves to a (possibly user-specified) overlapping q-range.
-- Resample the denser curve onto the sparser one using scipy.interpolate.interp1d.
-- Scale the simulated curve by the ratio of the last ~5 points (tail mean).
-- Compare in log10-intensity space using Amplitude–Phase Distance (AP).
-- Optionally save diagnostic figures including APDist phase-warp plots.
+Metrics (``metric=``):
+- ``"mse"`` (default of compare_saxs_curves / compare_to_exp[_saxsfft]) and
+  ``"apdist"``: both curves are cropped to their q overlap (optionally a
+  ``q_range`` window), linearly interpolated onto one log-spaced q grid,
+  the simulated curve is scaled by the ratio of tail means ([-6:-1]), and
+  log10 intensities are compared by MSE or by the weighted Amplitude-Phase
+  Distance ``dp_coeff*dp + (1 - dp_coeff)*da`` on t in [0, 1]
+  (compare_saxs_curves).
+- ``"shift_rmse"`` (saxs-fft path): log10 RMSE on the reduced axis
+  x = q / q1 after high-q asymptote scaling, plus
+  lambda * |ln(q1_sim / q1_tgt)| (shift_rmse_loss; parameters in
+  SHIFT_RMSE_DEFAULTS). The mapping and inverse-design campaigns use it.
+
+compare_to_exp and compare_to_exp_saxsfft also save diagnostic figures
+(APDist phase-warp plots, shift_rmse_diagnostics.json).
 """
 
 import json

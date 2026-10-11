@@ -23,11 +23,12 @@ Expected JSON config layout::
     {
       "outdir": "/abs/path/sim_dir",
       "run_kwargs": {
-          "density": 0.05,   # number density N/V in particles/σ³ (NOT volume fraction)
-          "U_0": 25.0, "r0": 2.2, "n": 12.0, "m": 6.0,
-          "N": 5000, "steps": 15000000, "device": "gpu",
-          "potential": "mie_r0", "seed": 42, "plot": false,
-          "rmax": 5.0        # optional fixed pair-potential cutoff (σ units)
+          "density": 0.005,  # number density N/V in particles/σ³ (NOT volume fraction)
+          "U_0": 3.0, "r0": 2.5, "n": 12.0, "m": 6.0,
+          "N": 5000, "potential": "mie_r0", "plot": false
+          # any other run_simulation keyword (steps, device, seed, t_tol,
+          # rmax, ...) is passed through; the forward model leaves them at
+          # their defaults (README "Forward model")
       },
       "scattering": {
           "method": "saxsfft",

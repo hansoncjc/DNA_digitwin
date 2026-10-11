@@ -218,7 +218,7 @@ class Dataset:
     -------
     load_exp_curve(trim_tail=0) -> np.ndarray
         Lazy-load the experimental [q, I] and optionally drop last `trim_tail` rows.
-    rho_N(alpha=1.0) -> float
+    rho_N(alpha=3.0) -> float
         Number density = alpha * theoretical_base, with theoretical_base computed here.
     r0_sigma(k=0.76, LC_ss=0.63, LC_ds=0.34) -> float
         Map experimental geometry/sequence to r0/σ using your formula.
