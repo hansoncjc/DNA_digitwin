@@ -83,7 +83,8 @@ SIM_NAMES = ("U0", "r0", "n")    # must be in "search", plus one of m / m_rel
 # Fields that define the run. A resume must keep them; max_evals, parallel,
 # parallel_cfg, description, mc_dfm_root and --device may change. target_md5
 # is the md5 recorded at the first start, so the target file may move but
-# its content may not change.
+# its content may not change. gp_log_dir is compared relative to out_root
+# when it lies inside it, so the whole run folder may move.
 LOCKED = ("target_md5", "N", "density", "search", "potential", "metric", "scattering",
           "compare_q_range", "bo_seed", "batch_size", "gp_log_dir", "steps")
 
@@ -192,18 +193,44 @@ def normalize_config(raw, overrides=None):
 
 
 def _plain(obj):
-    """JSON-comparable copy: tuples become lists, numbers become floats."""
+    """JSON-comparable copy: tuples become lists; ints stay ints, other
+    numbers become floats (1 == 1.0, so either compares equal)."""
     if isinstance(obj, dict):
         return {str(k): _plain(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_plain(v) for v in obj]
     if isinstance(obj, bool) or obj is None or isinstance(obj, str):
         return obj
+    if isinstance(obj, (int, np.integer)):
+        return int(obj)
     return float(obj)
 
 
+def _gp_log_key(gp_log_dir, out_root):
+    """gp_log_dir as locked: relative to out_root when it lies inside it, so a
+    run folder that is moved as a whole still resumes; absolute otherwise."""
+    gp, root = Path(gp_log_dir), Path(out_root)
+    try:
+        return gp.relative_to(root).as_posix()
+    except ValueError:
+        return str(gp)
+
+
 def locked_fields(cfg):
-    return {key: _plain(cfg[key]) for key in LOCKED}
+    out = {key: _plain(cfg[key]) for key in LOCKED}
+    out["gp_log_dir"] = _gp_log_key(cfg["gp_log_dir"], cfg["out_root"])
+    return out
+
+
+def _snapshot_locked(snapshot):
+    """Locked fields of a snapshot; an absolute gp_log_dir inside the
+    snapshot's own out_root (inverse_config.json before 2026-10-11) is read
+    as relative, like locked_fields writes it now."""
+    old = dict(snapshot["locked"])
+    gp = old.get("gp_log_dir")
+    if gp and Path(gp).is_absolute() and snapshot.get("out_root"):
+        old["gp_log_dir"] = _gp_log_key(gp, snapshot["out_root"])
+    return old
 
 
 # ------------------------------------------------------------------ objects
@@ -382,7 +409,7 @@ def check_resume_settings(cfg, snapshot):
     """Check 7: a resume keeps the locked fields."""
     if snapshot is None:
         return
-    old = snapshot["locked"]
+    old = _snapshot_locked(snapshot)
     new = locked_fields(cfg)
     changed = [k for k in LOCKED if old.get(k) != new.get(k)]
     if changed:
@@ -441,6 +468,7 @@ def write_snapshot(cfg, info, snapshot, config_path):
     start = {
         "time": datetime.now().isoformat(timespec="seconds"),
         "config_path": str(Path(config_path).resolve()),
+        "out_root": cfg["out_root"],
         "commit": info["git"]["commit"],
         "dirty": info["git"]["dirty"],
         "host": socket.gethostname(),

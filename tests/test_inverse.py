@@ -1,5 +1,6 @@
 """inverse.py: configuration, startup checks, resume and summary (HOOMD and botorch stubbed)."""
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -243,6 +244,41 @@ def test_overrides_for_smoke_tests(tmp_path, pipeline, target):
     assert pipeline["last_kw"]["steps"] == 1000 and pipeline["last_kw"]["device"] == "cpu"
     snap = json.loads((tmp_path / "smoke" / "inverse_config.json").read_text())
     assert snap["locked"]["steps"] == 1000
+    assert isinstance(snap["locked"]["steps"], int)
     # A resume without --steps would change the run: refused.
-    with pytest.raises(inverse.ConfigError, match="steps"):
+    with pytest.raises(inverse.ConfigError, match="steps: run started with 1000, now None"):
         inverse.run(path, {"out_root": str(tmp_path / "smoke")})
+
+
+def _move_run(tmp_path, path, src, dst, old_format=False):
+    inverse.run(path, {"out_root": str(src)})
+    if old_format:   # inverse_config.json written before 2026-10-11
+        snap = json.loads((src / "inverse_config.json").read_text())
+        snap["locked"]["gp_log_dir"] = str(src / "gp_log")
+        (src / "inverse_config.json").write_text(json.dumps(snap))
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dst))
+
+
+@pytest.mark.parametrize("old_format", [False, True])
+def test_moved_run_folder_resumes(tmp_path, pipeline, target, old_format):
+    path = _write_config(tmp_path, target, max_evals=1)
+    src, dst = tmp_path / "a" / "run", tmp_path / "b" / "c" / "run"
+    _move_run(tmp_path, path, src, dst, old_format)
+    path = _write_config(tmp_path, target, max_evals=2)
+    summary = inverse.run(path, {"out_root": str(dst)})
+    assert summary["n_successful"] == 2 and pipeline["calls"] == 2
+    snap = json.loads((dst / "inverse_config.json").read_text())
+    assert [s["out_root"] for s in snap["starts"]] == [str(src.resolve()), str(dst.resolve())]
+    if not old_format:
+        assert snap["locked"]["gp_log_dir"] == "gp_log"
+
+
+def test_changed_gp_log_dir_refused(tmp_path, pipeline, target):
+    path = _write_config(tmp_path, target, max_evals=1)
+    inverse.run(path)
+    path = _write_config(tmp_path, target, max_evals=2,
+                         gp_log_dir=str(tmp_path / "out" / "other_log"))
+    with pytest.raises(inverse.ConfigError, match="gp_log_dir: run started with 'gp_log'"):
+        inverse.run(path)
+    assert pipeline["calls"] == 1

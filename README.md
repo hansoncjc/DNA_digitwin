@@ -464,7 +464,9 @@ Any failure stops the run before the first simulation (exit code 2):
 7. on a resume, the target's md5, `N`, `density`, `search`, the three names,
    `compare_q_range`, `bo_seed`, `batch_size`, `gp_log_dir` and `--steps`
    equal the values in `out_root/inverse_config.json`. Only `max_evals` and
-   the parallel settings may change.
+   the parallel settings may change. `gp_log_dir` is compared relative to
+   `out_root` when it lies inside it, so a run folder moved as a whole
+   still resumes.
 
 ### Outputs
 
