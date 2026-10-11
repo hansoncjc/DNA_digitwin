@@ -32,9 +32,13 @@ DNA_digitwin/
 ├── simulation.py         # run_simulation (HOOMD), mie_r0
 ├── scattering.py         # GSD → I(q)/S(q): convert_to_SAXS, convert_to_SAXS_fft, extract_exp_sq
 ├── metrics.py            # compare_saxs_curves, compare_to_exp[_saxsfft] (MSE / weighted APDist + plots)
+├── inverse.py            # inverse design driver: one config module per campaign
 ├── campaigns/
 │   ├── r3.1-gt/          # R3.1: virtual ground truth (conditions, coefficients, generation, QC)
-│   └── r3.2-physics-validate/  # R3.2: BO training of the physics-based mapping on it
+│   ├── r3.2-physics-validate/  # R3.2: BO training of the physics-based mapping on it
+│   └── inverse/
+│       ├── inverse-example/  # inverse.py example config (smoke tests), sbatch templates
+│       └── inverse-targets/  # target S(q) generation for inverse campaigns
 ├── parallel/             # Slurm launcher: submits 1 GPU job per dataset per BO iteration
 │   ├── __init__.py
 │   ├── submit_parallel.py
@@ -397,6 +401,116 @@ Steps after maintenance, a walltime end or a preemption:
 Runs started from a commit before this rule (R3.2, pinned at `c54865a`)
 reuse the id of the abandoned folder; follow their driver's note and rename
 that folder by hand before resubmitting.
+
+---
+
+## Inverse design (`inverse.py`)
+
+`inverse.py` runs BO over simulation parameters (`mode="sim"`) against one
+target S(q). A campaign is one Python module that defines `CONFIG`; the
+driver holds no campaign values. `campaigns/inverse/inverse-example/config.py`
+shows the format (a 3-evaluation smoke test, not a campaign). Target
+generation lives in `campaigns/inverse/inverse-targets/`.
+
+```bash
+python inverse.py CONFIG.py              # start, or resume the run in out_root
+python inverse.py CONFIG.py --check      # startup checks + resume state; no simulation, no files
+python inverse.py CONFIG.py --summary    # rewrite the summary from bo_trajectory.csv
+```
+
+Smoke-test overrides: `--out DIR`, `--target FILE`, `--parallel true|false`,
+`--steps N` (production steps), `--device cpu|gpu`. They are recorded in
+`out_root/inverse_config.json`; `--steps` is part of the run's identity.
+
+### `CONFIG` fields
+
+| Field | Meaning |
+|---|---|
+| `target` | Target S(q), `.npy` `(N, 2)` `[q (1/Å), S]` |
+| `N` | Particle number; the only forward-model argument (README **Forward model**) |
+| `density` | Fixed number density |
+| `search` | Flat `ParamSpace`: `U0`, `r0`, `n` and exactly one of `m`, `m_rel`, each `{"bounds": (lo, hi), "init": x}` or `{"fixed": x}` |
+| `max_evals` | Successful evaluations in total: initial point plus acquisitions, resumes included (`n_iters = max_evals - 1`) |
+| `out_root` | Output directory (relative paths: from the working directory) |
+| `gp_log_dir` | GP log (C15); default `<out_root>/gp_log` |
+| `bo_seed` | torch seed of `run_bo`; default 0 |
+| `batch_size` | Candidates per BO step; only 1 for now |
+| `potential`, `metric`, `scattering` | Chosen by name: `mie_r0`, `shift_rmse`, `saxsfft` (the only values so far) |
+| `compare_q_range` | Must be `None` (shift_rmse compares over the curve overlap) |
+| `mc_dfm_root` | MC-DFM path for the master and the GPU jobs; default `$MC_DFM_ROOT` |
+| `parallel` | `True` or `False`, no default (below) |
+| `parallel_cfg` | With `parallel=True`: `partition`, `account`, `mem`, `time`, `module_loads`, `venv_activate`, optional `gpus`, `poll_interval`, `max_wait`, `max_job_retries`. `code_root` is this repo copy |
+
+Fixed by the driver: `shift_rmse` with `metric_kwargs={}` (its defaults),
+`trim_tail=0`, `scattering_kwargs={}`, STGP, dataset id `d0`.
+
+### Startup checks
+
+Any failure stops the run before the first simulation (exit code 2):
+
+1. the target exists and is a finite `(N, 2+)` array; its md5 is recorded
+   (it identifies the target on a resume);
+2. the target's saxs-fft `N_grid` equals the simulation side's (C6);
+3. first-peak detection with the `metric_kwargs` in use: a dispersed target
+   is reported with a warning and the run continues under the metric's
+   dispersed rule (no alignment, spacing term `dispersed_shift`); a target
+   that is not dispersed must have a `find_peaks` peak. `shift_rmse(target,
+   target)` must be 0 (this also checks the asymptote band);
+4. `compare_q_range` is `None`;
+5. `rmax < L/2` and `n > m` on a grid over the search box (6 points per
+   free axis plus the initial point), with `m = 4 + m_rel (n - 5)`;
+6. the `ParamSpace` passes the `mode="sim"` rules; with `m_rel`, the lower
+   bound (or fixed value) of `n` is above 5 and `m_rel` lies in `[0, 1]`;
+7. on a resume, the target's md5, `N`, `density`, `search`, the three names,
+   `compare_q_range`, `bo_seed`, `batch_size`, `gp_log_dir` and `--steps`
+   equal the values in `out_root/inverse_config.json`. Only `max_evals` and
+   the parallel settings may change.
+
+### Outputs
+
+The usual BO outputs (`bo_trajectory.csv`, `loss_components.txt`,
+`eval_XXX/d0/`, `gp_log/`), plus:
+
+- `inverse_config.json`: target path and md5, the rmax check, the locked
+  settings, and one entry per start (time, commit, uncommitted changes,
+  host, Slurm job id, `max_evals`, parallel settings);
+- `inverse_summary.json` / `.txt`: best evaluation (id, folder, loss, `rmse`,
+  `shift`, U0, r0, n, m, `m_rel`, density), counts of successful, failed and
+  abandoned evaluations, target md5 and the commit(s). Written at the end;
+  `--summary` rewrites it at any time.
+
+### `parallel=False` and `parallel=True`
+
+The sbatch templates are in `campaigns/inverse/inverse-example/`
+(`inverse_sequential.sbatch` for `False`, `inverse_parallel.sbatch` for
+`True`); both run `inverse.py` from a pinned repo copy given by `INV_REPO`. With one target, an evaluation is one
+simulation either way: `parallel=True` changes where the master runs and how
+a lost GPU is handled, not the time per evaluation.
+
+`parallel=False`: the master holds one GPU and runs each simulation itself.
+
+- Walltime end, maintenance or preemption kills the master and the
+  simulation in progress. Nothing is left running. Resubmit the same
+  command; that evaluation becomes `ABANDONED` and up to one simulation's
+  GPU time is lost.
+- On a preemptible partition, whether Slurm requeues the job or cancels it
+  depends on the partition; a requeued job reruns the script, which resumes
+  by itself. The R3.2 setup notes `ckpt-g2` jobs are limited to 6 h, so an
+  80 h master there needs repeated resubmission.
+
+`parallel=True`: the master runs on a CPU node; each evaluation submits one
+GPU job (`parallel_cfg`) and polls its flag files.
+
+- A preempted or failed GPU job (seen through `sacct`, e.g. `PREEMPTED`) is
+  resubmitted up to `max_job_retries` times in the same folder; if every try
+  fails, the evaluation fails, is not counted, and BO acquires a new
+  candidate (up to 5 attempts per step). The master keeps running.
+- Walltime end of the master: the GPU job of the current evaluation keeps
+  running. `scancel` it (name `i<eval>_d00`) and resubmit the master.
+- Maintenance stops both; resubmit the master afterwards.
+
+Either way the walltime should end before a maintenance window starts, and
+the restart follows **Resuming a run** above.
 
 ---
 
