@@ -371,10 +371,21 @@ What a restart does:
   has exactly one block.
 - Appends to `gp_log_dir/gp_log.jsonl` and `gp_log_dir/states/`; the GP
   `iteration` (number of training points) continues from the loaded count.
-- If the kill cut the last line of `bo_trajectory.csv` or `gp_log.jsonl`,
-  adds the missing newline so the next record starts on its own line. A cut
-  trajectory row is not used; a cut `gp_log.jsonl` line makes `read_gp_log`
-  raise and has to be deleted by hand.
+- If the kill cut the last line of `bo_trajectory.csv`, adds the missing
+  newline so the next record starts on its own line; the cut row is not used.
+- If the kill cut the last line of `gp_log.jsonl` (it is not valid JSON),
+  moves that line to `gp_log_dir/gp_log_truncated.jsonl` and cuts
+  `gp_log.jsonl` back to the line before; the master log says
+  `[resume] .../gp_log.jsonl: last line (line N, B bytes) is not valid JSON
+  (cut by a kill); moved to ...`. Each moved line is one record there: time,
+  line number, byte offset, size, and the text exactly as written. The GP
+  state saved just before that line stays in `gp_log_dir/states/` without a
+  row. A complete last line that only lacks its newline is kept. Any earlier
+  line that is not valid JSON stops the resume with `ValueError` before any
+  evaluation and nothing is changed; that file needs a look by hand.
+  `read_gp_log` skips a cut last line that has no newline (with a warning,
+  without changing the file), so a killed run can be read before it is
+  resumed; any other bad line raises.
 - Raises before any evaluation if a recorded point lies outside the current
   search box or a `"fixed"` value differs from the trajectory: the settings
   changed since the run started. Resume with the original settings or use a

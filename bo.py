@@ -1503,7 +1503,10 @@ def run_bo_resumable(
       ``ABANDONED`` trajectory block, and is not read again; its files stay
       where they are.
     - With ``gp_log_dir``, ``gp_log.jsonl`` and ``states/`` are appended to;
-      the GP ``iteration`` continues from the loaded count.
+      the GP ``iteration`` continues from the loaded count. A last line of
+      ``gp_log.jsonl`` cut by a kill is moved to ``gp_log_truncated.jsonl``
+      first; any earlier line that is not valid JSON raises ``ValueError``
+      before any evaluation (``_set_aside_cut_gp_log_line``).
     - Raises ``ValueError`` if a recorded point is outside the current box or
       a fixed value changed (``load_warm_start_from_trajectory``).
 
@@ -1519,7 +1522,8 @@ def run_bo_resumable(
     trajectory_path = os.path.join(out_root, "bo_trajectory.csv")
     _ensure_trailing_newline(trajectory_path)
     if gp_log_dir is not None:
-        _ensure_trailing_newline(os.path.join(os.fspath(gp_log_dir), "gp_log.jsonl"))
+        _set_aside_cut_gp_log_line(gp_log_dir)
+        _ensure_trailing_newline(os.path.join(os.fspath(gp_log_dir), GP_LOG_FILE))
 
     state = inspect_resume(out_root)
     warm = load_warm_start_from_trajectory(trajectory_path, ps)
@@ -1573,6 +1577,9 @@ def run_bo_resumable(
 # change the candidate sequence.
 
 GP_LOG_VERSION = 1
+GP_LOG_FILE = "gp_log.jsonl"
+# A resume moves a cut last line of gp_log.jsonl here (_set_aside_cut_gp_log_line).
+GP_LOG_CUT_FILE = "gp_log_truncated.jsonl"
 
 # Written into every gp_log.jsonl row. Kept verbatim so the version-1 format
 # does not change.
@@ -1928,23 +1935,104 @@ def _write_gp_iteration(
             "gpytorch_version": _package_version("gpytorch"),
         }
         torch.save(bundle, state_path)
-        with open(log_dir / "gp_log.jsonl", "a") as fh:
+        with open(log_dir / GP_LOG_FILE, "a") as fh:
             fh.write(json.dumps(record, allow_nan=False) + "\n")
             fh.flush()
 
 
+def _gp_log_lines(data: bytes) -> List[Tuple[int, int, bytes]]:
+    """``(line number, byte offset, text)`` of every non-blank line, text
+    without its newline."""
+    out = []
+    offset = 0
+    for number, raw in enumerate(data.split(b"\n"), start=1):
+        if raw.strip():
+            out.append((number, offset, raw))
+        offset += len(raw) + 1
+    return out
+
+
+def _parse_gp_log_line(text: bytes, number: int, path: Path) -> dict:
+    try:
+        return json.loads(text)
+    except ValueError as exc:
+        raise ValueError(f"{path} line {number} is not valid JSON: {exc}") from exc
+
+
 def read_gp_log(gp_log_dir) -> List[dict]:
-    """Read ``<gp_log_dir>/gp_log.jsonl`` in write order. Missing file → ``[]``."""
-    path = Path(gp_log_dir) / "gp_log.jsonl"
+    """Read ``<gp_log_dir>/gp_log.jsonl`` in write order. Missing file → ``[]``.
+
+    A line that is not valid JSON raises ``ValueError``, except the last
+    line while it has no newline: a write still in progress, or one cut by a
+    kill. That line is skipped with a warning and the file is not changed;
+    the next resume moves it to ``gp_log_truncated.jsonl``
+    (``run_bo_resumable``).
+    """
+    path = Path(gp_log_dir) / GP_LOG_FILE
     if not path.is_file():
         return []
+    data = path.read_bytes()
+    lines = _gp_log_lines(data)
     rows = []
-    with open(path) as fh:
-        for line in fh:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
+    for i, (number, _, text) in enumerate(lines):
+        if i == len(lines) - 1 and not data.endswith(b"\n"):
+            try:
+                rows.append(json.loads(text))
+            except ValueError:
+                print(f"[gp log] {path} line {number} has no newline and is not valid "
+                      "JSON (write in progress or cut by a kill); skipped")
+            continue
+        rows.append(_parse_gp_log_line(text, number, path))
     return rows
+
+
+def _set_aside_cut_gp_log_line(gp_log_dir) -> Optional[Dict[str, Any]]:
+    """
+    Resume only. A master killed while appending to ``gp_log.jsonl`` leaves
+    a last line that is not valid JSON. Move that line to
+    ``gp_log_truncated.jsonl`` (one record per moved line: time, line number,
+    byte offset, the text as written) and cut ``gp_log.jsonl`` back to the
+    end of the line before. Only the last line is treated this way: any
+    earlier line that is not valid JSON raises ``ValueError`` and nothing is
+    changed. Returns the record, or ``None`` when nothing was moved.
+    """
+    log_dir = Path(gp_log_dir)
+    path = log_dir / GP_LOG_FILE
+    if not path.is_file():
+        return None
+    data = path.read_bytes()
+    lines = _gp_log_lines(data)
+    for number, _, text in lines[:-1]:
+        _parse_gp_log_line(text, number, path)
+    if not lines:
+        return None
+    number, offset, text = lines[-1]
+    try:
+        json.loads(text)
+        return None
+    except ValueError as exc:
+        error = str(exc)
+
+    record = {
+        "moved_at": datetime.now().isoformat(timespec="seconds"),
+        "source": GP_LOG_FILE,
+        "line": number,
+        "byte_offset": offset,
+        "n_bytes": len(text),
+        "had_newline": offset + len(text) < len(data),
+        "error": error,
+        # surrogateescape keeps any byte, so the text can be restored exactly.
+        "text": text.decode("utf-8", errors="surrogateescape"),
+    }
+    with open(log_dir / GP_LOG_CUT_FILE, "a") as fh:
+        fh.write(json.dumps(record) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    with open(path, "r+b") as fh:
+        fh.truncate(offset)
+    print(f"[resume] {path}: last line (line {number}, {len(text)} bytes) is not valid "
+          f"JSON (cut by a kill); moved to {log_dir / GP_LOG_CUT_FILE}")
+    return record
 
 
 def _torch_load(path):

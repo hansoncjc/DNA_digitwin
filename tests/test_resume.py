@@ -255,15 +255,16 @@ def test_cut_off_last_block(tmp_path):
     assert train_x.shape[0] == 2 and next_id == 3
 
 
-def test_gp_log_cut_line_gets_a_newline(tmp_path, monkeypatch):
+def test_gp_log_cut_line_is_set_aside(tmp_path, monkeypatch):
     log = tmp_path / "gp_log"
     log.mkdir()
     (log / "gp_log.jsonl").write_text('{"iteration": 1}\n{"iteration": 2, "noi')
     monkeypatch.setattr(bo, "run_bo", lambda **kw: (torch.zeros(4), [0.0]))
     obj = lambda *a, **k: None  # noqa: E731
     bo.run_bo_resumable(obj, bo.ParamSpace(CFG), "", str(tmp_path), gp_log_dir=str(log))
-    text = (log / "gp_log.jsonl").read_text()
-    assert text.endswith("\n") and text.count("\n") == 2
+    assert (log / "gp_log.jsonl").read_text() == '{"iteration": 1}\n'
+    moved = [json.loads(s) for s in (log / "gp_log_truncated.jsonl").read_text().splitlines()]
+    assert [m["text"] for m in moved] == ['{"iteration": 2, "noi']
 
 
 def test_m_rel_keyword_removed():
