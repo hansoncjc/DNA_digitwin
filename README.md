@@ -288,6 +288,47 @@ multithread example below); the master process is then CPU-only.
 ### `run_bo(...)` (`bo.py`)
 A small BoTorch loop: `SingleTaskGP` + `qLogExpectedImprovement`,
 optimized over the unit cube. Returns `(best_x_phys, history)`.
+`run_bo(objective, ps, ffpath, max_evals, seed=0, batch_size=1, gp_log_dir=None, ...)`;
+`max_evals` is the number of successful evaluations (`n_iters` was removed
+2026-10-11: `max_evals = n_iters + 1`).
+
+### Batch BO (`batch_size`)
+
+One rule for every `batch_size` (1 included):
+
+- **Batch size.** Each batch evaluates
+  `q = min(batch_size, max_evals - successful so far)` points: `batch_size`
+  points per batch until fewer remain; the last batch takes what is left.
+- **First batch.** While there is no successful evaluation, a batch is the
+  initial point (`"init"` of each parameter) plus `q - 1` scrambled Sobol
+  points in the unit cube of the current box
+  (`torch.quasirandom.SobolEngine(d, scramble=True, seed=seed)`: its own
+  generator, seeded with the BO seed, so the run is reproducible and the
+  torch stream used by acquisition is untouched). With `batch_size=1` the
+  first batch is the initial point alone. A first batch that fails entirely
+  is followed by the initial point and the next Sobol points.
+- **Later batches.** `q` points of qLogEI on a GP fitted to every successful
+  evaluation, from `optimize_acqf(q=q, num_restarts=5, raw_samples=64,
+  sequential=True)`: the points are picked one at a time, each one with the
+  earlier ones of the batch as pending points. GP, Standardize and the
+  optimizer settings are those of `batch_size=1`.
+- **Counting.** `max_evals` counts every successful evaluation, first batch
+  and resumes included. A failed evaluation is logged (FAILED block), not
+  given to the GP and not counted; later batches fill it in. A batch with
+  no successful evaluation counts as one failed attempt; `max_acq_attempts`
+  (default 5) such batches in a row stop the run with `RuntimeError`. A
+  batch with at least one success resets that count.
+- **Execution.** `make_global_objective(...).evaluate_batch` gives each
+  point its own eval id and `eval_XXX/` folder. With `parallel=True` the GPU
+  jobs of every point of the batch are submitted at once (one
+  `eval_XXX/_jobs/` and job names `i<eval>_d<k>` per point; eval ids are
+  never reused, so job names do not repeat in a campaign). The trajectory
+  block of eval k is written as soon as k and every earlier eval of the
+  batch are done, so `bo_trajectory.csv` stays in eval-id order. Each point
+  is polled by its own thread, so the master log shows one launcher status
+  line per point and poll. With `parallel=False` the points are evaluated
+  one after another in the master; `inverse.py` refuses `batch_size > 1` without `parallel=True`
+  (startup check 8).
 
 ---
 
@@ -322,7 +363,7 @@ path), `density` and the potential parameters:
    `scattering_method` (`"saxsfft"` or `"mcdfm"`), `metric`
    (`"mse"`, `"apdist"` or `"shift_rmse"`), `dp_coeff`, `plot_apdist`, `trim_tail`,
    and `sim_defaults` (`steps`, `N`, `device`, `plot`, …).
-4. **Run BO.** `bo.run_bo(objective, ps, ffpath=..., n_iters=...)`.
+4. **Run BO.** `bo.run_bo_resumable(objective, ps, ffpath, out_root, max_evals=..., batch_size=...)`.
 5. **Inspect outputs.** Each evaluation writes to
    `out_root/eval_XXX/<dataset_id>/`:
    - `DNA_assembly_<timestamp>.gsd` – HOOMD trajectory
@@ -351,7 +392,7 @@ path), `density` and the potential parameters:
 
 ## Resuming a run (walltime, maintenance, preemption)
 
-`bo.run_bo_resumable(objective, ps, ffpath, out_root, n_iters=..., gp_log_dir=...)`
+`bo.run_bo_resumable(objective, ps, ffpath, out_root, max_evals=..., batch_size=..., gp_log_dir=...)`
 is the entry point for a fresh start and for every restart. Resubmitting the
 same master with the same `out_root` continues the run; no eval folder has
 to be renamed or deleted by hand.
@@ -359,9 +400,9 @@ to be renamed or deleted by hand.
 What a restart does:
 
 - Loads every successful block of `out_root/bo_trajectory.csv` into the GP.
-- Cap: `n_iters + 1` successful evaluations in total (initial point plus
-  `n_iters` acquisitions), resumes included. Failed evaluations are logged
-  and do not count. A restart that finds the cap reached returns at once.
+- Cap: `max_evals` successful evaluations in total, the first batch and
+  every resume included. Failed and abandoned evaluations are logged and do
+  not count. A restart that finds the cap reached returns at once.
 - Never reuses an eval id: the next id is one past the largest id in the
   trajectory or among the `eval_XXX` folders.
 - The folder of the evaluation that was running when the master stopped has
@@ -369,8 +410,15 @@ What a restart does:
   and an `ABANDONED` flag file, keeps all its files (its candidate is in
   `sim_params_<id>.csv`), and is never read again. Every eval id therefore
   has exactly one block.
-- Appends to `gp_log_dir/gp_log.jsonl` and `gp_log_dir/states/`; the GP
-  `iteration` (number of training points) continues from the loaded count.
+- A batch cut off mid-way: the evals of the batch that have a trajectory
+  block are loaded like any other; every later eval of the batch is
+  `ABANDONED`, also one whose GPU job had finished but whose block was
+  still waiting for an earlier eval (its `DONE` is not read; C23). The next
+  batch refits the GP on every loaded point and acquires anew; its size is
+  `min(batch_size, max_evals - loaded)`.
+- Appends to `gp_log_dir/gp_log.jsonl` and `gp_log_dir/states/`; `n_train`
+  (number of training points) continues from the loaded count and `batch`
+  from the rows already there.
 - If the kill cut the last line of `bo_trajectory.csv`, adds the missing
   newline so the next record starts on its own line; the cut row is not used.
 - If the kill cut the last line of `gp_log.jsonl` (it is not valid JSON),
@@ -397,17 +445,17 @@ Steps after maintenance, a walltime end or a preemption:
 
 1. Check that the old master has stopped (`squeue -u $USER`). Run one master
    per `out_root`.
-2. With `parallel=True`, GPU jobs of the last evaluation outlive a master
+2. With `parallel=True`, GPU jobs of the last batch outlive a master
    that hit its walltime. Their names are `i<eval>_d<k>`, e.g. `i37_d00`
-   for eval 37, dataset `d0` (retries add `_r<n>`); list them with
-   `squeue -u $USER -o "%i %j"` and `scancel` them. Left running they only
-   write into the abandoned folder.
+   for eval 37, dataset `d0` (retries add `_r<n>`); a batch has one per
+   point and dataset. List them with `squeue -u $USER -o "%i %j"` and
+   `scancel` them. Left running they only write into abandoned folders.
 3. Resubmit the same sbatch script, from the same repo copy, with the same
    settings and `out_root`.
 4. Check the first lines of the new master's log:
    `[resume] .../bo_trajectory.csv: N successful, M failed or abandoned evaluation(s)`,
    `[resume] eval_XXX has no trajectory block: ABANDONED, not reused, not read`,
-   `[resume] next eval_id=...; successful evaluations N of <cap>; acquisitions left ...`.
+   `[resume] next eval_id=...; successful evaluations N of max_evals=<cap>; left ...; batch_size=...`.
    `bo.inspect_resume(out_root)` gives the same numbers without writing.
 
 Runs started from a commit before this rule (before `449be0e`,
@@ -416,12 +464,48 @@ that folder by hand before resubmitting.
 
 ---
 
+## GP log (`gp_log_dir`, format version 2)
+
+With `gp_log_dir`, `run_bo` writes one row per batch to
+`gp_log_dir/gp_log.jsonl` and one GP state per row to
+`gp_log_dir/states/ntrain_<n>_attempt_<k>.pt`, plus a final refit of the
+whole sample (`stage="final"`, `ntrain_<n>_final.pt`) that picks nothing.
+Nothing in the log is fed back into acquisition; logging or not gives the
+same candidates.
+
+Row keys (version 2, written since 2026-10-11):
+
+| Key | Meaning |
+|---|---|
+| `gp_log_version` | 2 |
+| `batch` | Number of the GP batch, 1, 2, ... across resumes. Batch 1 is the first one the GP picks; the batch before it (initial point + Sobol points) has no GP and no row. A batch that was cut off or failed keeps its number; `None` for `final` |
+| `n_train`, `stage`, `attempt` | Training points of this GP; `acquisition` or `final`; retries at the same `n_train` count up |
+| `param_names`, `lengthscale`, `outputscale`, `noise`, `mean_constant`, `standardize_mean`, `standardize_std` | GP hyperparameters (`units` in the row) |
+| `q`, `eval_ids` | Points in the batch and their eval ids (`[]` for `final`) |
+| `acq_value`, `acq_value_steps` | qLogEI of the whole batch; step `i` is qLogEI of points `0..i` (sequential picks); `acq_value` is the last step |
+| `candidates_unit`, `candidates_phys`, `candidates_post_mean_loss`, `candidates_post_std_loss` | One entry per point of the batch: position and latent posterior in loss units |
+| `best_*` | Best observed point so far, its loss and posterior |
+| `state_file` | The `states/*.pt` of this row (GP `state_dict`, `train_x`, `train_y`) |
+
+Reading: `bo.read_gp_log(gp_log_dir)` returns every row in this layout.
+Rows of version 1 (C15, one candidate per row; e.g. R3.2, which runs a
+pinned copy) are converted when read: `candidate_*` becomes a one-entry
+`candidates_*`, `next_eval_id` becomes `eval_ids`, `batch` is the row's
+place among the acquisition rows; `gp_log_version` stays 1.
+`read_gp_log(..., raw=True)` gives the rows as written.
+`bo.load_gp_model(state_file)` and `bo.load_gp_posterior(state_file, X_unit)`
+read the states of both versions. A file with both versions (a run resumed
+across the change) reads as one sequence.
+
+---
+
 ## Inverse design (`inverse.py`)
 
 `inverse.py` runs BO over simulation parameters (`mode="sim"`) against one
 target S(q). A campaign is one Python module that defines `CONFIG`; the
 driver holds no campaign values. `campaigns/inverse/inverse-example/config.py`
-shows the format (a 3-evaluation smoke test, not a campaign). Target
+shows the format (a 3-evaluation smoke test, not a campaign);
+`config_batch.py` next to it is the batch-BO example (3 batches of 4). Target
 generation lives in `campaigns/inverse/inverse-targets/`.
 
 ```bash
@@ -442,11 +526,11 @@ Smoke-test overrides: `--out DIR`, `--target FILE`, `--parallel true|false`,
 | `N` | Particle number; the only forward-model argument (README **Forward model**) |
 | `density` | Fixed number density |
 | `search` | Flat `ParamSpace`: `U0`, `r0`, `n` and exactly one of `m`, `m_rel`, each `{"bounds": (lo, hi), "init": x}` or `{"fixed": x}` |
-| `max_evals` | Successful evaluations in total: initial point plus acquisitions, resumes included (`n_iters = max_evals - 1`) |
+| `max_evals` | Successful evaluations in total: first batch and acquisitions, resumes included (README **Batch BO**) |
 | `out_root` | Output directory (relative paths: from the working directory) |
 | `gp_log_dir` | GP log (C15); default `<out_root>/gp_log` |
 | `bo_seed` | torch seed of `run_bo`; default 0 |
-| `batch_size` | Candidates per BO step; only 1 for now |
+| `batch_size` | Points per batch; default 1. `> 1` needs `parallel=True`. Locked on a resume |
 | `potential`, `metric`, `scattering` | Chosen by name: `mie_r0`, `shift_rmse`, `saxsfft` (the only values so far) |
 | `compare_q_range` | Must be `None` (shift_rmse compares over the curve overlap) |
 | `mc_dfm_root` | MC-DFM path for the master and the GPU jobs; default `$MC_DFM_ROOT` |
@@ -476,9 +560,17 @@ Any failure stops the run before the first simulation (exit code 2):
 7. on a resume, the target's md5, `N`, `density`, `search`, the three names,
    `compare_q_range`, `bo_seed`, `batch_size`, `gp_log_dir` and `--steps`
    equal the values in `out_root/inverse_config.json`. Only `max_evals` and
-   the parallel settings may change. `gp_log_dir` is compared relative to
+   the parallel settings may change. `batch_size` is locked: it sets the
+   first batch and every acquisition, so a run whose batch size changed
+   would not be one method. `gp_log_dir` is compared relative to
    `out_root` when it lies inside it, so a run folder moved as a whole
-   still resumes.
+   still resumes;
+8. `batch_size > 1` needs `parallel=True`. With `parallel=False` the master
+   evaluates the points of a batch one after another on its one GPU: a
+   batch of q takes q times as long as one evaluation, so the run takes as
+   long as with `batch_size=1` while the GP is refitted only once per q
+   evaluations and each point is chosen with less data. A batch pays off
+   only when its q simulations run at the same time, one GPU job each.
 
 ### Outputs
 
@@ -498,8 +590,11 @@ The usual BO outputs (`bo_trajectory.csv`, `loss_components.txt`,
 The sbatch templates are in `campaigns/inverse/inverse-example/`
 (`inverse_sequential.sbatch` for `False`, `inverse_parallel.sbatch` for
 `True`); both run `inverse.py` from a pinned repo copy given by `INV_REPO`. With one target, an evaluation is one
-simulation either way: `parallel=True` changes where the master runs and how
-a lost GPU is handled, not the time per evaluation.
+simulation either way: with `batch_size=1`, `parallel=True` changes where the
+master runs and how a lost GPU is handled, not the time per evaluation. With
+`batch_size > 1` (`parallel=True` only) the q simulations of a batch run at
+the same time. `config_batch.py` is a batch example (`batch_size=4`,
+`max_evals=12`, GPU jobs on `gpu-a40`).
 
 `parallel=False`: the master holds one GPU and runs each simulation itself.
 
@@ -519,8 +614,8 @@ GPU job (`parallel_cfg`) and polls its flag files.
   resubmitted up to `max_job_retries` times in the same folder; if every try
   fails, the evaluation fails, is not counted, and BO acquires a new
   candidate (up to 5 attempts per step). The master keeps running.
-- Walltime end of the master: the GPU job of the current evaluation keeps
-  running. `scancel` it (name `i<eval>_d00`) and resubmit the master.
+- Walltime end of the master: the GPU jobs of the current batch keep
+  running. `scancel` them (names `i<eval>_d00`) and resubmit the master.
 - Maintenance stops both; resubmit the master afterwards.
 
 Either way the walltime should end before a maintenance window starts, and
@@ -636,12 +731,14 @@ objective = bo.make_global_objective(
     parallel_cfg      = PARALLEL_CFG,
 )
 
-best_x_phys, history = bo.run_bo(
+best_x_phys, history = bo.run_bo_resumable(
     objective_fn = objective,
     ps           = ps,
     ffpath       = FORMFACTOR,
-    n_iters      = 20,
+    out_root     = OUT_ROOT,
+    max_evals    = 21,                       # successful evaluations, resumes included
     seed         = 42,
+    batch_size   = 1,                        # > 1: q evaluations' GPU jobs at once
 )
 
 best = ps.decode(best_x_phys)
