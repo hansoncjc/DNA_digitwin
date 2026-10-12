@@ -80,7 +80,8 @@ def pipeline(monkeypatch):
     ({"potential": "lj"}, "available"),
     ({"scattering": "mcdfm"}, "available"),
     ({"compare_q_range": (0.003, 0.06)}, "must be None"),
-    ({"batch_size": 10}, "not implemented"),
+    ({"batch_size": 10}, "batch_size > 1 needs parallel=True"),
+    ({"batch_size": 0}, "batch_size must be >= 1"),
     ({"parallel": 1}, "True or False"),
     ({"parallel": True}, "needs parallel_cfg"),
     ({"parallel": True, "parallel_cfg": {"partition": "x"}}, "missing"),
@@ -222,7 +223,8 @@ def test_run_resume_and_summary(tmp_path, pipeline, target):
     path = _write_config(tmp_path, target, max_evals=4)
     summary = inverse.run(path)
     resumed = pipeline["run_bo_log"][-1]
-    assert resumed["warm_start"][0].shape[0] == 1 and resumed["n_iters"] == 3
+    assert resumed["warm_start"][0].shape[0] == 1 and resumed["max_evals"] == 4
+    assert resumed["batch_size"] == 1
     assert summary["n_successful"] == 4 and summary["n_abandoned"] == 1
     assert summary["complete"] and summary["max_evals"] == 4
     best = summary["best"]

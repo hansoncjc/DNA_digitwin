@@ -2,14 +2,14 @@
 R3.2 driver: BO over the physics-based mapping coefficients against the
 ground truth in GT_ROOT, one GPU job per training condition per evaluation.
 
-    python run_r32.py --gt GT_ROOT --out OUT_ROOT [--n-iters N]   # default train_config.N_ITERS
+    python run_r32.py --gt GT_ROOT --out OUT_ROOT [--max-evals N]   # default train_config.MAX_EVALS
     python run_r32.py --gt GT_SMOKE --out OUT_SMOKE --smoke --steps 200000
     python run_r32.py --gt GT_ROOT --out OUT_TRUTH --truth      # one evaluation at the ground truth
 
 Resumes from OUT_ROOT/bo_trajectory.csv when it exists (run_bo_resumable):
 resubmit the same command after a walltime, maintenance or preemption. The
 evaluation that was cut off is marked ABANDONED and never read, the next id is
-past every existing eval_XXX folder, and the cap of N_ITERS + 1 successful
+past every existing eval_XXX folder, and the cap of MAX_EVALS successful
 evaluations counts the earlier ones. ``bo.inspect_resume(OUT_ROOT)`` shows what
 a restart would load without writing anything.
 
@@ -78,8 +78,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--gt", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--n-iters", type=int, default=config.N_ITERS)
-    ap.add_argument("--smoke", action="store_true", help="2 conditions, 1 iteration")
+    ap.add_argument("--max-evals", type=int, default=config.MAX_EVALS,
+                    help="successful evaluations in total, resumes included")
+    ap.add_argument("--smoke", action="store_true", help="2 conditions, 2 evaluations")
     ap.add_argument("--steps", type=int, default=None, help="smoke test only")
     ap.add_argument("--truth", action="store_true", help="one evaluation at the ground truth")
     ap.add_argument("--sequential", action="store_true", help="no Slurm jobs (local test)")
@@ -135,9 +136,9 @@ def main():
               f"(per condition: {a.out}/loss_components.txt)")
         return
 
-    n_iters = 1 if a.smoke else a.n_iters
+    max_evals = 2 if a.smoke else a.max_evals
     best, history = bo.run_bo_resumable(
-        objective, ps, ffpath, a.out, n_iters=n_iters, seed=config.BO_SEED,
+        objective, ps, ffpath, a.out, max_evals=max_evals, seed=config.BO_SEED,
         gp_log_dir=os.path.join(a.out, "gp_log"),
     )
     print("[r32] best:", ps.decode(best), "loss:", min(history))

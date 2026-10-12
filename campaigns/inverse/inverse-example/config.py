@@ -31,11 +31,11 @@ CONFIG = {
         "m_rel": {"bounds": (0.0, 1.0),  "init": 2.0 / 7.0},   # m = 6 at n = 12
     },
 
-    # Successful evaluations in total: initial point + acquisitions, resumes
+    # Successful evaluations in total: first batch + acquisitions, resumes
     # included. Failed and abandoned evaluations do not count.
     "max_evals": 3,
     "bo_seed": 0,
-    "batch_size": 1,                   # batch BO not implemented yet
+    "batch_size": 1,                   # one candidate per BO step; config_batch.py for > 1
 
     "out_root": "./inverse_example_out",
     "gp_log_dir": None,                # None: <out_root>/gp_log

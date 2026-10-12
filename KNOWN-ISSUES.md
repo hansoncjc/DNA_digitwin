@@ -9,45 +9,25 @@ Issues already closed are listed at the bottom for context.
 
 ---
 
-## D. `remaining_bo_iters` assumes every recorded success is an acquisition step
-
-**Where** `bo.remaining_bo_iters`.
-
-**What** Not a bug in the current code, but a constraint worth remembering:
-
-```python
-return max(0, n_iters - (n_successful - 1))
-```
-
-The arithmetic treats the first successful evaluation in `bo_trajectory.csv` as
-the cold-start `init` point and every later one as an acquisition step. Any
-evaluation written to the trajectory that is *not* an acquisition step silently
-eats one of the remaining iterations on resume.
-
-**History** The removed Sobol init-batch feature violated exactly this: its 8
-Sobol points were logged as ordinary successful evaluations, so resuming such a
-campaign lost 8 acquisition steps. Deleting the feature restored the assumption;
-there is no leftover code to change.
-
-**When it would come back** Any future feature that evaluates extra design
-points outside the acquisition loop (a replacement init strategy, a
-space-filling pre-pass, injected candidates from another model) must either
-count them separately or tag them in the CSV, and update this function to match.
-
-**Note on old data** The `testing/inverse/02_fcc/05..08` campaigns did run with
-the Sobol batch, so their `bo_trajectory.csv` files contain `eval_001..008` as
-successful non-acquisition evaluations. Resuming those specific runs would
-mis-count remaining iterations.
-
-**Resume check (2026-10-09)** The assumption holds for `run_bo_resumable`:
-the only successful blocks it writes are the initial point and acquisitions.
-Failed evaluations and the `ABANDONED` blocks written on resume are not
-counted, so the cap of `n_iters + 1` successful evaluations is right across
-any number of restarts.
+No open issue (D closed on 2026-10-11).
 
 ---
 
 ## Fixed in this review
+
+- **D.** `remaining_bo_iters` (`max(0, n_iters - (n_successful - 1))`)
+  treated the first successful evaluation in `bo_trajectory.csv` as the
+  initial point and every later one as an acquisition step, so an
+  evaluation made outside the acquisition loop silently ate one
+  acquisition on resume; the Sobol init batch removed before 2026-09-16 did
+  exactly that. Closed on 2026-10-11 (C24, batch BO): `run_bo` and
+  `run_bo_resumable` count `max_evals` successful evaluations of any kind
+  (initial point, the Sobol points of the first batch, acquisitions), and
+  `remaining_evals(max_evals, n_successful) = max_evals - n_successful`
+  replaces `remaining_bo_iters`. How a point was produced no longer enters
+  the count, also across a batch cut off mid-way. Old data: the
+  `testing/inverse/02_fcc/05..08` trajectories (old Sobol batch) would now
+  count every success against `max_evals`, which is the new rule.
 
 - **E.** `ParamSpace.phys_to_unit` does not clamp, so a warm start from a
   trajectory run with a wider box fed the GP points outside the unit cube

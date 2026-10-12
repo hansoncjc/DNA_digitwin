@@ -22,7 +22,8 @@ def _resume(tmp_path, log, monkeypatch):
     """run_bo_resumable up to the point where it would call run_bo."""
     monkeypatch.setattr(bo, "run_bo", lambda **kw: (torch.zeros(1), [0.0]))
     ps = bo.ParamSpace({"n": {"bounds": (6.0, 12.0), "init": 8.0}})
-    bo.run_bo_resumable(lambda *a, **k: None, ps, "", str(tmp_path), gp_log_dir=str(log))
+    bo.run_bo_resumable(lambda *a, **k: None, ps, "", str(tmp_path), max_evals=1,
+                        gp_log_dir=str(log))
 
 
 def _moved(log):
@@ -35,7 +36,7 @@ def _moved(log):
 def test_read_skips_an_unterminated_cut_last_line(tmp_path, capsys):
     log = _log(tmp_path, f"{ROW1}\n{ROW2}\n{CUT}")
     before = (log / "gp_log.jsonl").read_bytes()
-    rows = bo.read_gp_log(log)
+    rows = bo.read_gp_log(log, raw=True)
     assert [r["iteration"] for r in rows] == [1, 2]
     assert "line 3 has no newline and is not valid JSON" in capsys.readouterr().out
     assert (log / "gp_log.jsonl").read_bytes() == before
@@ -43,7 +44,7 @@ def test_read_skips_an_unterminated_cut_last_line(tmp_path, capsys):
 
 def test_read_keeps_a_complete_last_line_without_newline(tmp_path):
     log = _log(tmp_path, f"{ROW1}\n{ROW2}")
-    assert [r["iteration"] for r in bo.read_gp_log(log)] == [1, 2]
+    assert [r["iteration"] for r in bo.read_gp_log(log, raw=True)] == [1, 2]
 
 
 @pytest.mark.parametrize("text", [
@@ -53,7 +54,7 @@ def test_read_keeps_a_complete_last_line_without_newline(tmp_path):
 def test_read_raises_on_any_other_bad_line(tmp_path, text):
     log = _log(tmp_path, text)
     with pytest.raises(ValueError, match="line 2 is not valid JSON"):
-        bo.read_gp_log(log)
+        bo.read_gp_log(log, raw=True)
 
 
 def test_resume_moves_the_cut_last_line_aside(tmp_path, monkeypatch, capsys):
@@ -73,7 +74,7 @@ def test_resume_moves_the_cut_last_line_aside(tmp_path, monkeypatch, capsys):
     # The next row starts on its own line and the log reads cleanly.
     with open(log / "gp_log.jsonl", "a") as fh:
         fh.write('{"iteration": 3, "stage": "acquisition"}\n')
-    assert [r["iteration"] for r in bo.read_gp_log(log)] == [1, 2, 3]
+    assert [r["iteration"] for r in bo.read_gp_log(log, raw=True)] == [1, 2, 3]
 
     # A second resume finds nothing to move.
     _resume(tmp_path, log, monkeypatch)
@@ -103,7 +104,8 @@ def test_resume_raises_on_a_bad_middle_line_and_changes_nothing(tmp_path, monkey
     monkeypatch.setattr(bo, "run_bo", lambda **kw: called.append(kw))
     ps = bo.ParamSpace({"n": {"bounds": (6.0, 12.0), "init": 8.0}})
     with pytest.raises(ValueError, match="line 2 is not valid JSON"):
-        bo.run_bo_resumable(lambda *a, **k: None, ps, "", str(tmp_path), gp_log_dir=str(log))
+        bo.run_bo_resumable(lambda *a, **k: None, ps, "", str(tmp_path), max_evals=1,
+                            gp_log_dir=str(log))
     assert (log / "gp_log.jsonl").read_bytes() == before
     assert _moved(log) == [] and called == []
 

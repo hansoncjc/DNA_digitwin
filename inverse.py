@@ -31,7 +31,8 @@ Startup checks, all before the first simulation:
      bound of n is above 5 and m_rel lies in [0, 1];
   7. on a resume, the settings that define the run equal the ones in
      out_root/inverse_config.json (only max_evals and the parallel settings
-     may change).
+     may change; batch_size is locked);
+  8. batch_size > 1 needs parallel=True (BATCH_NEEDS_PARALLEL).
 """
 import argparse
 import copy
@@ -90,6 +91,15 @@ LOCKED = ("target_md5", "N", "density", "search", "potential", "metric", "scatte
 
 RMAX_GRID_POINTS = 6
 
+BATCH_NEEDS_PARALLEL = (
+    "batch_size > 1 needs parallel=True. With parallel=False this process "
+    "evaluates the candidates of a batch one after another on its one GPU: a "
+    "batch of q takes q times as long as one evaluation, so the run takes as "
+    "long as with batch_size=1, while the GP is refitted only once per q "
+    "evaluations and each candidate is chosen with less data. Batches only "
+    "pay off when their q evaluations run at the same time, one GPU job each."
+)
+
 
 class ConfigError(ValueError):
     """The configuration or a startup check failed; nothing was simulated."""
@@ -142,14 +152,16 @@ def normalize_config(raw, overrides=None):
         )
     if not isinstance(cfg["parallel"], bool):
         raise ConfigError(f"parallel must be True or False; got {cfg['parallel']!r}")
-    if int(cfg["batch_size"]) != 1:
-        raise ConfigError("batch_size > 1 (batch BO) is not implemented yet; use 1")
-    cfg["batch_size"] = 1
+    cfg["batch_size"] = int(cfg["batch_size"])
+    if cfg["batch_size"] < 1:
+        raise ConfigError(f"batch_size must be >= 1; got {cfg['batch_size']}")
+    if cfg["batch_size"] > 1 and not cfg["parallel"]:
+        raise ConfigError(BATCH_NEEDS_PARALLEL)
     cfg["N"] = int(cfg["N"])
     cfg["density"] = float(cfg["density"])
     cfg["max_evals"] = int(cfg["max_evals"])
     if cfg["max_evals"] < 1:
-        raise ConfigError("max_evals must be >= 1 (successful evaluations, initial point included)")
+        raise ConfigError("max_evals must be >= 1 (successful evaluations, first batch included)")
     if cfg["steps"] is not None:
         cfg["steps"] = int(cfg["steps"])
 
@@ -550,6 +562,7 @@ def write_summary(cfg, bo, snapshot=None):
         "snapshot": str(out_root / SNAPSHOT),
         "loss": "shift_rmse (defaults): loss = rmse + lambda_shift * |ln(q1_sim / q1_tgt)|",
         "max_evals": cfg["max_evals"],
+        "batch_size": cfg["batch_size"],
         "n_successful": len(successful),
         "n_failed": sum(1 for s in statuses.values() if s == "FAILED"),
         "n_abandoned": sum(1 for s in statuses.values() if s == "ABANDONED"),
@@ -569,7 +582,8 @@ def write_summary(cfg, bo, snapshot=None):
            if summary["dirty_starts"] else ""),
         f"loss        : {summary['loss']}",
         f"evaluations : {summary['n_successful']} successful of max_evals="
-        f"{summary['max_evals']}; {summary['n_failed']} failed; "
+        f"{summary['max_evals']} (batch_size {summary['batch_size']}); "
+        f"{summary['n_failed']} failed; "
         f"{summary['n_abandoned']} abandoned"
         + ("" if summary["complete"] else "  (not complete)"),
     ]
@@ -605,7 +619,8 @@ def run(config_path, overrides=None, check=False, summary_only=False):
     info, ps, _dataset, objective, snapshot = preflight(cfg, bo)
     mode = "parallel (one GPU job per evaluation)" if cfg["parallel"] else "sequential (this process)"
     print(f"[inverse] {mode}; max_evals={cfg['max_evals']} successful evaluations "
-          f"(initial point included, resumes counted); bo_seed={cfg['bo_seed']}"
+          f"(first batch included, resumes counted); batch_size={cfg['batch_size']}; "
+          f"bo_seed={cfg['bo_seed']}"
           + (f"; TEST steps={cfg['steps']}" if cfg["steps"] is not None else ""))
     if check:
         state = bo.inspect_resume(cfg["out_root"])
@@ -615,8 +630,8 @@ def run(config_path, overrides=None, check=False, summary_only=False):
     os.makedirs(cfg["out_root"], exist_ok=True)
     snapshot = write_snapshot(cfg, info, snapshot, config_path)
     best, history = bo.run_bo_resumable(
-        objective, ps, str(FORMFACTOR), cfg["out_root"], n_iters=cfg["max_evals"] - 1,
-        seed=cfg["bo_seed"], gp_log_dir=cfg["gp_log_dir"],
+        objective, ps, str(FORMFACTOR), cfg["out_root"], max_evals=cfg["max_evals"],
+        seed=cfg["bo_seed"], batch_size=cfg["batch_size"], gp_log_dir=cfg["gp_log_dir"],
     )
     return write_summary(cfg, bo, snapshot)
 

@@ -32,7 +32,7 @@ obj = make_global_objective(datasets, ps, ffpath, out_root="Optimization_Results
                             trim_tail=0, sim_defaults={"N": 5000},
                             metric="shift_rmse", compare_q_range=None)
 
-best, history = run_bo_resumable(obj, ps, ffpath, "Optimization_Results", n_iters=20)
+best, history = run_bo_resumable(obj, ps, ffpath, "Optimization_Results", max_evals=21)
 print("Best params (physical):", ps.decode(best))
 """
 
@@ -40,6 +40,7 @@ import os
 import re
 import json
 import random
+import threading
 import traceback
 import numpy as np
 import torch
@@ -749,7 +750,7 @@ def _collect_parallel_eval_loss(
     return total_loss, not eval_failed, iteration_records
 
 
-def _run_objective_parallel(
+def _start_parallel_eval(
     datasets: List[Any],
     eval_id: int,
     G: Dict[str, Any],
@@ -765,17 +766,19 @@ def _run_objective_parallel(
     dp_coeff: float,
     plot_apdist: bool,
     parallel_cfg: Dict[str, Any],
-    iteration_data: List[Dict[str, Any]],
     metric_kwargs: Optional[Dict[str, Any]] = None,
-) -> float:
+) -> Dict[str, Any]:
     """
-    Parallel analogue of the per-dataset sequential loop in `objective`.
+    Parallel analogue of the per-dataset sequential loop in `objective`, first
+    half: resolve the datasets of one evaluation and submit one Slurm GPU job
+    per dataset via `parallel.submit_jobs_with_retry`, in a background thread
+    that waits for every job to reach a terminal state.
 
-    Submits one Slurm GPU job per dataset via `parallel.submit_jobs`, waits
-    for all of them to reach a terminal state, and collects each job's
-    loss from its `DONE` flag file. Mutates `iteration_data` in place so
-    the caller can write the trajectory CSV block exactly as in the
-    sequential path.
+    Returns a handle for `_finish_parallel_eval`. A batch starts all its
+    evaluations before it finishes the first, so every job of the batch is
+    submitted at once. Each evaluation keeps its own ``eval_XXX/_jobs`` and
+    job names ``i<eval>_d<k>``; eval ids are never reused, so names do not
+    repeat within a campaign.
     """
     from parallel import submit_jobs_with_retry  # lazy import
 
@@ -796,54 +799,71 @@ def _run_objective_parallel(
         ffpath=ffpath,
         metric_kwargs=metric_kwargs,
     )
-
-    if fail_reason is not None:
-        iteration_data.extend(fail_records)
-        _write_failed_iteration_block(
-            os.path.join(out_root, "bo_trajectory.csv"),
-            eval_id,
-            iteration_data,
-            reason=fail_reason,
-        )
-        iteration_data.clear()
-        raise EvaluationFailed(fail_reason)
-
-    finished_jobs: List[Any] = []
-    if job_specs:
+    handle: Dict[str, Any] = {
+        "eval_id": eval_id, "G": G, "plans": plans,
+        "fail_records": fail_records, "fail_reason": fail_reason,
+        "jobs": [], "error": None, "thread": None,
+    }
+    if fail_reason is None and job_specs:
         pcfg = parallel_cfg or {}
         cfg = _launcher_config_from_pcfg(
             pcfg, Path(out_root) / f"eval_{eval_id:03d}" / "_jobs",
         )
-        finished_jobs = submit_jobs_with_retry(
-            job_specs,
-            cfg,
-            max_job_retries=int(pcfg.get("max_job_retries", DEFAULT_MAX_JOB_RETRIES)),
-            clean=True,
-            poll_interval=pcfg.get("poll_interval"),
-            max_wait=pcfg.get("max_wait"),
+
+        def submit():
+            try:
+                handle["jobs"] = submit_jobs_with_retry(
+                    job_specs,
+                    cfg,
+                    max_job_retries=int(pcfg.get("max_job_retries", DEFAULT_MAX_JOB_RETRIES)),
+                    clean=True,
+                    poll_interval=pcfg.get("poll_interval"),
+                    max_wait=pcfg.get("max_wait"),
+                )
+            except BaseException as exc:   # re-raised by _finish_parallel_eval
+                handle["error"] = exc
+
+        # Daemon: a master that raises does not wait for the other jobs.
+        thread = threading.Thread(target=submit, name=f"eval_{eval_id:03d}", daemon=True)
+        handle["thread"] = thread
+        thread.start()
+    return handle
+
+
+def _finish_parallel_eval(
+    handle: Dict[str, Any], out_root: str,
+) -> Tuple[float, List[Dict[str, Any]]]:
+    """
+    Second half of `_start_parallel_eval`: wait for the evaluation's jobs and
+    collect each job's loss from its `DONE` flag file. Returns
+    ``(total_loss, records)`` for the caller's trajectory block; a failed
+    evaluation writes its FAILED block here and raises `EvaluationFailed`.
+    """
+    eval_id = handle["eval_id"]
+    trajectory_path = os.path.join(out_root, "bo_trajectory.csv")
+    if handle["fail_reason"] is not None:
+        _write_failed_iteration_block(
+            trajectory_path, eval_id, handle["fail_records"], reason=handle["fail_reason"],
         )
+        raise EvaluationFailed(handle["fail_reason"])
+
+    if handle["thread"] is not None:
+        handle["thread"].join()
+    if handle["error"] is not None:
+        raise handle["error"]
 
     total_loss, success, records = _collect_parallel_eval_loss(
         eval_id=eval_id,
-        G=G,
-        plans=plans,
-        finished_jobs=finished_jobs,
+        G=handle["G"],
+        plans=handle["plans"],
+        finished_jobs=handle["jobs"],
         out_root=out_root,
     )
-    iteration_data.extend(records)
-
     if not success:
         reason = f"one or more parallel jobs failed for eval_id={eval_id}"
-        _write_failed_iteration_block(
-            os.path.join(out_root, "bo_trajectory.csv"),
-            eval_id,
-            iteration_data,
-            reason=reason,
-        )
-        iteration_data.clear()
+        _write_failed_iteration_block(trajectory_path, eval_id, records, reason=reason)
         raise EvaluationFailed(reason)
-
-    return total_loss
+    return total_loss, records
 
 
 N_GRID_RTOL = 0.05
@@ -950,8 +970,14 @@ def make_global_objective(
         ``scattering_kwargs['N_grid']`` (default 600) within 5 %, otherwise
         ``ValueError`` is raised before any simulation runs.
     Failed evaluations (after GPU job retry) raise ``EvaluationFailed``; they are
-    logged to ``bo_trajectory.csv`` but not fed to the GP. ``run_bo`` re-acquires
-    a new candidate instead.
+    logged to ``bo_trajectory.csv`` but not fed to the GP. ``run_bo`` fills
+    them in with later candidates.
+
+    ``objective.evaluate_batch(X_unit, ffpath)`` evaluates a batch ``(q, d)``
+    with consecutive eval ids and returns one loss tensor, or ``None`` for a
+    failed evaluation, per row; ``run_bo`` uses it for every batch, q = 1
+    included. With ``parallel=True`` all GPU jobs of the batch are submitted
+    at once; trajectory blocks are written in eval-id order.
     """
     sim_defaults = {} if sim_defaults is None else dict(sim_defaults)
 
@@ -972,72 +998,24 @@ def make_global_objective(
     elif metric_kwargs:
         raise ValueError(f"metric_kwargs are only used by metric='shift_rmse' (got {metric!r})")
 
-    def objective(x_unit: torch.Tensor, ffpath: str) -> torch.Tensor:
-        objective._eval_failed = False
-        # assign a unique id to this BO evaluation
-        # ffpath: path to polydispersed sphere formfactor
-        if not hasattr(objective, "_eval_id"):
-            objective._eval_id = 0
-        if not hasattr(objective, "_iteration_data"):
-            objective._iteration_data = []  # Track data for global CSV
-        eval_id = objective._eval_id
-        objective._eval_id += 1
+    trajectory_path = os.path.join(out_root, "bo_trajectory.csv")
 
-        # x_unit: (1,d) or (d,)
-        x_unit = x_unit.reshape(-1)
-        # 1) map [0,1] → physical
-        x_phys = ps.unit_to_phys(x_unit)
-        # 2) decode into named parameters
-        G = ps.decode(x_phys)
+    def _take_eval_ids(q: int) -> List[int]:
+        """Assign the next ``q`` eval ids (one per BO evaluation)."""
+        first = int(getattr(objective, "_eval_id", 0))
+        objective._eval_id = first + q
+        return list(range(first, first + q))
 
+    def _decode(x_unit: torch.Tensor) -> Dict[str, Any]:
+        # x_unit: (1,d) or (d,); [0,1] → physical → named parameters
+        return ps.decode(ps.unit_to_phys(x_unit.reshape(-1)))
+
+    def _evaluate_sequential(eval_id: int, G: Dict[str, Any], ffpath: str):
+        """All datasets of one evaluation in this process. Returns
+        ``(total_loss, records)``; a failure writes the FAILED block and
+        raises ``EvaluationFailed``."""
         total_loss = 0.0
-
-        # --- Parallel fast path: submit one sbatch GPU job per dataset ---
-        # All N simulations (+ SAXS conversion + loss computation) run
-        # concurrently on separate GPUs via DNA_digitwin/parallel/. The
-        # trajectory CSV block below is shared with the sequential path.
-        if parallel:
-            try:
-                total_loss = _run_objective_parallel(
-                    datasets=datasets,
-                    eval_id=eval_id,
-                    G=G,
-                    out_root=out_root,
-                    ffpath=ffpath,
-                    trim_tail=trim_tail,
-                    sim_defaults=sim_defaults,
-                    mode=mode,
-                    scattering_method=scattering_method,
-                    scattering_kwargs=scattering_kwargs,
-                    metric=metric,
-                    compare_q_range=compare_q_range,
-                    dp_coeff=dp_coeff,
-                    plot_apdist=plot_apdist,
-                    parallel_cfg=parallel_cfg or {},
-                    iteration_data=objective._iteration_data,
-                    metric_kwargs=metric_kwargs,
-                )
-            except EvaluationFailed as exc:
-                objective._eval_failed = True
-                print(f"[bo] evaluation {eval_id} failed: {exc}")
-                raise
-
-            if len(objective._iteration_data) > 0:
-                trajectory_path = os.path.join(out_root, "bo_trajectory.csv")
-                _write_iteration_block(
-                    filepath=trajectory_path,
-                    iteration=eval_id,
-                    total_loss=float(total_loss),
-                    records=objective._iteration_data,
-                )
-                _append_loss_components(
-                    out_root, eval_id, float(total_loss), objective._iteration_data,
-                )
-                objective._iteration_data = []
-
-            return torch.tensor([[total_loss]], dtype=torch.float64)
-
-        # --- Sequential path (original behavior, unchanged) ---
+        records: List[Dict[str, Any]] = []
         eval_failed = False
         for ds in datasets:
             plan = None   # resolved sim inputs, recorded in a failed row
@@ -1127,7 +1105,7 @@ def make_global_objective(
                 total_loss += ds.weight * loss
 
                 # Store data for global trajectory CSV
-                trajectory_record = {
+                records.append({
                     "iteration": eval_id,
                     "dataset_id": ds.id,
                     "loss": loss,
@@ -1139,8 +1117,7 @@ def make_global_objective(
                     "U0": float(U0),
                     **_m_rel_column(G),
                     **_audit_fields(sim_result, r0, save_dir),
-                }
-                objective._iteration_data.append(trajectory_record)
+                })
 
             except Exception as e:
                 eval_failed = True
@@ -1150,52 +1127,112 @@ def make_global_objective(
                         fh.write(f"eval {eval_id} {reason}: {e}\n")
                 except Exception:
                     pass
-
-                trajectory_record = _failed_trajectory_record(
-                    eval_id, ds.id, G, plan=plan, reason=reason)
-                objective._iteration_data.append(trajectory_record)
+                records.append(_failed_trajectory_record(
+                    eval_id, ds.id, G, plan=plan, reason=reason))
 
         if eval_failed:
             reason = f"sequential evaluation failed for eval_id={eval_id}"
-            if len(objective._iteration_data) > 0:
-                _write_failed_iteration_block(
-                    os.path.join(out_root, "bo_trajectory.csv"),
-                    eval_id,
-                    objective._iteration_data,
-                    reason=reason,
-                )
-                objective._iteration_data = []
-            objective._eval_failed = True
+            if records:
+                _write_failed_iteration_block(trajectory_path, eval_id, records, reason=reason)
             raise EvaluationFailed(reason)
+        return total_loss, records
+
+    def _start(eval_id: int, G: Dict[str, Any], ffpath: str):
+        """Submit the GPU jobs of one evaluation (parallel); nothing to do
+        before ``_finish`` in the sequential path."""
+        if not parallel:
+            return None
+        return _start_parallel_eval(
+            datasets=datasets,
+            eval_id=eval_id,
+            G=G,
+            out_root=out_root,
+            ffpath=ffpath,
+            trim_tail=trim_tail,
+            sim_defaults=sim_defaults,
+            mode=mode,
+            scattering_method=scattering_method,
+            scattering_kwargs=scattering_kwargs,
+            metric=metric,
+            compare_q_range=compare_q_range,
+            dp_coeff=dp_coeff,
+            plot_apdist=plot_apdist,
+            parallel_cfg=parallel_cfg or {},
+            metric_kwargs=metric_kwargs,
+        )
+
+    def _finish(eval_id: int, G: Dict[str, Any], handle, ffpath: str) -> torch.Tensor:
+        """Complete one evaluation and write its trajectory block; the same
+        block in both paths. Raises ``EvaluationFailed`` on failure."""
+        if parallel:
+            # All N simulations (+ SAXS conversion + loss computation) ran
+            # concurrently on separate GPUs via DNA_digitwin/parallel/.
+            try:
+                total_loss, records = _finish_parallel_eval(handle, out_root)
+            except EvaluationFailed as exc:
+                print(f"[bo] evaluation {eval_id} failed: {exc}")
+                raise
+        else:
+            total_loss, records = _evaluate_sequential(eval_id, G, ffpath)
 
         # Write iteration block to global trajectory CSV
-        if len(objective._iteration_data) > 0:
-            trajectory_path = os.path.join(out_root, "bo_trajectory.csv")
+        if records:
             _write_iteration_block(
                 filepath=trajectory_path,
                 iteration=eval_id,
                 total_loss=float(total_loss),
-                records=objective._iteration_data
+                records=records,
             )
-            _append_loss_components(
-                out_root, eval_id, float(total_loss), objective._iteration_data,
-            )
-            # Reset for next iteration
-            objective._iteration_data = []
+            _append_loss_components(out_root, eval_id, float(total_loss), records)
 
         # Return as a 1-element tensor (BoTorch expects a tensor)
         return torch.tensor([[total_loss]], dtype=torch.float64)
 
-    objective._eval_failed = False
+    def objective(x_unit: torch.Tensor, ffpath: str) -> torch.Tensor:
+        """One evaluation. ffpath: path to polydispersed sphere formfactor."""
+        (eval_id,) = _take_eval_ids(1)
+        G = _decode(x_unit)
+        return _finish(eval_id, G, _start(eval_id, G, ffpath), ffpath)
+
+    def evaluate_batch(X_unit: torch.Tensor, ffpath: str) -> List[Optional[torch.Tensor]]:
+        """
+        Evaluate the rows of ``X_unit`` ``(q, d)``, one eval id each, in row
+        order. Returns the loss tensor of each row, or ``None`` where the
+        evaluation failed (its FAILED block is written).
+
+        parallel=True submits the GPU jobs of every row at once; the
+        trajectory block of eval k is written once k and every earlier
+        eval of the batch are done, so blocks stay in eval-id order.
+        parallel=False evaluates the rows one after another in this process.
+        The ``eval_XXX`` folders of the rows after the first are created at
+        once, so a run killed mid-batch leaves a folder for every id it
+        assigned (a resume marks them ABANDONED and does not reuse the ids).
+        """
+        X = X_unit if X_unit.ndim == 2 else X_unit.unsqueeze(0)
+        ids = _take_eval_ids(int(X.shape[0]))
+        for eval_id in ids[1:]:
+            os.makedirs(os.path.join(out_root, f"eval_{eval_id:03d}"), exist_ok=True)
+        Gs = [_decode(x) for x in X]
+        handles = [_start(eval_id, G, ffpath) for eval_id, G in zip(ids, Gs)]
+        out: List[Optional[torch.Tensor]] = []
+        for eval_id, G, handle in zip(ids, Gs, handles):
+            try:
+                out.append(_finish(eval_id, G, handle, ffpath))
+            except EvaluationFailed:
+                out.append(None)
+        return out
+
+    objective.evaluate_batch = evaluate_batch
     return objective
 
 
 # ------------------------- Warm start from trajectory ------------------------- #
 #
 # Resume rules (run_bo_resumable):
-# - The evaluation cap counts successful evaluations, resumes included: one
-#   initial point plus ``n_iters`` acquisitions. Failed evaluations are logged
-#   and do not count.
+# - The evaluation cap ``max_evals`` counts successful evaluations of any
+#   kind (initial point, Sobol points of the first batch, acquisitions),
+#   resumes included. Failed and abandoned evaluations are logged and do not
+#   count.
 # - Eval ids are never reused: the next id is one past the largest id in
 #   bo_trajectory.csv or among the eval_XXX folders.
 # - An eval_XXX folder without a trajectory block (the run stopped during that
@@ -1209,17 +1246,13 @@ ABANDONED_FLAG = "ABANDONED"
 _EVAL_DIR_RE = re.compile(r"^eval_(\d+)$")
 
 
-def remaining_bo_iters(n_iters: int, n_successful: int) -> int:
+def remaining_evals(max_evals: int, n_successful: int) -> int:
     """
-    Acquisition steps left when resuming BO.
-
-    Cold start runs one initial eval plus ``n_iters`` acquisitions (``n_iters + 1``
-    evaluations total). ``n_successful`` is the number of successful evaluations
-    already recorded (including the initial point).
+    Successful evaluations still to run: ``max_evals`` counts every
+    successful evaluation already recorded (``n_successful``), whatever
+    produced its point.
     """
-    if n_successful <= 0:
-        return n_iters
-    return max(0, n_iters - (n_successful - 1))
+    return max(0, int(max_evals) - int(n_successful))
 
 
 def _read_trajectory(
@@ -1482,9 +1515,10 @@ def run_bo_resumable(
     ps: ParamSpace,
     ffpath: str,
     out_root: str,
-    n_iters: int = 20,
+    max_evals: int,
     seed: int = 0,
     *,
+    batch_size: int = 1,
     max_acq_attempts: int = DEFAULT_MAX_ACQ_ATTEMPTS,
     gp_log_dir: Optional[str] = None,
 ) -> Tuple[torch.Tensor, List[float]]:
@@ -1494,16 +1528,20 @@ def run_bo_resumable(
     The single entry point for a fresh start and for every restart, whatever
     stopped the previous master (walltime, maintenance, preemption):
 
-    - At most ``n_iters + 1`` successful evaluations in total (initial point
-      plus ``n_iters`` acquisitions), resumes included. Failed evaluations
-      do not count.
+    - At most ``max_evals`` successful evaluations in total, the first batch
+      and resumes included. Failed and abandoned evaluations do not count.
     - ``objective_fn._eval_id`` is set one past every id in the trajectory and
       every ``eval_XXX`` folder, so no eval id is reused.
     - A folder without a trajectory block gets an ``ABANDONED`` flag and an
       ``ABANDONED`` trajectory block, and is not read again; its files stay
-      where they are.
+      where they are. A batch cut off mid-way leaves such folders for the
+      evaluations it had not written yet; the evaluations it had written are
+      loaded.
+    - Every loaded point goes into the GP that picks the next batch. A
+      resume with no successful evaluation starts again from the initial
+      batch (initial point plus Sobol points).
     - With ``gp_log_dir``, ``gp_log.jsonl`` and ``states/`` are appended to;
-      the GP ``iteration`` continues from the loaded count. A last line of
+      ``n_train`` and the batch number continue. A last line of
       ``gp_log.jsonl`` cut by a kill is moved to ``gp_log_truncated.jsonl``
       first; any earlier line that is not valid JSON raises ``ValueError``
       before any evaluation (``_set_aside_cut_gp_log_line``).
@@ -1515,9 +1553,12 @@ def run_bo_resumable(
 
     Parameters
     ----------
+    max_evals, batch_size, max_acq_attempts
+        Forwarded to ``run_bo``.
     gp_log_dir
-        Forwarded to ``run_bo``. When the trajectory already contains every
-        requested iteration, ``run_bo`` is not called and nothing new is written.
+        Forwarded to ``run_bo``. When the trajectory already holds
+        ``max_evals`` successful evaluations, ``run_bo`` is not called and
+        nothing new is written.
     """
     trajectory_path = os.path.join(out_root, "bo_trajectory.csv")
     _ensure_trailing_newline(trajectory_path)
@@ -1531,12 +1572,12 @@ def run_bo_resumable(
     objective_fn._eval_id = next_eval_id
 
     warm_start = None
-    remaining = n_iters
+    n_loaded = 0
     if warm is not None:
         train_x, train_y, _ = warm
         warm_start = (train_x, train_y)
-        remaining = remaining_bo_iters(n_iters, train_x.shape[0])
-    n_loaded = 0 if warm is None else int(warm[0].shape[0])
+        n_loaded = int(train_x.shape[0])
+    remaining = remaining_evals(max_evals, n_loaded)
     if state["folder_ids"] or n_loaded or state["failed_ids"]:
         print(
             f"[resume] {trajectory_path}: {n_loaded} successful, "
@@ -1545,8 +1586,8 @@ def run_bo_resumable(
     _mark_abandoned(out_root, state["orphan_ids"], next_eval_id)
     print(
         f"[resume] next eval_id={next_eval_id}; successful evaluations "
-        f"{n_loaded} of {n_iters + 1}; acquisitions left {remaining}"
-        + ("" if warm is not None else " (cold start: initial point first)")
+        f"{n_loaded} of max_evals={max_evals}; left {remaining}; batch_size={batch_size}"
+        + ("" if warm is not None else " (cold start: initial batch first)")
     )
 
     if warm is not None and remaining == 0:
@@ -1561,11 +1602,12 @@ def run_bo_resumable(
         objective_fn=objective_fn,
         ps=ps,
         ffpath=ffpath,
-        n_iters=remaining,
+        max_evals=max_evals,
         seed=seed,
         warm_start=warm_start,
         max_acq_attempts=max_acq_attempts,
         gp_log_dir=gp_log_dir,
+        batch_size=batch_size,
     )
 
 
@@ -1576,22 +1618,25 @@ def run_bo_resumable(
 # generators back, so a posterior evaluation or the extra final refit cannot
 # change the candidate sequence.
 
-GP_LOG_VERSION = 1
+GP_LOG_VERSION = 2
+# Formats read_gp_log and load_gp_model accept. Version 1 (2026-10-07 to
+# C24, one candidate per row) is read as version 2 (_gp_row_v1_as_v2).
+GP_LOG_READ_VERSIONS = (1, 2)
 GP_LOG_FILE = "gp_log.jsonl"
 # A resume moves a cut last line of gp_log.jsonl here (_set_aside_cut_gp_log_line).
 GP_LOG_CUT_FILE = "gp_log_truncated.jsonl"
 
-# Written into every gp_log.jsonl row. Kept verbatim so the version-1 format
-# does not change.
+# Written into every gp_log.jsonl row (version 2).
 GP_LOG_UNITS = (
-    "lengthscale: unit cube, columns follow param_names "
-    "(ParamSpace order: globals, then locals as name:dataset_id). "
-    "SAAS lengthscale, outputscale, noise, and mean_constant list every "
-    "retained MCMC sample; they are not a summary. "
+    "lengthscale: unit cube, columns follow param_names (ParamSpace order). "
     "outputscale, noise, mean_constant: Standardize z-scored train_y space. "
     "standardize_mean and standardize_std: Standardize buffers of train_y=-loss. "
-    "post_*_loss: latent posterior (observation_noise=False); "
-    "mean_loss=-mean(train_y), std_loss=std(train_y)."
+    "candidates_post_*_loss, best_post_*_loss: latent posterior "
+    "(observation_noise=False) in loss units: mean_loss=-mean(train_y), "
+    "std_loss=std(train_y). acq_value: qLogEI of the whole batch, the log of "
+    "the expected improvement of its best point over best_f=max(train_y); "
+    "acq_value_steps[i]: qLogEI of candidates 0..i (optimize_acqf "
+    "sequential=True picks them one at a time); acq_value is the last step."
 )
 
 
@@ -1821,17 +1866,16 @@ def _package_version(module_name: str) -> Optional[str]:
     return getattr(module, "__version__", None)
 
 
-def _acq_to_float(acq_value) -> Optional[float]:
+def _acq_steps(acq_value, q: int) -> Optional[List[float]]:
+    """``optimize_acqf`` acquisition value(s) as a list of ``q`` floats: one
+    per sequential step (q > 1) or the single value (q = 1)."""
     if acq_value is None:
         return None
-    if torch.is_tensor(acq_value):
-        flat = acq_value.detach().reshape(-1)
-        if flat.numel() != 1:
-            raise RuntimeError(
-                f"acquisition value shape {tuple(acq_value.shape)} is not scalar"
-            )
-        return float(flat[0].item())
-    return float(acq_value)
+    flat = (acq_value.detach().reshape(-1).cpu().tolist() if torch.is_tensor(acq_value)
+            else [acq_value])
+    if len(flat) != q:
+        raise RuntimeError(f"{len(flat)} acquisition value(s) for a batch of {q}")
+    return [float(v) for v in flat]
 
 
 def _write_gp_iteration(
@@ -1842,16 +1886,20 @@ def _write_gp_iteration(
     ps: ParamSpace,
     *,
     stage: str,
+    batch: Optional[int],
     acq_value,
-    candidate: Optional[torch.Tensor],
-    next_eval_id: Optional[int],
+    candidates: Optional[torch.Tensor],
+    eval_ids: Optional[List[int]],
 ) -> None:
     """Append one GP fit to ``gp_log.jsonl`` and write a new ``states/*.pt``.
 
-    ``iteration`` is ``n_train``, the number of successful observations this
-    GP was trained on. A later resume continues from the loaded count.
-    Acquisition retries and a second final snapshot at the same ``n_train``
-    get a new file (``attempt`` / ``final_k``) instead of overwriting.
+    One row per batch (``stage="acquisition"``): ``batch`` is its number,
+    ``n_train`` the number of successful observations the GP was trained
+    on, ``candidates`` ``(q, d)`` the points the batch evaluates and
+    ``eval_ids`` their eval ids. The final refit (``stage="final"``) has no
+    candidates. A later resume continues both counters. Acquisition retries
+    and a second final snapshot at the same ``n_train`` get a new file
+    (``attempt`` / ``final_k``) instead of overwriting.
     """
     log_dir = Path(gp_log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -1869,28 +1917,19 @@ def _write_gp_iteration(
         best_index = int(torch.argmax(train_y))
         best_unit = _cpu_row(train_x[best_index])
         best_phys = ps.unit_to_phys(best_unit)
-        points = []
-        if candidate is not None:
-            points.append(_cpu_row(candidate))
-        points.append(best_unit)
+        cand_rows = ([] if candidates is None
+                     else [_cpu_row(c) for c in candidates.reshape(-1, n_dims)])
+        q = len(cand_rows)
+        if eval_ids is not None and stage == "acquisition" and len(eval_ids) != q:
+            raise RuntimeError(f"{len(eval_ids)} eval ids for a batch of {q}")
+        steps = _acq_steps(acq_value, q)
         with torch.no_grad():
-            post = gp_posterior(model, torch.stack(points, dim=0))
-
-        if candidate is None:
-            cand_unit = cand_phys = None
-            cand_mean = cand_std = None
-            best_slot = 0
-        else:
-            cand_unit = points[0].tolist()
-            cand_phys = ps.unit_to_phys(points[0]).tolist()
-            cand_mean = float(post["mean_loss"][0].item())
-            cand_std = float(post["std_loss"][0].item())
-            best_slot = 1
+            post = gp_posterior(model, torch.stack(cand_rows + [best_unit], dim=0))
 
         state_path, attempt = _allocate_state_path(log_dir, n_train, stage)
         record = {
             "gp_log_version": GP_LOG_VERSION,
-            "iteration": n_train,
+            "batch": batch,
             "n_train": n_train,
             "stage": stage,
             "attempt": attempt,
@@ -1900,28 +1939,31 @@ def _write_gp_iteration(
             "outputscale": hypers["outputscale"],
             "noise": hypers["noise"],
             "mean_constant": hypers["mean_constant"],
-            # Always None; kept so the version-1 format does not change.
-            "n_mcmc": None,
             "standardize_mean": hypers["standardize_mean"],
             "standardize_std": hypers["standardize_std"],
             "observation_noise": False,
-            "acq_value": _acq_to_float(acq_value),
-            "candidate_unit": cand_unit,
-            "candidate_phys": cand_phys,
-            "candidate_post_mean_loss": cand_mean,
-            "candidate_post_std_loss": cand_std,
+            "q": q,
+            "eval_ids": (None if eval_ids is None else [int(i) for i in eval_ids])
+                        if stage == "acquisition" else [],
+            "acq_value": None if steps is None else steps[-1],
+            "acq_value_steps": steps,
+            "candidates_unit": [r.tolist() for r in cand_rows],
+            "candidates_phys": [ps.unit_to_phys(r).tolist() for r in cand_rows],
+            "candidates_post_mean_loss": [float(post["mean_loss"][i].item()) for i in range(q)],
+            "candidates_post_std_loss": [float(post["std_loss"][i].item()) for i in range(q)],
             "best_index": best_index,
             "best_unit": best_unit.tolist(),
             "best_phys": best_phys.tolist(),
             "best_observed_loss": -float(train_y.reshape(-1)[best_index].item()),
-            "best_post_mean_loss": float(post["mean_loss"][best_slot].item()),
-            "best_post_std_loss": float(post["std_loss"][best_slot].item()),
-            "next_eval_id": None if next_eval_id is None else int(next_eval_id),
+            "best_post_mean_loss": float(post["mean_loss"][q].item()),
+            "best_post_std_loss": float(post["std_loss"][q].item()),
             "state_file": state_path.relative_to(log_dir).as_posix(),
             "units": GP_LOG_UNITS,
         }
         bundle = {
             "gp_log_version": GP_LOG_VERSION,
+            "batch": batch,
+            "stage": stage,
             "state_dict": state_dict,
             "train_x": train_x.detach().to(dtype=torch.float64, device="cpu").clone(),
             "train_y": train_y.detach().to(dtype=torch.float64, device="cpu").clone(),
@@ -1929,8 +1971,6 @@ def _write_gp_iteration(
             "outcome_transform": "Standardize",
             "outcome_transform_kwargs": {"m": 1},
             "param_names": names,
-            # Always None; kept so the version-1 format does not change.
-            "mcmc_samples": None,
             "botorch_version": _package_version("botorch"),
             "gpytorch_version": _package_version("gpytorch"),
         }
@@ -1959,8 +1999,59 @@ def _parse_gp_log_line(text: bytes, number: int, path: Path) -> dict:
         raise ValueError(f"{path} line {number} is not valid JSON: {exc}") from exc
 
 
-def read_gp_log(gp_log_dir) -> List[dict]:
+def _gp_row_v1_as_v2(row: dict, batch: Optional[int]) -> dict:
+    """A version-1 row in the version-2 layout. Version 1 had one candidate
+    per row (``candidate_*``, ``next_eval_id``), an ``iteration`` equal to
+    ``n_train`` and an always-None ``n_mcmc``; its batch number is its place
+    among the acquisition rows. ``gp_log_version`` and ``units`` stay 1's."""
+    has_cand = row.get("stage") == "acquisition" and row.get("candidate_unit") is not None
+    if has_cand:
+        nxt = row.get("next_eval_id")
+        eval_ids = None if nxt is None else [int(nxt)]
+    else:
+        eval_ids = []
+    acq = row.get("acq_value")
+    return {
+        "gp_log_version": row["gp_log_version"],
+        "batch": batch,
+        "n_train": row["n_train"],
+        "stage": row["stage"],
+        "attempt": row["attempt"],
+        "surrogate": row["surrogate"],
+        "param_names": row["param_names"],
+        "lengthscale": row["lengthscale"],
+        "outputscale": row["outputscale"],
+        "noise": row["noise"],
+        "mean_constant": row["mean_constant"],
+        "standardize_mean": row["standardize_mean"],
+        "standardize_std": row["standardize_std"],
+        "observation_noise": row["observation_noise"],
+        "q": 1 if has_cand else 0,
+        "eval_ids": eval_ids,
+        "acq_value": acq,
+        "acq_value_steps": None if acq is None else [acq],
+        "candidates_unit": [row["candidate_unit"]] if has_cand else [],
+        "candidates_phys": [row["candidate_phys"]] if has_cand else [],
+        "candidates_post_mean_loss": [row["candidate_post_mean_loss"]] if has_cand else [],
+        "candidates_post_std_loss": [row["candidate_post_std_loss"]] if has_cand else [],
+        "best_index": row["best_index"],
+        "best_unit": row["best_unit"],
+        "best_phys": row["best_phys"],
+        "best_observed_loss": row["best_observed_loss"],
+        "best_post_mean_loss": row["best_post_mean_loss"],
+        "best_post_std_loss": row["best_post_std_loss"],
+        "state_file": row["state_file"],
+        "units": row["units"],
+    }
+
+
+def read_gp_log(gp_log_dir, raw: bool = False) -> List[dict]:
     """Read ``<gp_log_dir>/gp_log.jsonl`` in write order. Missing file → ``[]``.
+
+    Rows of format version 1 and 2 are returned in the version-2 layout
+    (``_gp_row_v1_as_v2``); ``gp_log_version`` says which one was written.
+    ``raw=True`` returns the rows as written. Another version raises
+    ``ValueError``.
 
     A line that is not valid JSON raises ``ValueError``, except the last
     line while it has no newline: a write still in progress, or one cut by a
@@ -1983,7 +2074,29 @@ def read_gp_log(gp_log_dir) -> List[dict]:
                       "JSON (write in progress or cut by a kill); skipped")
             continue
         rows.append(_parse_gp_log_line(text, number, path))
-    return rows
+    if raw:
+        return rows
+
+    out = []
+    n_batches = 0
+    for row in rows:
+        version = row.get("gp_log_version")
+        if version not in GP_LOG_READ_VERSIONS:
+            raise ValueError(
+                f"{path}: gp_log_version {version!r}; this code reads {GP_LOG_READ_VERSIONS}"
+            )
+        is_batch = row.get("stage") == "acquisition"
+        if is_batch:
+            n_batches += 1
+        out.append(row if version == 2 else
+                   _gp_row_v1_as_v2(row, n_batches if is_batch else None))
+    return out
+
+
+def _next_gp_batch(gp_log_dir) -> int:
+    """Number of the next batch: one past the acquisition rows already logged."""
+    rows = read_gp_log(gp_log_dir)
+    return 1 + sum(1 for r in rows if r["stage"] == "acquisition")
 
 
 def _set_aside_cut_gp_log_line(gp_log_dir) -> Optional[Dict[str, Any]]:
@@ -2062,6 +2175,11 @@ def load_gp_model(state_path):
     """
     _require_botorch("load_gp_model")
     bundle = _torch_load(state_path)
+    if bundle.get("gp_log_version") not in GP_LOG_READ_VERSIONS:
+        raise ValueError(
+            f"{state_path}: gp_log_version {bundle.get('gp_log_version')!r}; "
+            f"this code reads {GP_LOG_READ_VERSIONS}"
+        )
     if bundle.get("outcome_transform") != "Standardize":
         raise ValueError(
             f"unsupported outcome_transform {bundle.get('outcome_transform')!r}"
@@ -2115,11 +2233,12 @@ def run_bo(
     objective_fn,
     ps: ParamSpace,
     ffpath: str,
-    n_iters: int = 20,
+    max_evals: int,
     seed: int = 0,
     warm_start: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     max_acq_attempts: int = DEFAULT_MAX_ACQ_ATTEMPTS,
     gp_log_dir: Optional[str] = None,
+    batch_size: int = 1,
 ):
     """
     Run a BoTorch loop over the parameter space defined by ParamSpace.
@@ -2127,12 +2246,37 @@ def run_bo(
     Minimizes the provided objective (sum of losses). Returns:
         best_x_phys (1D torch tensor), history (list of floats)
 
+    Batches (the same rule for every ``batch_size``):
+
+    - Each batch evaluates ``q = min(batch_size, max_evals - n_successful)``
+      points, so every batch is ``batch_size`` points until fewer remain,
+      and the last one takes what is left.
+    - While there is no successful evaluation, a batch is the initial point
+      (``ParamSpace`` init) plus ``q - 1`` scrambled Sobol points in the unit
+      cube (``torch.quasirandom.SobolEngine(d, scramble=True, seed=seed)``,
+      its own generator: the global torch stream is not touched). A batch
+      that fails entirely is followed by the initial point and the next Sobol
+      points.
+    - Afterwards, a batch is ``q`` points of qLogExpectedImprovement on a GP
+      fitted to every successful evaluation, from ``optimize_acqf(q=q,
+      sequential=True)``.
+    - Failed evaluations are not added to the GP and do not count; later
+      batches fill them in. A batch with no successful evaluation counts as
+      one failed attempt; ``max_acq_attempts`` of them in a row raise
+      ``RuntimeError``. A batch with any success resets the count.
+
+    The batch is evaluated through ``objective_fn.evaluate_batch(X, ffpath)``
+    when the objective has it (``make_global_objective``), else one
+    ``objective_fn(x, ffpath)`` call per point, in row order.
+
     Parameters
     ----------
+    max_evals
+        Successful evaluations in total, ``warm_start`` points included.
     warm_start
-        If given, skip the initial ``init_unit`` evaluation and start the GP
-        from these tensors instead. Use this to resume after a crash without
-        re-evaluating completed BO steps. Expected shapes: ``train_x`` is
+        If given, skip the initial batch and start the GP from these tensors
+        instead. Use this to resume after a crash without re-evaluating
+        completed BO steps. Expected shapes: ``train_x`` is
         ``(n, d)`` in the **unit** cube (same convention as ``ParamSpace``),
         ``train_y`` is ``(n, 1)`` with values ``-total_loss`` (same sign as
         internal ``train_y`` in the cold-start path). The caller must align
@@ -2140,12 +2284,10 @@ def run_bo(
         ``n`` so the next Slurm/eval folder index does not collide.
 
     max_acq_attempts
-        When a candidate evaluation fails after GPU job retry, re-run acquisition
-        and try a new candidate up to this many times per completed iteration.
-        Failed evaluations are not added to the GP.
+        Batches in a row with no successful evaluation before the run stops.
 
     gp_log_dir
-        If given, append one JSON object per fitted GP to
+        If given, append one JSON object per batch to
         ``<gp_log_dir>/gp_log.jsonl`` and write a new ``states/*.pt``
         (existing files are not overwritten). ``None`` (default) does not
         write anything and does not change the candidate sequence. The log
@@ -2154,18 +2296,32 @@ def run_bo(
         Reload with :func:`load_gp_posterior`. A failure while writing is
         appended to ``errors.txt`` and does not stop the loop.
 
+    batch_size
+        Points per batch (default 1).
+
     Notes
     -----
     - Uses SingleTaskGP + qLogExpectedImprovement (maximize EI on -loss).
     - Works in UNIT cube; ParamSpace handles scaling to physical.
-    - Only successful evaluations count toward ``n_iters``.
     """
+    max_evals = int(max_evals)
+    batch_size = int(batch_size)
+    if max_evals < 1:
+        raise ValueError(f"max_evals must be >= 1, got {max_evals}")
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
     torch.manual_seed(seed)
     dtype = torch.float64
     print("[bo] surrogate=stgp")
+    print(f"[bo] max_evals={max_evals}, batch_size={batch_size}")
+    next_batch = 1
     if gp_log_dir is not None:
         gp_log_dir = os.fspath(gp_log_dir)
         print(f"[bo] gp log dir: {gp_log_dir}")
+        try:
+            next_batch = _next_gp_batch(gp_log_dir)
+        except Exception:
+            _report_gp_log_error(gp_log_dir)
 
     from botorch.models import SingleTaskGP
     from botorch.models.transforms.outcome import Standardize
@@ -2176,14 +2332,19 @@ def run_bo(
 
     lb, ub = ps.bounds_unit()
 
-    def _evaluate_unit(x_unit: torch.Tensor) -> Optional[torch.Tensor]:
-        """Return -loss tensor on success, or None if evaluation failed."""
-        if x_unit.ndim == 1:
-            x_unit = x_unit.unsqueeze(0)
-        try:
-            return -objective_fn(x_unit, ffpath=ffpath)
-        except EvaluationFailed:
-            return None
+    def _evaluate(X: torch.Tensor) -> List[Optional[torch.Tensor]]:
+        """-loss ``(1, 1)`` per row of X, or None where the evaluation failed."""
+        batch_fn = getattr(objective_fn, "evaluate_batch", None)
+        if batch_fn is not None:
+            losses = batch_fn(X, ffpath=ffpath)
+        else:
+            losses = []
+            for i in range(X.shape[0]):
+                try:
+                    losses.append(objective_fn(X[i:i + 1], ffpath=ffpath))
+                except EvaluationFailed:
+                    losses.append(None)
+        return [None if loss is None else -loss for loss in losses]
 
     def _fit_gp(train_x, train_y):
         # Raw train_y (e.g. -total_loss) is on an arbitrary scale (mean ~ -14,
@@ -2197,17 +2358,19 @@ def run_bo(
         fit_gpytorch_mll(mll)
         return gp
 
-    def _optimize_candidate(train_x, train_y):
+    def _acquire(train_x, train_y, q, batch):
         gp = _fit_gp(train_x, train_y)
         acq = qLogExpectedImprovement(model=gp, best_f=train_y.max())
         cand, acq_value = optimize_acqf(
             acq_function=acq,
             bounds=torch.stack([lb, ub]).to(dtype),
-            q=1,
+            q=q,
             num_restarts=5,
             raw_samples=64,
+            sequential=True,
         )
         if gp_log_dir is not None:
+            first = getattr(objective_fn, "_eval_id", None)
             try:
                 _write_gp_iteration(
                     gp_log_dir,
@@ -2216,9 +2379,10 @@ def run_bo(
                     train_y,
                     ps,
                     stage="acquisition",
+                    batch=batch,
                     acq_value=acq_value,
-                    candidate=cand,
-                    next_eval_id=getattr(objective_fn, "_eval_id", None),
+                    candidates=cand,
+                    eval_ids=None if first is None else list(range(int(first), int(first) + q)),
                 )
             except Exception:
                 _report_gp_log_error(gp_log_dir)
@@ -2238,49 +2402,50 @@ def run_bo(
             train_y = train_y.reshape(train_x.shape[0], 1)
         history = [-float(train_y[i, 0].item()) for i in range(train_x.shape[0])]
     else:
-        x_unit = ps.init_unit().to(dtype).unsqueeze(0)
-        y = None
-        for attempt in range(max_acq_attempts):
-            if attempt > 0:
-                print(
-                    f"[bo] initial evaluation failed; retry {attempt + 1}/{max_acq_attempts}"
+        train_x = torch.empty(0, ps.d, dtype=dtype)
+        train_y = torch.empty(0, 1, dtype=dtype)
+        history = []
+
+    sobol = None
+    failed_batches = 0
+    while train_x.shape[0] < max_evals:
+        n_done = int(train_x.shape[0])
+        q = min(batch_size, max_evals - n_done)
+        if n_done == 0:
+            X = ps.init_unit().to(dtype).unsqueeze(0)
+            if q > 1:
+                if sobol is None:
+                    from torch.quasirandom import SobolEngine
+                    sobol = SobolEngine(ps.d, scramble=True, seed=seed)
+                X = torch.cat([X, sobol.draw(q - 1, dtype=dtype)], dim=0)
+            label = "initial batch"
+        else:
+            X = _acquire(train_x, train_y, q, next_batch)
+            label = f"batch {next_batch}"
+            next_batch += 1
+
+        ys = _evaluate(X)
+        ok = [i for i, y in enumerate(ys) if y is not None]
+        if not ok:
+            failed_batches += 1
+            if failed_batches >= max_acq_attempts:
+                raise RuntimeError(
+                    f"BO stopped at {n_done}/{max_evals} successful evaluations: "
+                    f"{max_acq_attempts} batch(es) in a row without a successful evaluation"
                 )
-            y = _evaluate_unit(x_unit)
-            if y is not None:
-                break
-        if y is None:
-            raise RuntimeError(
-                f"Initial evaluation failed after {max_acq_attempts} attempt(s)"
+            print(
+                f"[bo] {label}: no successful evaluation of {q}; "
+                f"retry {failed_batches + 1}/{max_acq_attempts}"
             )
-        train_x = x_unit.clone()
-        train_y = y.clone()
-        history = [-float(y.item())]
+            continue
 
-    completed = 0
-    while completed < n_iters:
-        cand = None
-        y_new = None
-        for attempt in range(max_acq_attempts):
-            if attempt > 0:
-                print(
-                    f"[bo] iteration {completed + 1}/{n_iters}: "
-                    f"re-acquiring after failure ({attempt + 1}/{max_acq_attempts})"
-                )
-            cand = _optimize_candidate(train_x, train_y)
-            y_new = _evaluate_unit(cand)
-            if y_new is not None:
-                break
-
-        if y_new is None or cand is None:
-            raise RuntimeError(
-                f"BO stopped at {completed}/{n_iters} successful iterations: "
-                f"no successful evaluation after {max_acq_attempts} acquisition attempt(s)"
-            )
-
-        train_x = torch.cat([train_x, cand], dim=0)
-        train_y = torch.cat([train_y, y_new], dim=0)
-        history.append(-float(y_new.item()))
-        completed += 1
+        failed_batches = 0
+        train_x = torch.cat([train_x, X[ok]], dim=0)
+        train_y = torch.cat([train_y, *(ys[i] for i in ok)], dim=0)
+        history.extend(-float(ys[i].item()) for i in ok)
+        if len(ok) < q or q > 1:
+            print(f"[bo] {label}: {len(ok)}/{q} successful; "
+                  f"{train_x.shape[0]}/{max_evals} in total")
 
     if gp_log_dir is not None:
         # Full-sample GP for the sensitivity analysis. Candidates are already
@@ -2298,9 +2463,10 @@ def run_bo(
                     y_final,
                     ps,
                     stage="final",
+                    batch=None,
                     acq_value=None,
-                    candidate=None,
-                    next_eval_id=getattr(objective_fn, "_eval_id", None),
+                    candidates=None,
+                    eval_ids=None,
                 )
         except Exception:
             _report_gp_log_error(gp_log_dir)

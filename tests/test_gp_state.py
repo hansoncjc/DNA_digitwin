@@ -1,4 +1,5 @@
-"""GP log written by run_bo: schema, append, loss-unit posterior, RNG isolation.
+"""GP log written by run_bo: schema (version 2, read back with version 1),
+append, loss-unit posterior, RNG isolation.
 
 End-to-end SingleTaskGP checks need botorch and are skipped in the
 local digitwin env. On the cluster they also check that logging does not
@@ -6,6 +7,7 @@ change the candidate sequence.
 """
 import importlib.util
 import inspect
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -88,10 +90,12 @@ def _train():
     return train_x, train_y, candidate
 
 
-def _write(log_dir, *, burn_rng=False, stage="acquisition", candidate=None, acq=0.123):
+def _write(log_dir, *, burn_rng=False, stage="acquisition", candidates=None, acq=(0.123,),
+           batch=1):
     train_x, train_y, default_cand = _train()
-    if candidate is None and stage == "acquisition":
-        candidate = default_cand
+    if candidates is None and stage == "acquisition":
+        candidates = default_cand
+    final = stage == "final"
     bo._write_gp_iteration(
         log_dir,
         _ToyGP(burn_rng=burn_rng),
@@ -99,9 +103,10 @@ def _write(log_dir, *, burn_rng=False, stage="acquisition", candidate=None, acq=
         train_y,
         _space(),
         stage=stage,
-        acq_value=None if stage == "final" else torch.tensor([acq]),
-        candidate=None if stage == "final" else candidate,
-        next_eval_id=7,
+        batch=None if final else batch,
+        acq_value=None if final else torch.tensor(list(acq)),
+        candidates=None if final else candidates,
+        eval_ids=None if final else list(range(7, 7 + candidates.shape[0])),
     )
     return train_x, train_y
 
@@ -137,10 +142,14 @@ def test_resumable_forwards_gp_log_dir(monkeypatch, tmp_path):
         ps,
         ffpath="",
         out_root=str(tmp_path),
+        max_evals=6,
+        batch_size=3,
         gp_log_dir=str(log),
     )
     assert captured["kwargs"]["gp_log_dir"] == str(log)
     assert captured["kwargs"]["warm_start"] is None
+    assert captured["kwargs"]["max_evals"] == 6
+    assert captured["kwargs"]["batch_size"] == 3
 
 
 def test_posterior_mean_is_loss_and_stays_differentiable():
@@ -176,16 +185,18 @@ def test_gp_log_schema_append_and_rng(tmp_path):
     log = tmp_path / "gp_log"
     _write(log)
     rows = bo.read_gp_log(log)
+    assert rows == bo.read_gp_log(log, raw=True)       # version 2 is read as written
     assert len(rows) == 1
     row = rows[0]
-    assert row["gp_log_version"] == bo.GP_LOG_VERSION
+    assert row["gp_log_version"] == bo.GP_LOG_VERSION == 2
     assert row["units"] == bo.GP_LOG_UNITS
     assert row["param_names"] == _NAMES
-    assert row["iteration"] == row["n_train"] == 3
+    assert row["batch"] == 1
+    assert row["n_train"] == 3
+    assert "iteration" not in row and "n_mcmc" not in row and "candidate_unit" not in row
     assert row["stage"] == "acquisition"
     assert row["attempt"] == 0
     assert row["surrogate"] == "stgp"
-    assert row["n_mcmc"] is None
     assert row["lengthscale"] == pytest.approx([0.7, 1.1, 0.3, 0.9])
     assert isinstance(row["lengthscale"][0], float)
     assert row["outputscale"] == pytest.approx(0.8)
@@ -194,37 +205,43 @@ def test_gp_log_schema_append_and_rng(tmp_path):
     assert row["standardize_mean"] == pytest.approx(-3.0)
     assert row["standardize_std"] == pytest.approx(2.0)
     assert row["observation_noise"] is False
+    assert row["q"] == 1
+    assert row["eval_ids"] == [7]
     assert row["acq_value"] == pytest.approx(0.123)
-    assert row["candidate_unit"] == pytest.approx([0.15, 0.25, 0.35, 0.45])
-    assert row["candidate_phys"] == pytest.approx(row["candidate_unit"])
-    assert row["candidate_post_mean_loss"] == pytest.approx(1.25)
-    assert row["candidate_post_std_loss"] == pytest.approx(0.5)
+    assert row["acq_value_steps"] == pytest.approx([0.123])
+    assert row["candidates_unit"] == [pytest.approx([0.15, 0.25, 0.35, 0.45])]
+    assert row["candidates_phys"] == [pytest.approx([0.15, 0.25, 0.35, 0.45])]
+    assert row["candidates_post_mean_loss"] == pytest.approx([1.25])
+    assert row["candidates_post_std_loss"] == pytest.approx([0.5])
     assert row["best_index"] == 1
     assert row["best_unit"] == pytest.approx([0.5, 0.6, 0.7, 0.8])
     assert row["best_phys"] == pytest.approx(row["best_unit"])
     assert row["best_observed_loss"] == pytest.approx(0.4)
     assert row["best_post_mean_loss"] == pytest.approx(1.25)
     assert row["best_post_std_loss"] == pytest.approx(0.5)
-    assert row["next_eval_id"] == 7
     assert row["state_file"] == "states/ntrain_0003_attempt_00.pt"
 
     state_path = log / row["state_file"]
     first_bytes = state_path.read_bytes()
     first_line = (log / "gp_log.jsonl").read_text().splitlines()[0]
     bundle = bo._torch_load(state_path)
+    assert bundle["gp_log_version"] == 2
+    assert bundle["batch"] == 1 and bundle["stage"] == "acquisition"
     assert bundle["surrogate"] == "stgp"
     assert bundle["outcome_transform"] == "Standardize"
     assert bundle["outcome_transform_kwargs"] == {"m": 1}
     assert bundle["param_names"] == _NAMES
-    assert bundle["mcmc_samples"] is None
     assert torch.equal(bundle["train_x"], _train()[0])
     assert torch.equal(bundle["train_y"], _train()[1])
     assert "state_dict" in bundle
 
+    # A batch of three: one row, one state, every candidate's posterior.
     torch.manual_seed(0)
     expected = torch.rand(3)
     torch.manual_seed(0)
-    _write(log, burn_rng=True)
+    cands = torch.tensor([[0.1, 0.1, 0.1, 0.1], [0.2, 0.2, 0.2, 0.2], [0.3, 0.3, 0.3, 0.3]],
+                         dtype=torch.float64)
+    _write(log, burn_rng=True, candidates=cands, acq=(0.1, 0.15, 0.17), batch=2)
     assert torch.equal(torch.rand(3), expected)
 
     text = (log / "gp_log.jsonl").read_text().splitlines()
@@ -232,23 +249,34 @@ def test_gp_log_schema_append_and_rng(tmp_path):
     assert state_path.read_bytes() == first_bytes
     rows = bo.read_gp_log(log)
     assert len(rows) == 2
-    assert rows[1]["attempt"] == 1
-    assert rows[1]["iteration"] == 3
-    assert rows[1]["state_file"] == "states/ntrain_0003_attempt_01.pt"
-    assert (log / rows[1]["state_file"]).is_file()
+    two = rows[1]
+    assert two["batch"] == 2 and two["q"] == 3 and two["eval_ids"] == [7, 8, 9]
+    assert two["acq_value"] == pytest.approx(0.17)              # whole batch: last step
+    assert two["acq_value_steps"] == pytest.approx([0.1, 0.15, 0.17])
+    assert [c[0] for c in two["candidates_unit"]] == pytest.approx([0.1, 0.2, 0.3])
+    assert two["candidates_post_mean_loss"] == pytest.approx([1.25] * 3)
+    assert two["attempt"] == 1                                  # same n_train
+    assert two["state_file"] == "states/ntrain_0003_attempt_01.pt"
+    assert (log / two["state_file"]).is_file()
+
+    with pytest.raises(RuntimeError, match="2 acquisition value"):
+        bo._write_gp_iteration(log, _ToyGP(), *_train()[:2], _space(), stage="acquisition",
+                               batch=3, acq_value=torch.tensor([0.1, 0.2]),
+                               candidates=cands, eval_ids=[10, 11, 12])
+    assert len(bo.read_gp_log(log)) == 2
 
     _write(log, stage="final")
     final = bo.read_gp_log(log)[-1]
     assert final["stage"] == "final"
-    assert final["iteration"] == 3
-    assert final["acq_value"] is None
-    assert final["candidate_unit"] is None
-    assert final["candidate_post_mean_loss"] is None
+    assert final["batch"] is None and final["n_train"] == 3
+    assert final["q"] == 0 and final["eval_ids"] == []
+    assert final["acq_value"] is None and final["acq_value_steps"] is None
+    assert final["candidates_unit"] == [] and final["candidates_post_mean_loss"] == []
     assert final["state_file"] == "states/ntrain_0003_final.pt"
     assert final["best_post_mean_loss"] == pytest.approx(1.25)
 
-    # A later resume trains on more points; the iteration number moves forward
-    # and the earlier lines stay put.
+    # A later resume trains on more points; n_train moves forward and the
+    # earlier lines stay put.
     train_x, train_y, candidate = _train()
     train_x = torch.cat([train_x, candidate.reshape(1, -1)], dim=0)
     train_y = torch.cat([train_y, torch.tensor([[-0.2]], dtype=torch.float64)], dim=0)
@@ -259,15 +287,74 @@ def test_gp_log_schema_append_and_rng(tmp_path):
         train_y,
         _space(),
         stage="acquisition",
+        batch=3,
         acq_value=torch.tensor(0.5),
-        candidate=torch.tensor([[0.9, 0.1, 0.2, 0.3]], dtype=torch.float64),
-        next_eval_id=8,
+        candidates=torch.tensor([[0.9, 0.1, 0.2, 0.3]], dtype=torch.float64),
+        eval_ids=[8],
     )
     resumed = bo.read_gp_log(log)
     assert (log / "gp_log.jsonl").read_text().splitlines()[0] == first_line
-    assert resumed[-1]["iteration"] == 4
+    assert resumed[-1]["n_train"] == 4
     assert resumed[-1]["stage"] == "acquisition"
-    assert [r["iteration"] for r in resumed] == [3, 3, 3, 4]
+    assert [r["n_train"] for r in resumed] == [3, 3, 3, 4]
+    assert [r["batch"] for r in resumed] == [1, 2, None, 3]
+    assert bo._next_gp_batch(log) == 4
+
+
+# A row of format version 1, as be510ba..145ca00 wrote it.
+_V1_ACQ = {
+    "gp_log_version": 1, "iteration": 2, "n_train": 2, "stage": "acquisition", "attempt": 0,
+    "surrogate": "stgp", "param_names": ["U0", "r0"], "lengthscale": [0.5, 0.7],
+    "outputscale": 1.1, "noise": 1e-4, "mean_constant": 0.1, "n_mcmc": None,
+    "standardize_mean": -0.5, "standardize_std": 0.2, "observation_noise": False,
+    "acq_value": -1.5, "candidate_unit": [0.3, 0.4], "candidate_phys": [2.75, 2.6],
+    "candidate_post_mean_loss": 0.45, "candidate_post_std_loss": 0.05,
+    "best_index": 1, "best_unit": [0.2, 0.2], "best_phys": [2.0, 2.3],
+    "best_observed_loss": 0.4, "best_post_mean_loss": 0.41, "best_post_std_loss": 0.01,
+    "next_eval_id": 5, "state_file": "states/ntrain_0002_attempt_00.pt", "units": "v1 units",
+}
+
+
+def test_version_1_rows_are_read_in_the_version_2_layout(tmp_path):
+    log = tmp_path / "gp_log"
+    log.mkdir()
+    v1_final = {**_V1_ACQ, "iteration": 3, "n_train": 3, "stage": "final", "acq_value": None,
+                "candidate_unit": None, "candidate_phys": None,
+                "candidate_post_mean_loss": None, "candidate_post_std_loss": None,
+                "next_eval_id": 6, "state_file": "states/ntrain_0003_final.pt"}
+    lines = [_V1_ACQ, {**_V1_ACQ, "attempt": 1, "next_eval_id": 6}, v1_final]
+    (log / "gp_log.jsonl").write_text("".join(json.dumps(r) + "\n" for r in lines))
+    _write(log, batch=bo._next_gp_batch(log))             # a version-2 row after a resume
+
+    raw = bo.read_gp_log(log, raw=True)
+    assert raw[0] == _V1_ACQ
+    rows = bo.read_gp_log(log)
+    assert [r["gp_log_version"] for r in rows] == [1, 1, 1, 2]
+    assert set(rows[0]) == set(rows[3])                    # one layout
+    assert [r["batch"] for r in rows] == [1, 2, None, 3]
+    one = rows[0]
+    assert one["n_train"] == 2 and one["q"] == 1 and one["eval_ids"] == [5]
+    assert one["acq_value"] == -1.5 and one["acq_value_steps"] == [-1.5]
+    assert one["candidates_unit"] == [[0.3, 0.4]]
+    assert one["candidates_phys"] == [[2.75, 2.6]]
+    assert one["candidates_post_mean_loss"] == [0.45]
+    assert one["candidates_post_std_loss"] == [0.05]
+    for key in ("lengthscale", "outputscale", "noise", "mean_constant", "standardize_mean",
+                "standardize_std", "best_index", "best_unit", "best_post_mean_loss",
+                "state_file", "units"):
+        assert one[key] == _V1_ACQ[key]
+    final = rows[2]
+    assert final["q"] == 0 and final["eval_ids"] == [] and final["candidates_unit"] == []
+    assert final["acq_value"] is None and final["acq_value_steps"] is None
+
+
+def test_unknown_version_is_refused(tmp_path):
+    log = tmp_path / "gp_log"
+    log.mkdir()
+    (log / "gp_log.jsonl").write_text(json.dumps({**_V1_ACQ, "gp_log_version": 3}) + "\n")
+    with pytest.raises(ValueError, match="gp_log_version 3"):
+        bo.read_gp_log(log)
+    assert bo.read_gp_log(log, raw=True)[0]["gp_log_version"] == 3
 
 
 def test_gp_log_error_is_recorded_and_does_not_raise(tmp_path):
@@ -311,10 +398,7 @@ def _equal_points(left, right):
 
 def _check_reloaded_posterior(log_dir, row):
     path = log_dir / row["state_file"]
-    cols = []
-    if row["candidate_unit"] is not None:
-        cols.append(row["candidate_unit"])
-    cols.append(row["best_unit"])
+    cols = [*row["candidates_unit"], row["best_unit"]]
     X = torch.tensor(cols, dtype=torch.float64)
     post = bo.load_gp_posterior(path, X)
     assert post["param_names"] == row["param_names"]
@@ -326,15 +410,14 @@ def _check_reloaded_posterior(log_dir, row):
         post["std_loss"],
         atol=1e-6,
     )
-    offset = 0
-    if row["candidate_unit"] is not None:
-        assert post["mean_loss"][0].item() == pytest.approx(
-            row["candidate_post_mean_loss"], abs=1e-6
+    offset = row["q"]
+    for i in range(offset):
+        assert post["mean_loss"][i].item() == pytest.approx(
+            row["candidates_post_mean_loss"][i], abs=1e-6
         )
-        assert post["std_loss"][0].item() == pytest.approx(
-            row["candidate_post_std_loss"], abs=1e-6
+        assert post["std_loss"][i].item() == pytest.approx(
+            row["candidates_post_std_loss"][i], abs=1e-6
         )
-        offset = 1
     assert post["mean_loss"][offset].item() == pytest.approx(
         row["best_post_mean_loss"], abs=1e-6
     )
@@ -351,7 +434,7 @@ def _check_reloaded_posterior(log_dir, row):
 
 def test_stgp_log_matches_unlogged_run_and_reloads(tmp_path):
     pytest.importorskip("botorch")
-    ps_kwargs = dict(n_iters=2, seed=0)
+    ps_kwargs = dict(max_evals=3, seed=0)
     plain, logged = [], []
     best_plain, hist_plain = bo.run_bo(
         _analytic(plain), _bo_space(), ffpath="", gp_log_dir=None, **ps_kwargs
@@ -366,11 +449,11 @@ def test_stgp_log_matches_unlogged_run_and_reloads(tmp_path):
 
     rows = bo.read_gp_log(log)
     assert [r["stage"] for r in rows] == ["acquisition", "acquisition", "final"]
-    assert [r["iteration"] for r in rows] == [1, 2, 3]
+    assert [r["n_train"] for r in rows] == [1, 2, 3]
+    assert [r["batch"] for r in rows] == [1, 2, None]
     assert rows[0]["param_names"] == ["alpha", "n"]
     for row in rows:
         assert row["surrogate"] == "stgp"
-        assert row["n_mcmc"] is None
         assert len(row["lengthscale"]) == 2
         assert isinstance(row["outputscale"], float)
         assert isinstance(row["noise"], float)
@@ -381,7 +464,7 @@ def test_stgp_log_matches_unlogged_run_and_reloads(tmp_path):
         _check_reloaded_posterior(log, row)
     assert rows[0]["acq_value"] is not None
     assert rows[-1]["acq_value"] is None
-    assert rows[-1]["candidate_unit"] is None
+    assert rows[-1]["candidates_unit"] == []
 
     final = bo._torch_load(log / rows[-1]["state_file"])
     warm = (final["train_x"].clone(), final["train_y"].clone())
@@ -393,7 +476,7 @@ def test_stgp_log_matches_unlogged_run_and_reloads(tmp_path):
         _analytic(cont),
         _bo_space(),
         ffpath="",
-        n_iters=1,
+        max_evals=4,
         seed=7,
         warm_start=(warm[0].clone(), warm[1].clone()),
         gp_log_dir=log,
@@ -402,7 +485,7 @@ def test_stgp_log_matches_unlogged_run_and_reloads(tmp_path):
         _analytic(cont_plain),
         _bo_space(),
         ffpath="",
-        n_iters=1,
+        max_evals=4,
         seed=7,
         warm_start=(warm[0].clone(), warm[1].clone()),
         gp_log_dir=None,
@@ -411,7 +494,8 @@ def test_stgp_log_matches_unlogged_run_and_reloads(tmp_path):
     assert (log / "gp_log.jsonl").read_text().splitlines()[0] == first_line
     assert (log / rows[0]["state_file"]).read_bytes() == first_state
     more = bo.read_gp_log(log)
-    assert [r["iteration"] for r in more] == [1, 2, 3, 3, 4]
+    assert [r["n_train"] for r in more] == [1, 2, 3, 3, 4]
+    assert [r["batch"] for r in more] == [1, 2, None, 3, None]
     assert [r["stage"] for r in more] == [
         "acquisition", "acquisition", "final", "acquisition", "final",
     ]

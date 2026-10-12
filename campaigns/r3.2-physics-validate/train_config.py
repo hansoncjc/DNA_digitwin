@@ -27,5 +27,5 @@ PARAM_CFG = {
 }
 
 BO_SEED = 0       # torch seed of run_bo; simulations use the run_simulation default seed (42)
-N_ITERS = 99      # acquisitions: 1 initial + 99 = 100 evaluations in total, resumes included
+MAX_EVALS = 100   # successful evaluations in total, resumes included (was N_ITERS = 99)
 METRIC = "shift_rmse"   # default shift_rmse parameters; compare over the curve overlap

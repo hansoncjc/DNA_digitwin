@@ -65,11 +65,13 @@ def pipeline(monkeypatch):
 
 
 def _fake_run_bo(log):
-    """``run_bo`` without botorch: random candidates, same counting rules."""
+    """``run_bo`` without botorch: random candidates one at a time, same
+    counting rule (max_evals successful evaluations, warm start included)."""
 
-    def run_bo(objective_fn, ps, ffpath, n_iters, seed, warm_start, max_acq_attempts,
-               gp_log_dir):
-        log.append({"n_iters": n_iters, "warm_start": warm_start})
+    def run_bo(objective_fn, ps, ffpath, max_evals, seed, warm_start, max_acq_attempts,
+               gp_log_dir, batch_size):
+        log.append({"max_evals": max_evals, "batch_size": batch_size,
+                    "warm_start": warm_start})
         gen = torch.Generator().manual_seed(1000 + len(log))
 
         def ev(x):
@@ -86,15 +88,13 @@ def _fake_run_bo(log):
             Y = y
         else:
             X, Y = warm_start
-        done = 0
-        while done < n_iters:
+        while X.shape[0] < max_evals:
             x = torch.rand(ps.d, generator=gen, dtype=torch.float64)
             y = ev(x)
             if y is None:
                 continue
             X = torch.cat([X, x.reshape(1, -1)])
             Y = torch.cat([Y, y])
-            done += 1
         log[-1]["X"] = X
         best = int(torch.argmax(Y))
         return ps.unit_to_phys(X[best]), [-float(v) for v in Y.reshape(-1)]
@@ -123,13 +123,13 @@ def _blocks(path):
 def test_kill_mid_evaluation_then_resume(tmp_path, pipeline, monkeypatch):
     log = []
     monkeypatch.setattr(bo, "run_bo", _fake_run_bo(log))
-    n_iters = 4                                  # 5 successful evaluations in total
+    max_evals = 5                                # successful evaluations in total
     pipeline["fail_at"] = {1}                    # eval_001 fails (not counted)
     pipeline["kill_at"] = 3                      # killed inside eval_003
 
     obj, ps = _objective(tmp_path)
     with pytest.raises(_Killed):
-        bo.run_bo_resumable(obj, ps, "", str(tmp_path), n_iters=n_iters,
+        bo.run_bo_resumable(obj, ps, "", str(tmp_path), max_evals=max_evals,
                             gp_log_dir=str(tmp_path / "gp_log"))
     assert _blocks(tmp_path / "bo_trajectory.csv") == [
         (0, "total_loss"), (1, "FAILED"), (2, "total_loss")]
@@ -138,13 +138,13 @@ def test_kill_mid_evaluation_then_resume(tmp_path, pipeline, monkeypatch):
     # New master: fresh objective, same out_root and settings.
     pipeline["kill_at"] = None
     obj2, ps2 = _objective(tmp_path)
-    best, history = bo.run_bo_resumable(obj2, ps2, "", str(tmp_path), n_iters=n_iters,
+    best, history = bo.run_bo_resumable(obj2, ps2, "", str(tmp_path), max_evals=max_evals,
                                         gp_log_dir=str(tmp_path / "gp_log"))
 
     resumed = log[1]
     train_x, train_y = resumed["warm_start"]
     assert train_x.shape == (2, 4)
-    assert resumed["n_iters"] == n_iters - 1     # 2 loaded = initial + 1 acquisition
+    assert resumed["max_evals"] == max_evals     # 2 loaded = initial + 1 acquisition
     # m_rel restored from the trajectory equals the value that was evaluated.
     rows = {}
     with open(tmp_path / "bo_trajectory.csv", newline="") as fh:
@@ -161,8 +161,8 @@ def test_kill_mid_evaluation_then_resume(tmp_path, pipeline, monkeypatch):
     blocks = _blocks(tmp_path / "bo_trajectory.csv")
     assert [b[0] for b in blocks] == list(range(len(blocks)))          # every id once
     assert blocks[3] == (3, "ABANDONED")
-    assert sum(1 for _, s in blocks if s == "total_loss") == n_iters + 1
-    assert len(history) == n_iters + 1
+    assert sum(1 for _, s in blocks if s == "total_loss") == max_evals
+    assert len(history) == max_evals
     folders = sorted(int(p.name[5:]) for p in tmp_path.glob("eval_*"))
     assert folders == list(range(len(blocks)))
     flag = json.loads((tmp_path / "eval_003" / "ABANDONED").read_text())
@@ -172,7 +172,7 @@ def test_kill_mid_evaluation_then_resume(tmp_path, pipeline, monkeypatch):
     # A third start finds the cap reached and evaluates nothing.
     calls = pipeline["calls"]
     obj3, ps3 = _objective(tmp_path)
-    _, history3 = bo.run_bo_resumable(obj3, ps3, "", str(tmp_path), n_iters=n_iters)
+    _, history3 = bo.run_bo_resumable(obj3, ps3, "", str(tmp_path), max_evals=max_evals)
     assert len(log) == 2 and pipeline["calls"] == calls
     assert history3 == pytest.approx(history)
     assert _blocks(tmp_path / "bo_trajectory.csv") == blocks           # no second ABANDONED
@@ -185,12 +185,12 @@ def test_cold_start_after_failed_initial_evaluations(tmp_path, pipeline, monkeyp
     pipeline["kill_at"] = 2
     obj, ps = _objective(tmp_path)
     with pytest.raises(_Killed):
-        bo.run_bo_resumable(obj, ps, "", str(tmp_path), n_iters=1)
+        bo.run_bo_resumable(obj, ps, "", str(tmp_path), max_evals=2)
 
     pipeline["kill_at"] = None
     obj2, ps2 = _objective(tmp_path)
-    bo.run_bo_resumable(obj2, ps2, "", str(tmp_path), n_iters=1)
-    assert log[1]["warm_start"] is None and log[1]["n_iters"] == 1
+    bo.run_bo_resumable(obj2, ps2, "", str(tmp_path), max_evals=2)
+    assert log[1]["warm_start"] is None and log[1]["max_evals"] == 2
     assert _blocks(tmp_path / "bo_trajectory.csv") == [
         (0, "FAILED"), (1, "FAILED"), (2, "ABANDONED"), (3, "total_loss"), (4, "total_loss")]
 
@@ -261,7 +261,8 @@ def test_gp_log_cut_line_is_set_aside(tmp_path, monkeypatch):
     (log / "gp_log.jsonl").write_text('{"iteration": 1}\n{"iteration": 2, "noi')
     monkeypatch.setattr(bo, "run_bo", lambda **kw: (torch.zeros(4), [0.0]))
     obj = lambda *a, **k: None  # noqa: E731
-    bo.run_bo_resumable(obj, bo.ParamSpace(CFG), "", str(tmp_path), gp_log_dir=str(log))
+    bo.run_bo_resumable(obj, bo.ParamSpace(CFG), "", str(tmp_path), max_evals=1,
+                        gp_log_dir=str(log))
     assert (log / "gp_log.jsonl").read_text() == '{"iteration": 1}\n'
     moved = [json.loads(s) for s in (log / "gp_log_truncated.jsonl").read_text().splitlines()]
     assert [m["text"] for m in moved] == ['{"iteration": 2, "noi']
