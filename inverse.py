@@ -37,7 +37,6 @@ Startup checks, all before the first simulation:
 import argparse
 import copy
 import hashlib
-import importlib.util
 import itertools
 import json
 import os
@@ -109,16 +108,23 @@ class ConfigError(ValueError):
 
 
 def load_config(path):
-    """Import ``path`` and return a copy of its ``CONFIG`` dict."""
+    """
+    Run ``path`` and return a copy of its ``CONFIG`` dict.
+
+    The source is read and executed on every call, never through the import
+    system: an import may use ``__pycache__/*.pyc``, which Python takes as
+    current when the file's mtime (whole seconds) and size are unchanged, so
+    a config rewritten within the same second with values of the same length
+    would silently run the old values. No ``__pycache__`` is written.
+    """
     path = Path(path).resolve()
     if not path.is_file():
         raise ConfigError(f"config file not found: {path}")
-    spec = importlib.util.spec_from_file_location("inverse_campaign_config", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    if not isinstance(getattr(module, "CONFIG", None), dict):
+    namespace = {"__name__": "inverse_campaign_config", "__file__": str(path)}
+    exec(compile(path.read_bytes(), str(path), "exec"), namespace)
+    if not isinstance(namespace.get("CONFIG"), dict):
         raise ConfigError(f"{path} must define a dict CONFIG")
-    return copy.deepcopy(module.CONFIG)
+    return copy.deepcopy(namespace["CONFIG"])
 
 
 def normalize_config(raw, overrides=None):

@@ -1,5 +1,6 @@
 """inverse.py: configuration, startup checks, resume and summary (HOOMD and botorch stubbed)."""
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -99,6 +100,19 @@ def test_config_errors(tmp_path, target, over, match):
     path = _write_config(tmp_path, target, **over)
     with pytest.raises(inverse.ConfigError, match=match):
         inverse.normalize_config(inverse.load_config(path))
+
+
+def test_config_rewritten_in_the_same_second_is_read_again(tmp_path, target):
+    # Same size and the same mtime: an import would reuse the cached
+    # bytecode of the first version. load_config must read the file again.
+    path = _write_config(tmp_path, target, max_evals=3)
+    assert inverse.load_config(path)["max_evals"] == 3
+    st = path.stat()
+    path.write_text(path.read_text().replace("'max_evals': 3", "'max_evals': 2"))
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert path.stat().st_size == st.st_size
+    assert inverse.load_config(path)["max_evals"] == 2
+    assert not (tmp_path / "__pycache__").exists()
 
 
 def test_example_config_is_valid():
