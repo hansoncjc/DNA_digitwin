@@ -1,0 +1,29 @@
+{
+  "host": "g3047",
+  "device": "cuda",
+  "gpu": "NVIDIA A40",
+  "python": "3.9.20",
+  "torch": "2.7.1+cu118",
+  "numpy": "2.0.2",
+  "saxsfft_version": "0.3.1",
+  "saxsfft_path": "/mmfs1/gscratch/zeelab/hanson/codes/DNA_lipid_silica/saxs-fft",
+  "saxsfft_commit": "53aa855abdc11e58b5dcbfbdf12f353ad1e87cab",
+  "target": "fluid_hs_rho0.763944_D23.21_pad4.309",
+  "input_gsd": "r6_a40_in/fluid_hs_rho0.763944_D23.21_pad4.309/fluid_droplets.gsd",
+  "input_gsd_md5": "ac861dc66b0dc58eeb63675967e2d3ac",
+  "frames": "all",
+  "step": 1,
+  "N_grid": 600,
+  "trim": [
+    6,
+    -6
+  ],
+  "particle_diameter_nm": 24.6,
+  "n_points": 508,
+  "q_range": [
+    0.0016601912397019233,
+    0.13115510793645196
+  ],
+  "target_sq_npy_md5": "e43c1927bccb691c705b46ad728fd18f",
+  "created": "2026-10-12T01:03:26"
+}

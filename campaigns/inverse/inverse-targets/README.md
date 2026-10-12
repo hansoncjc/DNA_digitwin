@@ -14,17 +14,36 @@ start of a run.
 | `fcc_rho0.05_D57.6_pad1.738/` | R6.5 | FCC crystallite, ρ* = 0.05, D = 57.6 σ | 5017 | 100.11 | 0.01022 |
 | `fluid_hs_rho0.763944_D23.21_pad4.309/` | R6.6 | Hard-sphere fluid droplets, φ = 0.4, 16 frames | 5000 | 100.0 | 0.02717 |
 
-Each directory holds `target_sq.npy` (columns q in Å⁻¹, S), the configuration
-GSD and `meta.json` (construction parameters, md5s, saxs-fft environment and the
-`shift_rmse` target checks). FCC crystallites: spherical cut of a bulk lattice,
-i.i.d. Gaussian displacements σ_disp = 0.10 σ, seed 0, one realization. The
-ρ* = 0.05 crystallite is the ρ* = 0.10 one scaled by (0.10/0.05)^(1/3) (same N
-and displacement draws, σ_disp kept at 0.10 σ).
+FCC crystallites: spherical cut of a bulk lattice, i.i.d. Gaussian
+displacements σ_disp = 0.10 σ, seed 0, one realization. The ρ* = 0.05
+crystallite is the ρ* = 0.10 one scaled by (0.10/0.05)^(1/3) (same N and
+displacement draws, σ_disp kept at 0.10 σ).
 
-## S(q) device
+## Layout
 
-S(q) of all three was computed on an A40 GPU with `a40_targets.py` (saxs-fft
-0.3.1, `53aa855`). Repeats on the same or another GPU model (A40, L40) agree to
-~1e-14, but a CPU computation of the same configuration assigns some
-bin-edge q-grid points to the neighbouring shell (`shift_rmse` ~1e-3 for these
-targets, up to ~1e-2). Simulated S(q) should therefore also be computed on GPU.
+```
+<target>/
+  fcc_crystallite.gsd | fluid_droplets.gsd   configuration
+  meta.json                                  parameters, md5s, both S(q), checks
+  gpu/target_sq.npy, gpu/a40_info.json       S(q) on GPU (A40), a40_targets.py
+  cpu/target_sq.npy, cpu/cpu_info.json       S(q) on CPU (Xeon Gold 6230R), cpu_targets.py
+```
+
+`target_sq.npy` has columns q (Å⁻¹) and S. Both scripts use saxs-fft 0.3.1
+(`53aa855`) with the same settings and differ only in the device.
+
+## Which file to use
+
+Use the S(q) computed on the same kind of device as the simulated S(q).
+The GPU and CPU versions of one configuration differ in how q-grid points lying
+exactly on a shell boundary are assigned, which changes a few bins:
+
+| Target | `shift_rmse`(cpu, gpu) |
+|---|---|
+| FCC ρ* = 0.10 | 7.7e-4 |
+| FCC ρ* = 0.05 | 1.3e-2 |
+| HS fluid | 4.1e-4 |
+
+GPU repeats on A40 and L40 agree to ~1e-14. CPU results also depend on the CPU
+model: another cluster node gave `shift_rmse` 1.7e-3 against this CPU version
+for FCC ρ* = 0.10.

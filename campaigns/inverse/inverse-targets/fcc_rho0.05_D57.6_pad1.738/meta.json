@@ -20,12 +20,9 @@
       "used": "build_crystallite, add_gaussian_displacement (FCC.py), write_gsd (FCC.py)"
     }
   },
-  "s_q": {
-    "computed_on": "NVIDIA A40 (g3047)",
-    "device": "cuda",
-    "torch": "2.7.1+cu118",
-    "saxsfft_version": "0.3.1",
-    "saxsfft_commit": "53aa855abdc11e58b5dcbfbdf12f353ad1e87cab",
+  "q_unit": "A^-1",
+  "n_points": 508,
+  "s_q_common": {
     "N_grid": 600,
     "trim": [
       6,
@@ -34,30 +31,66 @@
     "particle_diameter_nm": 24.6,
     "frames": "last:1",
     "step": 1,
-    "script": "a40_targets.py",
-    "created": "2026-10-12T01:03:17"
+    "saxsfft_version": "0.3.1",
+    "saxsfft_commit": "53aa855abdc11e58b5dcbfbdf12f353ad1e87cab",
+    "torch": "2.7.1+cu118"
   },
-  "q_unit": "A^-1",
-  "n_points": 508,
-  "q_range": [
-    0.0016583869147386871,
-    0.1310125662643563
-  ],
-  "target_sq_npy_md5": "2c696d0d57f80b93043e07614afc91f4",
-  "checks_shift_rmse_defaults": {
-    "n_points": 508,
-    "q_min": 0.0016583869147386871,
-    "q_max": 0.1310125662643563,
-    "n_grid_est": 600.4442799572079,
-    "q1": 0.010223875657829394,
-    "s_max_minus_1": 5.130469788513449,
-    "n_peaks_found": 5,
-    "dispersed": false,
-    "band_points": 59,
-    "self_loss": 0.0,
-    "r0_pred_q1r0_0.0339": 3.3157680252145423,
-    "q1_ratio_vs_fcc010": 0.79307108473889,
-    "shift_rmse_vs_fcc010": 0.31291953535775846
+  "s_q": {
+    "gpu": {
+      "file": "gpu/target_sq.npy",
+      "md5": "2c696d0d57f80b93043e07614afc91f4",
+      "device": "cuda",
+      "hardware": "NVIDIA A40 (g3047)",
+      "script": "a40_targets.py",
+      "created": "2026-10-12T01:03:17",
+      "q_range": [
+        0.0016583869147386871,
+        0.1310125662643563
+      ],
+      "checks_shift_rmse_defaults": {
+        "n_points": 508,
+        "q_min": 0.0016583869147386871,
+        "q_max": 0.1310125662643563,
+        "n_grid_est": 600.4442799572079,
+        "q1": 0.010223875657829394,
+        "s_max_minus_1": 5.130469788513449,
+        "n_peaks_found": 5,
+        "dispersed": false,
+        "band_points": 59,
+        "self_loss": 0.0,
+        "r0_pred_q1r0_0.0339": 3.3157680252145423,
+        "q1_ratio_vs_fcc010": 0.79307108473889,
+        "shift_rmse_vs_fcc010": 0.31291953535775846
+      }
+    },
+    "cpu": {
+      "file": "cpu/target_sq.npy",
+      "md5": "780fd41a9f25b73dba663037a2415a25",
+      "device": "cpu",
+      "hardware": "Intel(R) Xeon(R) Gold 6230R CPU @ 2.10GHz (g3047, 20 threads)",
+      "script": "cpu_targets.py",
+      "created": "2026-10-12T01:13:47",
+      "q_range": [
+        0.0016583869147386871,
+        0.1310125662643563
+      ],
+      "checks_shift_rmse_defaults": {
+        "n_points": 508,
+        "q_min": 0.0016583869147386871,
+        "q_max": 0.1310125662643563,
+        "n_grid_est": 600.4442799572079,
+        "q1": 0.010223848909789092,
+        "s_max_minus_1": 5.127536228920165,
+        "n_peaks_found": 5,
+        "dispersed": false,
+        "band_points": 59,
+        "self_loss": 0.0,
+        "r0_pred_q1r0_0.0339": 3.315776700058777,
+        "q1_ratio_vs_fcc010": 0.7930857820445637,
+        "shift_rmse_vs_fcc010": 0.3130499081957968
+      }
+    }
   },
-  "notes": "S(q) on GPU (A40). Same-device repeats (A40, L40) agree to ~1e-14; a CPU computation of the same configuration differs by shift_rmse ~1e-3 (bin-edge ties), so the simulation side should also compute S(q) on GPU. r0 prediction uses q1*r0 ~ 0.0339 (estimate, skeleton R6.5)."
+  "shift_rmse_cpu_vs_gpu": 0.01271084489026921,
+  "notes": "Same configuration, two S(q): gpu/ (A40; A40 and L40 repeats agree to ~1e-14) and cpu/ (Xeon Gold 6230R). They differ only in how bin-edge q-grid points are assigned to shells. CPU results also depend on the CPU model (another cluster CPU node differed by shift_rmse 1.7e-3 for FCC 0.10), GPU results did not. Use the file that matches the device on which the simulated S(q) is computed. r0 prediction uses q1*r0 ~ 0.0339 (estimate, skeleton R6.5)."
 }
