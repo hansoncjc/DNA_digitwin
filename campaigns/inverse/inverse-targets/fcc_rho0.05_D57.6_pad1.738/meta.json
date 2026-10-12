@@ -1,0 +1,63 @@
+{
+  "target": "fcc_rho0.05_D57.6_pad1.738",
+  "role": "R6.5",
+  "kind": "fcc",
+  "rho_star": 0.05,
+  "D": 57.6,
+  "pad": 1.738,
+  "N": 5017,
+  "L_box": 100.1088,
+  "rho_box": 0.005000660080552559,
+  "sigma_disp": 0.1,
+  "seed": 0,
+  "configuration": {
+    "gsd": "fcc_crystallite.gsd",
+    "gsd_md5": "a083c7f9a4f0410dbf57c8e6a339a91d",
+    "generation_script": {
+      "path": "/Users/hanson/Documents/UW/Research - Sherman Pozzo Lab/Simulation/Lattice/inverse_design_target/run_inverse_target.py",
+      "mtime": "2026-07-21T09:44:43",
+      "md5": "b9a0d4a27007a08a3a6aac2bcc00f3e7",
+      "used": "build_crystallite, add_gaussian_displacement (FCC.py), write_gsd (FCC.py)"
+    }
+  },
+  "s_q": {
+    "computed_on": "NVIDIA A40 (g3047)",
+    "device": "cuda",
+    "torch": "2.7.1+cu118",
+    "saxsfft_version": "0.3.1",
+    "saxsfft_commit": "53aa855abdc11e58b5dcbfbdf12f353ad1e87cab",
+    "N_grid": 600,
+    "trim": [
+      6,
+      -6
+    ],
+    "particle_diameter_nm": 24.6,
+    "frames": "last:1",
+    "step": 1,
+    "script": "a40_targets.py",
+    "created": "2026-10-12T01:03:17"
+  },
+  "q_unit": "A^-1",
+  "n_points": 508,
+  "q_range": [
+    0.0016583869147386871,
+    0.1310125662643563
+  ],
+  "target_sq_npy_md5": "2c696d0d57f80b93043e07614afc91f4",
+  "checks_shift_rmse_defaults": {
+    "n_points": 508,
+    "q_min": 0.0016583869147386871,
+    "q_max": 0.1310125662643563,
+    "n_grid_est": 600.4442799572079,
+    "q1": 0.010223875657829394,
+    "s_max_minus_1": 5.130469788513449,
+    "n_peaks_found": 5,
+    "dispersed": false,
+    "band_points": 59,
+    "self_loss": 0.0,
+    "r0_pred_q1r0_0.0339": 3.3157680252145423,
+    "q1_ratio_vs_fcc010": 0.79307108473889,
+    "shift_rmse_vs_fcc010": 0.31291953535775846
+  },
+  "notes": "S(q) on GPU (A40). Same-device repeats (A40, L40) agree to ~1e-14; a CPU computation of the same configuration differs by shift_rmse ~1e-3 (bin-edge ties), so the simulation side should also compute S(q) on GPU. r0 prediction uses q1*r0 ~ 0.0339 (estimate, skeleton R6.5)."
+}

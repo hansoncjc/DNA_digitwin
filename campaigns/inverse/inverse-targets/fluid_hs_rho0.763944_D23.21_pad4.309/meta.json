@@ -1,0 +1,62 @@
+{
+  "target": "fluid_hs_rho0.763944_D23.21_pad4.309",
+  "role": "R6.6",
+  "kind": "fluid",
+  "rho_star": 0.763944,
+  "D": 23.21,
+  "pad": 4.309,
+  "N": 5000,
+  "L_box": 100.0,
+  "rho_box": 0.005,
+  "sigma_disp": null,
+  "seed": null,
+  "configuration": {
+    "gsd": "fluid_droplets.gsd",
+    "gsd_md5": "ac861dc66b0dc58eeb63675967e2d3ac",
+    "generation_script": {
+      "path": "/Users/hanson/Downloads/Current_Code/04_fluid/target/HS_fluid_core/run_fluid_target.py",
+      "mtime": "2026-09-15T18:50:23",
+      "note": "S(q) recomputed from the existing fluid_droplets.gsd; GSD not regenerated"
+    },
+    "n_frames": 16,
+    "phi": 0.4,
+    "source_gsd": "/Users/hanson/Downloads/Current_Code/04_fluid/target/HS_fluid_core/hs/rho0.763944/D23.21/pad4.309/fluid_droplets.gsd"
+  },
+  "s_q": {
+    "computed_on": "NVIDIA A40 (g3047)",
+    "device": "cuda",
+    "torch": "2.7.1+cu118",
+    "saxsfft_version": "0.3.1",
+    "saxsfft_commit": "53aa855abdc11e58b5dcbfbdf12f353ad1e87cab",
+    "N_grid": 600,
+    "trim": [
+      6,
+      -6
+    ],
+    "particle_diameter_nm": 24.6,
+    "frames": "all",
+    "step": 1,
+    "script": "a40_targets.py",
+    "created": "2026-10-12T01:03:26"
+  },
+  "q_unit": "A^-1",
+  "n_points": 508,
+  "q_range": [
+    0.0016601912397019233,
+    0.13115510793645196
+  ],
+  "target_sq_npy_md5": "e43c1927bccb691c705b46ad728fd18f",
+  "checks_shift_rmse_defaults": {
+    "n_points": 508,
+    "q_min": 0.0016601912397019233,
+    "q_max": 0.13115510793645196,
+    "n_grid_est": 600.444279957211,
+    "q1": 0.027174697856255467,
+    "s_max_minus_1": 0.7458115163955894,
+    "n_peaks_found": 1,
+    "dispersed": false,
+    "band_points": 59,
+    "self_loss": 0.0
+  },
+  "notes": "S(q) on GPU (A40). Same-device repeats (A40, L40) agree to ~1e-14; a CPU computation of the same configuration differs by shift_rmse ~1e-3 (bin-edge ties), so the simulation side should also compute S(q) on GPU. r0 prediction uses q1*r0 ~ 0.0339 (estimate, skeleton R6.5)."
+}
