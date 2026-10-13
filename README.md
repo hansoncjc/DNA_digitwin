@@ -38,7 +38,8 @@ DNA_digitwin/
 │   ├── r3.2-physics-validate/  # R3.2: BO training of the physics-based mapping on it
 │   └── inverse/
 │       ├── inverse-example/  # inverse.py example config (smoke tests), sbatch templates
-│       └── inverse-targets/  # target S(q) generation for inverse campaigns
+│       ├── inverse-targets/  # target S(q) generation for inverse campaigns
+│       └── analysis/         # pack_run.py: run summary + tar for download (cluster)
 ├── parallel/             # Slurm launcher: submits 1 GPU job per dataset per BO iteration
 │   ├── __init__.py
 │   ├── submit_parallel.py
