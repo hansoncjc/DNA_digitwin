@@ -39,7 +39,7 @@ DNA_digitwin/
 │   └── inverse/
 │       ├── inverse-example/  # inverse.py example config (smoke tests), sbatch templates
 │       ├── inverse-targets/  # target S(q) generation for inverse campaigns
-│       └── analysis/         # pack_run.py: run summary + tar for download (cluster)
+│       └── analysis/         # pack_run.py (cluster: run summary + tar), structure_metrics.py (local: S(q) loss, q1, PTM, g(r))
 ├── parallel/             # Slurm launcher: submits 1 GPU job per dataset per BO iteration
 │   ├── __init__.py
 │   ├── submit_parallel.py
