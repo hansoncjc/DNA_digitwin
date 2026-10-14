@@ -83,6 +83,8 @@ INK = "#0b0b0b"
 MUTED = "#8a8985"
 SERIES = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4")
 PTM_COLORS = dict(zip(PTM_TYPES, SERIES), OTHER="#c9c8c3")
+# S(q) overlay: target violet, simulation green (reference palette), alpha 0.8.
+SQ_TARGET, SQ_SIM, SQ_ALPHA = "#4a3aa7", "#008300", 0.8
 
 
 def _stub_mcdfm():
@@ -306,25 +308,25 @@ def _style(ax):
 def plot_sq(path, label, target_sq, sim_sq, diag, reduced):
     import matplotlib.pyplot as plt
     grid, log_exp, log_sim = reduced
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.4))
+    fig, axes = plt.subplots(1, 2, figsize=(16, 4.8))  # two 8:4.8 panels
     ax = axes[0]
-    ax.plot(grid, 10 ** log_exp, color=INK, lw=2, label="target")
-    ax.plot(grid, 10 ** log_sim, color=SERIES[0], lw=2, label=f"{label} (scaled)")
+    ax.plot(grid, 10 ** log_exp, color=SQ_TARGET, lw=2, alpha=SQ_ALPHA, label="target")
+    ax.plot(grid, 10 ** log_sim, color=SQ_SIM, lw=2, alpha=SQ_ALPHA, label=f"{label} (scaled)")
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel(r"$x = q/q_1$ (each curve its own $q_1$)" if diag["aligned"]
                   else r"$x = q/q_{1,\mathrm{tgt}}$ (not aligned)")
     ax.set_ylabel("S(q)")
     ax.set_title(f"as compared by the loss: L={diag['loss']:.4f}, "
                  f"M4={diag['m4']:.4f}, shift={diag['shift_term']:.4f}", fontsize=10)
-    ax.legend(frameon=False)
+    ax.legend(frameon=False, loc="lower right")
     ax = axes[1]
-    ax.plot(target_sq[:, 0], target_sq[:, 1], color=INK, lw=2, label="target")
-    ax.plot(sim_sq[:, 0], sim_sq[:, 1], color=SERIES[0], lw=2, label=label)
+    ax.plot(target_sq[:, 0], target_sq[:, 1], color=SQ_TARGET, lw=2, alpha=SQ_ALPHA, label="target")
+    ax.plot(sim_sq[:, 0], sim_sq[:, 1], color=SQ_SIM, lw=2, alpha=SQ_ALPHA, label=label)
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel(r"$q$ ($\AA^{-1}$)")
     q1r = diag.get("q1_ratio")
     ax.set_title("absolute q, unscaled" + (f"; q1 ratio {q1r:.4f}" if q1r else ""), fontsize=10)
-    ax.legend(frameon=False)
+    ax.legend(frameon=False, loc="lower right")
     for a in axes:
         _style(a)
     fig.tight_layout()
