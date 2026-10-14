@@ -36,6 +36,7 @@ DNA_digitwin/
 ├── campaigns/
 │   ├── r3.1-gt/          # R3.1: virtual ground truth (conditions, coefficients, generation, QC)
 │   ├── r3.2-physics-validate/  # R3.2: BO training of the physics-based mapping on it
+│   ├── r5.1-predict/     # R5.1: S(q) predicted with the R3.2 eval-56 coefficients at new conditions
 │   └── inverse/
 │       ├── inverse-example/  # inverse.py example config (smoke tests), sbatch templates
 │       ├── inverse-targets/  # target S(q) generation for inverse campaigns
