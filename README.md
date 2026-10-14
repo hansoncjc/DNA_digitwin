@@ -10,7 +10,7 @@ inputs to simulation parameters. The BO loop can be told to either:
 
 - **`mode="map"`** – optimize the coefficients of the physics-based
   mapping (`k`, `A`, `K_s`, `a_m`, `delta`) that translate experimental
-  inputs (`L_bridge`, `C_chol`, `C_NaCl`) into simulation inputs
+  inputs (`L_bridge`, `C_anchor`, `C_NaCl`) into simulation inputs
   (`r0`, `U0`, `n`, `m`), shared across many experimental conditions;
   `density` is fixed per dataset, or
 - **`mode="sim"`** – optimize the simulation inputs themselves
@@ -79,9 +79,9 @@ Both `MC-DFM` and the `DNA_digitwin` repo root must be on
 ### `ExperimentalParams` (`datasets.py`)
 Flat container for everything that comes from the experiment: stock
 chemistry (`C_stock`, `V_stock`, `V_total`, `rho_si`), solution
-composition (`C_NaCl`, `C_chol`, `b_bridge`), DNA sequence lengths
+composition (`C_NaCl`, `C_anchor`, `b_bridge`), DNA sequence lengths
 (`L_poly`, `L_bridge`, `L_HBP`), and geometry (`d_si`, `t_b`).
-`C_bridge = b_bridge * C_chol` is exposed as a property.
+`C_bridge = b_bridge * C_anchor` is exposed as a property.
 
 ### `SimulationParams` (`datasets.py`)
 What the simulator actually consumes: `density`, `n`, `m`, `U0`, `r0`,
@@ -102,7 +102,7 @@ task 0c-1, 2026-10-09) is the mapping `mode="map"` uses:
   `r0_sigma` at its defaults.
 - `g = r0 / (r0 − 1)` (particle size over shell thickness);
   `m = a_m · g`, `n = (a_m + delta) · g`.
-- `U0 = A · (C_chol / 100) · (1 + K_s · C_NaCl)`.
+- `U0 = A · (C_anchor / 100) · (1 + K_s · C_NaCl)`.
 - `check_mapped_params` rejects `U0 < 0.5`, `n < 5.5`, `m < 4`,
   `n − m < 1` (the range checked in task 0a); such an evaluation fails.
 
@@ -114,18 +114,18 @@ The older mapping functions below are kept but not used by `bo.py`:
 - `r0_sigma(k, LC_ss=0.63, LC_ds=0.34)` → `r0` in units of σ:
   `r0/σ = 1 + k · ( 2(t_b + LC_ss·L_poly) + LC_ds·(2·L_HBP + L_bridge) ) / d_si`
 - `U0_from_gaussian(A, mu_c, sigma_c, K_s)` → **1D** Gaussian in
-  `C_chol` multiplied by a **monotonic linear salt prefactor**.
+  `C_anchor` multiplied by a **monotonic linear salt prefactor**.
   `K_s` is the salt-response slope `k_s` (units 1/mM, default `0.05`);
-  salt and cholesterol are decoupled. The former `b_bridge` Gaussian
+  salt and anchoring DNA coverage are decoupled. The former `b_bridge` Gaussian
   term has been removed (always ≡ 1 under fixed `b_bridge = 0.5`):
   - `S = 1 + K_s · C_NaCl`  
-    (`C_NaCl = 0` gives `S = 1`, i.e. full cholesterol-driven well;
+    (`C_NaCl = 0` gives `S = 1`, i.e. full anchor-driven well;
     more salt only raises `U0`, never collapses it → no re-entrant
     high-salt dispersion.)
-  - `U0 = A · S · exp( -(C_chol - mu_c)²/(2σ_c²) )`
+  - `U0 = A · S · exp( -(C_anchor - mu_c)²/(2σ_c²) )`
 
-  *(Superseded: an earlier form fed a salt-modulated `C_chol_eff =
-  (1 + sat)·C_chol` into a 2D Gaussian in `(C_chol_eff, b_bridge)`,
+  *(Superseded: an earlier form fed a salt-modulated `C_anchor_eff =
+  (1 + sat)·C_anchor` into a 2D Gaussian in `(C_anchor_eff, b_bridge)`,
   which caused unphysical high-salt re-dispersion. See
   `Salt_Concentration.md` §3 for history.)*
 
@@ -637,7 +637,7 @@ in parallel through `DNA_digitwin/parallel/`; the master process runs
 on a CPU node.
 
 > **Note on candidates.** The `CANDIDATES` list below is just an
-> illustrative choice — `(L_bridge, C_chol)` pairs that span the two
+> illustrative choice — `(L_bridge, C_anchor)` pairs that span the two
 > experimental axes the chosen mapping coefficients (`k` from
 > `r0_sigma`, `A` from `U0_from_gaussian`) are sensitive to. For a
 > different training session you should pick candidates that
@@ -666,7 +666,7 @@ import bo
 OUT_ROOT = "./Optimization_Results"
 
 CANDIDATES = [
-    # (L_bridge [bp], C_chol [molecules/siNP], experimental S(q) file)
+    # (L_bridge [bp], C_anchor [molecules/siNP], experimental S(q) file)
     (20.0,  95.0, "/path/to/exp/d0_sq.npy"),
     (40.0,  95.0, "/path/to/exp/d1_sq.npy"),
     (80.0,  95.0, "/path/to/exp/d2_sq.npy"),
@@ -679,11 +679,11 @@ CANDIDATES = [
 ]
 
 datasets = []
-for idx, (L_bridge, C_chol, exp_path) in enumerate(CANDIDATES):
+for idx, (L_bridge, C_anchor, exp_path) in enumerate(CANDIDATES):
     ds = Dataset(
         id       = f"d{idx}",
         exp_path = exp_path,
-        exp      = ExperimentalParams(L_bridge=L_bridge, C_chol=C_chol, C_NaCl=10.0),
+        exp      = ExperimentalParams(L_bridge=L_bridge, C_anchor=C_anchor, C_NaCl=10.0),
         sim      = SimulationParams(density=0.005),   # density is fixed; r0, U0, n, m mapped
         out_dir  = os.path.join(OUT_ROOT, f"d{idx}"),
         datatype = "sq",                     # set "iq" if files are I(q)

@@ -20,10 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "campaigns" / "r3.2
 import train_config as r32  # noqa: E402  (re-exports the R3.1 ground truth)
 
 
-def _ds(ds_id, L_bridge, C_chol, C_NaCl, exp_path="/dev/null/x.npy", density=0.005):
+def _ds(ds_id, L_bridge, C_anchor, C_NaCl, exp_path="/dev/null/x.npy", density=0.005):
     return Dataset(
         id=ds_id, exp_path=exp_path,
-        exp=ExperimentalParams(L_bridge=L_bridge, C_chol=C_chol, C_NaCl=C_NaCl),
+        exp=ExperimentalParams(L_bridge=L_bridge, C_anchor=C_anchor, C_NaCl=C_NaCl),
         sim=SimulationParams(density=density), datatype="sq",
     )
 
@@ -75,8 +75,8 @@ def test_r32_condition_set():
     assert len(r32.TRAIN) == 24 and len(r32.HELDOUT) == 5
     ids = [c["id"] for c in r32.ALL_CONDITIONS]
     assert len(set(ids)) == len(ids)
-    train = {(c["L_bridge"], c["C_chol"], c["C_NaCl"]) for c in r32.TRAIN}
-    assert not train & {(c["L_bridge"], c["C_chol"], c["C_NaCl"]) for c in r32.HELDOUT}
+    train = {(c["L_bridge"], c["C_anchor"], c["C_NaCl"]) for c in r32.TRAIN}
+    assert not train & {(c["L_bridge"], c["C_anchor"], c["C_NaCl"]) for c in r32.HELDOUT}
     assert all(c["id"][1:].isdigit() for c in r32.ALL_CONDITIONS)  # launcher job names
 
 
@@ -92,7 +92,7 @@ def test_r32_ground_truth_and_init_inside_box():
 
 def test_r32_ground_truth_inside_inverse_box():
     for c in r32.ALL_CONDITIONS:
-        p = physics_map(c["L_bridge"], c["C_chol"], c["C_NaCl"], **r32.GROUND_TRUTH)
+        p = physics_map(c["L_bridge"], c["C_anchor"], c["C_NaCl"], **r32.GROUND_TRUTH)
         assert 0.5 <= p["U0"] <= 8.0 and 5.5 <= p["n"] <= 15.0
         assert 4.0 <= p["m"] <= p["n"] - 1.0 and 2.0 <= p["r0"] <= 3.5
 
@@ -105,7 +105,7 @@ def test_r32_box_keeps_every_condition_in_range():
     for values in itertools.product(*axes):
         coeffs = dict(zip(PHYSICS_COEFFS, values))
         for c in r32.ALL_CONDITIONS:
-            p = physics_map(c["L_bridge"], c["C_chol"], c["C_NaCl"], **coeffs)
+            p = physics_map(c["L_bridge"], c["C_anchor"], c["C_NaCl"], **coeffs)
             check_mapped_params(p["U0"], p["n"], p["m"])
             b = resolve_table_bounds(p["U0"], p["n"], p["m"], p["r0"], N=r32.N, density=r32.DENSITY)
             worst_rmax = max(worst_rmax, b["rmax"])
@@ -207,7 +207,7 @@ def test_map_mode_trajectory_and_warm_start(tmp_path, stub_pipeline):
     for c in (r32.TRAIN[0], r32.TRAIN[-1]):
         path = tmp_path / f"{c['id']}.npy"
         np.save(path, crystal_curve(q1=0.0129))
-        datasets.append(_ds(c["id"], c["L_bridge"], c["C_chol"], c["C_NaCl"], exp_path=path))
+        datasets.append(_ds(c["id"], c["L_bridge"], c["C_anchor"], c["C_NaCl"], exp_path=path))
     ps = _ps()
     out = tmp_path / "run"
     out.mkdir()

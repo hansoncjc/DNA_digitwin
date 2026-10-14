@@ -10,7 +10,7 @@ from pathlib import Path
 #   r0/sigma = 1 + k (l + 0.34 L_bridge) / d_si
 #   g        = r0 / (r0 - 1)            (particle size / shell thickness)
 #   n = a_n g,  m = a_m g,  a_n = a_m + delta
-#   U0 = A (C_chol / C_ref) (1 + K_s C_NaCl)
+#   U0 = A (C_anchor / C_ref) (1 + K_s C_NaCl)
 #
 # l is the length of every part of the linker except the bridge: two lipid
 # bilayers, two ssDNA spacers and two hybridized ends,
@@ -21,7 +21,7 @@ from pathlib import Path
 
 FIXED_LINKER_NM = 2.0 * (3.6 + 0.63 * 10.0) + 0.34 * 2.0 * 18.0
 DSDNA_RISE_NM = 0.34
-C_CHOL_REF = 100.0
+C_ANCHOR_REF = 100.0
 
 #: Global coefficients of the physics-based mapping, in trajectory column order.
 PHYSICS_COEFFS = ("k", "A", "K_s", "a_m", "delta")
@@ -35,7 +35,7 @@ M_MIN = 4.0
 NM_GAP_MIN = 1.0
 
 
-def physics_map(L_bridge, C_chol, C_NaCl, *, k, A, K_s, a_m, delta, d_si=24.6):
+def physics_map(L_bridge, C_anchor, C_NaCl, *, k, A, K_s, a_m, delta, d_si=24.6):
     """
     Map one experimental condition to Mie parameters (physics-based endpoint).
 
@@ -43,15 +43,15 @@ def physics_map(L_bridge, C_chol, C_NaCl, *, k, A, K_s, a_m, delta, d_si=24.6):
     ----------
     L_bridge : float
         Bridge length (bp).
-    C_chol : float
-        DNA-cholesterol loading (molecules/particle).
+    C_anchor : float
+        Anchoring DNA coverage (molecules/particle).
     C_NaCl : float
         NaCl concentration (mM).
     k : float
         Fraction of the linker contour length realized as the surface gap at
         the potential minimum; must be > 0.
     A : float
-        U0 (kT) at C_chol = C_CHOL_REF and no salt.
+        U0 (kT) at C_anchor = C_ANCHOR_REF and no salt.
     K_s : float
         Linear salt slope (1/mM).
     a_m, delta : float
@@ -68,7 +68,7 @@ def physics_map(L_bridge, C_chol, C_NaCl, *, k, A, K_s, a_m, delta, d_si=24.6):
     shell = float(k) * (FIXED_LINKER_NM + DSDNA_RISE_NM * float(L_bridge)) / float(d_si)
     r0 = 1.0 + shell
     g = r0 / shell
-    U0 = float(A) * (float(C_chol) / C_CHOL_REF) * (1.0 + float(K_s) * float(C_NaCl))
+    U0 = float(A) * (float(C_anchor) / C_ANCHOR_REF) * (1.0 + float(K_s) * float(C_NaCl))
     return {
         "r0": r0,
         "U0": U0,
@@ -111,10 +111,10 @@ class ExperimentalParams:
     -----------------------------
     C_NaCl : float
         NaCl concentration (mM). Default: 10.0
-    C_chol : float
-        DNA–cholesterol count per siNP (molecules/particle). Default: 100.0
+    C_anchor : float
+        Anchoring DNA coverage per siNP (molecules/particle). Default: 100.0
     b_bridge : float
-        Bridge concentration ratio respective to Chol concentration(dimensionless), where C_bridge = b_bridge * C_chol.
+        Bridge concentration ratio relative to the anchoring DNA coverage (dimensionless), where C_bridge = b_bridge * C_anchor.
         Default: 0.5 (tunable).
     L_poly : float
         Length of ssDNA spacer (nt). Default: 10.0
@@ -138,7 +138,7 @@ class ExperimentalParams:
 
     def __init__(self,
                  C_stock=60.0, V_stock=0.333, V_total=10.0, rho_si=2.2,
-                 C_NaCl=10.0, C_chol=100.0, b_bridge=0.5,
+                 C_NaCl=10.0, C_anchor=100.0, b_bridge=0.5,
                  L_poly=10.0, L_bridge=None, L_HBP=18.0,
                  d_si=24.6, t_b=3.6, dna_coverage = None,
                  temperature_C=None, extra=None):
@@ -150,8 +150,8 @@ class ExperimentalParams:
 
         # Solution chemistry / sequence
         self.C_NaCl   = C_NaCl
-        self.C_chol   = C_chol
-        self.b_bridge = b_bridge  # C_bridge = b_bridge * C_chol
+        self.C_anchor   = C_anchor
+        self.b_bridge = b_bridge  # C_bridge = b_bridge * C_anchor
         self.L_poly   = L_poly
         self.L_bridge = L_bridge  # may be None; required by r0 mapping
         self.L_HBP    = L_HBP
@@ -173,9 +173,9 @@ class ExperimentalParams:
         Returns
         -------
         float
-            C_bridge = b_bridge * C_chol
+            C_bridge = b_bridge * C_anchor
         """
-        return self.b_bridge * self.C_chol
+        return self.b_bridge * self.C_anchor
 
 
 class SimulationParams:
@@ -223,7 +223,7 @@ class Dataset:
     r0_sigma(k=0.76, LC_ss=0.63, LC_ds=0.34) -> float
         Map experimental geometry/sequence to r0/σ using your formula.
     U0_from_gaussian(A, mu_c, sigma_c, K_s) -> float
-        1D Gaussian in C_chol times a linear salt prefactor
+        1D Gaussian in C_anchor times a linear salt prefactor
         S = 1 + K_s * C_NaCl (K_s is the salt-response slope k_s, 1/mM).
         The former b_bridge Gaussian term is removed.
     physics_params(k, A, K_s, a_m, delta) -> dict
@@ -325,13 +325,13 @@ class Dataset:
 
     def U0_from_gaussian(self, A=2.0, mu_c=100.0, sigma_c=10.0, K_s=0.05):
         """
-        Compute U0 from a 1D Gaussian in C_chol multiplied by a monotonic
+        Compute U0 from a 1D Gaussian in C_anchor multiplied by a monotonic
         linear salt prefactor.
 
         Mapping Function
         -------
             S  = 1 + K_s * C_NaCl                         # salt prefactor
-            U0 = A * S * exp( - ((C_chol - mu_c)^2) / (2*sigma_c^2) )
+            U0 = A * S * exp( - ((C_anchor - mu_c)^2) / (2*sigma_c^2) )
 
         The former ``b_bridge`` Gaussian term has been removed: experiments
         fix ``b_bridge = 0.5``, so that term was always identically 1 and
@@ -339,11 +339,11 @@ class Dataset:
         as metadata only.
 
         ``K_s`` is the linear salt-response slope ``k_s`` (units 1/mM). Salt is
-        decoupled from cholesterol: the Gaussian uses the raw ``C_chol``.
-        At ``C_NaCl = 0``, ``S = 1`` (no salt keeps the full cholesterol-driven
-        well; sufficient C_chol can still aggregate). Increasing salt only
+        decoupled from the anchoring DNA coverage: the Gaussian uses the raw ``C_anchor``.
+        At ``C_NaCl = 0``, ``S = 1`` (no salt keeps the full anchor-driven
+        well; sufficient C_anchor can still aggregate). Increasing salt only
         raises U0, never collapses it, so there is no re-entrant high-salt
-        dispersion (the failure mode of the previous ``C_chol_eff``-inside-
+        dispersion (the failure mode of the previous ``C_anchor_eff``-inside-
         Gaussian form; see Salt_Concentration.md).
 
         Defaults
@@ -358,9 +358,9 @@ class Dataset:
         A : float
             Zero-salt amplitude of U0.
         mu_c : float
-            Center for the cholesterol count `C_chol` (molecules/particle).
+            Center for the anchoring DNA coverage `C_anchor` (molecules/particle).
         sigma_c : float
-            Std. dev. for the C_chol term (same unit as C_chol); must be > 0.
+            Std. dev. for the C_anchor term (same unit as C_anchor); must be > 0.
         K_s : float
             Linear salt-response slope k_s (1/mM); fractional increase of U0
             per mM NaCl. Should be >= 0 to keep the prefactor monotonic.
@@ -373,20 +373,20 @@ class Dataset:
         if sigma_c <= 0:
             raise ValueError("sigma_c must be > 0.")
 
-        C_chol = float(self.exp.C_chol)
+        C_anchor = float(self.exp.C_anchor)
         C_NaCl = float(self.exp.C_NaCl)
 
         salt_gate = 1.0 + float(K_s) * C_NaCl
-        term_c = ((C_chol - float(mu_c)) ** 2) / (2.0 * (float(sigma_c) ** 2))
+        term_c = ((C_anchor - float(mu_c)) ** 2) / (2.0 * (float(sigma_c) ** 2))
 
         return float(A) * salt_gate * np.exp(-term_c)
 
     def physics_params(self, *, k, A, K_s, a_m, delta):
-        """``physics_map`` for this dataset's condition (L_bridge, C_chol, C_NaCl, d_si)."""
+        """``physics_map`` for this dataset's condition (L_bridge, C_anchor, C_NaCl, d_si)."""
         if self.exp.L_bridge is None:
             raise ValueError("L_bridge is required by the physics-based mapping but is None.")
         return physics_map(
-            self.exp.L_bridge, self.exp.C_chol, self.exp.C_NaCl,
+            self.exp.L_bridge, self.exp.C_anchor, self.exp.C_NaCl,
             k=k, A=A, K_s=K_s, a_m=a_m, delta=delta, d_si=self.exp.d_si,
         )
 

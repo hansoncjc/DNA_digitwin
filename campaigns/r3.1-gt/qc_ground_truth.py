@@ -43,7 +43,7 @@ def main():
     for c in config.ALL_CONDITIONS:
         path = gt / f"{c['id']}.npy"
         row = {"id": c["id"], "role": c["role"], "L_bridge": c["L_bridge"],
-               "C_chol": c["C_chol"], "C_NaCl": c["C_NaCl"]}
+               "C_anchor": c["C_anchor"], "C_NaCl": c["C_NaCl"]}
         if not path.exists():
             row["status"] = "MISSING"
             bad += 1
@@ -66,7 +66,7 @@ def main():
             row["status"] += " NEAR"
         rows.append(row)
 
-    keys = ["id", "role", "L_bridge", "C_chol", "C_NaCl", "n_points", "q_max",
+    keys = ["id", "role", "L_bridge", "C_anchor", "C_NaCl", "n_points", "q_max",
             "s_max_minus_1", "dispersed", "q1", "self_loss", "status"]
     print(" ".join(f"{k:>12}" for k in keys))
     for r in rows:

@@ -50,7 +50,7 @@ def build_datasets(gt_root, ids=None):
         datasets.append(Dataset(
             id=c["id"],
             exp_path=path,
-            exp=ExperimentalParams(L_bridge=c["L_bridge"], C_chol=c["C_chol"], C_NaCl=c["C_NaCl"]),
+            exp=ExperimentalParams(L_bridge=c["L_bridge"], C_anchor=c["C_anchor"], C_NaCl=c["C_NaCl"]),
             sim=SimulationParams(density=config.DENSITY),
             datatype="sq",
         ))

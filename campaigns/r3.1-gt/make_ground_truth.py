@@ -30,7 +30,7 @@ from datasets import check_mapped_params, physics_map  # noqa: E402
 
 def mapped(cond, coeffs=None):
     coeffs = dict(config.GROUND_TRUTH if coeffs is None else coeffs)
-    p = physics_map(cond["L_bridge"], cond["C_chol"], cond["C_NaCl"], **coeffs)
+    p = physics_map(cond["L_bridge"], cond["C_anchor"], cond["C_NaCl"], **coeffs)
     check_mapped_params(p["U0"], p["n"], p["m"])
     return p
 
@@ -49,10 +49,10 @@ def _git_head():
 
 def list_conditions():
     print(f"ground truth {config.GROUND_TRUTH}, density {config.DENSITY}, N {config.N}")
-    print(" #  id   role     L_bridge C_chol C_NaCl |     U0     r0      n      m")
+    print(" #  id   role     L_bridge C_anchor C_NaCl |     U0     r0      n      m")
     for i, c in enumerate(config.ALL_CONDITIONS):
         p = mapped(c)
-        print(f"{i:2d} {c['id']:>3} {c['role']:<8} {c['L_bridge']:8.0f} {c['C_chol']:6.0f} "
+        print(f"{i:2d} {c['id']:>3} {c['role']:<8} {c['L_bridge']:8.0f} {c['C_anchor']:6.0f} "
               f"{c['C_NaCl']:6.0f} | {p['U0']:6.3f} {p['r0']:6.3f} {p['n']:6.2f} {p['m']:6.2f}")
 
 
