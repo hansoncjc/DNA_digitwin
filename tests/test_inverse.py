@@ -88,6 +88,9 @@ def pipeline(monkeypatch):
     ({"parallel": True, "parallel_cfg": {"partition": "x"}}, "missing"),
     ({"parallel": True, "parallel_cfg": {"code_root": "x"}}, "unknown parallel_cfg"),
     ({"max_evals": 0}, "max_evals"),
+    ({"metric_kwargs": {"lambda": 0.0}}, "metric_kwargs: Unknown shift_rmse metric_kwargs"),
+    ({"metric_kwargs": {"no_peak": "skip"}}, "metric_kwargs: shift_rmse no_peak must be"),
+    ({"metric_kwargs": [("lambda_shift", 0.0)]}, "metric_kwargs must be a dict"),
     ({"search": {"U0": {"fixed": 3.0}, "r0": {"fixed": 2.5}, "n": {"fixed": 12.0}}},
      "exactly one of m, m_rel"),
     ({"search": {"U0": {"fixed": 3.0}, "r0": {"fixed": 2.5}, "n": {"fixed": 12.0},
@@ -298,3 +301,56 @@ def test_changed_gp_log_dir_refused(tmp_path, pipeline, target):
     with pytest.raises(inverse.ConfigError, match="gp_log_dir: run started with 'gp_log'"):
         inverse.run(path)
     assert pipeline["calls"] == 1
+
+
+# ---------------- metric_kwargs (R6.8, 2026-10-14) ---------------- #
+
+def test_metric_kwargs_default_is_the_old_behaviour(tmp_path, target):
+    cfg = inverse.normalize_config(inverse.load_config(_write_config(tmp_path, target)))
+    assert cfg["metric_kwargs"] == {}
+    cfg["target_md5"] = inverse.file_md5(target)     # set by the startup checks
+    assert inverse.locked_fields(cfg)["metric_kwargs"] == {}
+    assert "lambda_shift = 1" in inverse._loss_text(cfg)
+
+
+@pytest.mark.parametrize("lam", [0.0, 2.0])
+def test_lambda_shift_reaches_the_loss(tmp_path, pipeline, target, lam):
+    base = inverse.run(_write_config(tmp_path, target, max_evals=1,
+                                     out_root=str(tmp_path / "default")))["best"]
+    path = _write_config(tmp_path, target, max_evals=1, out_root=str(tmp_path / "lam"),
+                         metric_kwargs={"lambda_shift": lam})
+    summary = inverse.run(path)
+    best = summary["best"]
+    assert base["shift"] > 0
+    assert best["rmse"] == pytest.approx(base["rmse"])         # alignment unchanged
+    assert best["shift"] == pytest.approx(lam * base["shift"])
+    assert best["loss"] == pytest.approx(best["rmse"] + best["shift"])
+    assert summary["metric_kwargs"] == {"lambda_shift": lam}
+    assert f"lambda_shift = {lam:g}" in summary["loss"]
+    snap = json.loads((tmp_path / "lam" / "inverse_config.json").read_text())
+    assert snap["locked"]["metric_kwargs"] == {"lambda_shift": lam}
+    assert snap["target"]["metric_kwargs"] == {"lambda_shift": lam}
+
+
+def test_metric_kwargs_locked_on_resume(tmp_path, pipeline, target):
+    inverse.run(_write_config(tmp_path, target, max_evals=1,
+                              metric_kwargs={"lambda_shift": 0.0}))
+    path = _write_config(tmp_path, target, max_evals=2, metric_kwargs={"lambda_shift": 2.0})
+    with pytest.raises(inverse.ConfigError, match="metric_kwargs: run started with"):
+        inverse.run(path)
+    assert pipeline["calls"] == 1
+    path = _write_config(tmp_path, target, max_evals=2, metric_kwargs={"lambda_shift": 0.0})
+    assert inverse.run(path)["n_successful"] == 2
+
+
+def test_snapshot_without_metric_kwargs_resumes_with_defaults(tmp_path, pipeline, target):
+    """inverse_config.json written before metric_kwargs existed (R6.4-R6.6)."""
+    inverse.run(_write_config(tmp_path, target, max_evals=1))
+    snap_path = tmp_path / "out" / "inverse_config.json"
+    snap = json.loads(snap_path.read_text())
+    del snap["locked"]["metric_kwargs"]
+    snap_path.write_text(json.dumps(snap))
+    path = _write_config(tmp_path, target, max_evals=2, metric_kwargs={"lambda_shift": 0.0})
+    with pytest.raises(inverse.ConfigError, match="metric_kwargs: run started with {}"):
+        inverse.run(path)
+    assert inverse.run(_write_config(tmp_path, target, max_evals=2))["n_successful"] == 2

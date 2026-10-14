@@ -515,6 +515,12 @@ python inverse.py CONFIG.py --check      # startup checks + resume state; no sim
 python inverse.py CONFIG.py --summary    # rewrite the summary from bo_trajectory.csv
 ```
 
+`CONFIG["metric_kwargs"]` (default `{}`) overrides the metric's defaults,
+e.g. `{"lambda_shift": 0.0}` for no spacing penalty (curves still aligned on
+x = q/q1; R6.8). Keys are checked by `metrics.shift_rmse_params` at startup;
+the value is locked on a resume. Runs started before this key existed resume
+with `{}`.
+
 Smoke-test overrides: `--out DIR`, `--target FILE`, `--parallel true|false`,
 `--steps N` (production steps), `--device cpu|gpu`. They are recorded in
 `out_root/inverse_config.json`; `--steps` is part of the run's identity.

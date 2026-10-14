@@ -20,8 +20,9 @@ Startup checks, all before the first simulation:
   1. target file exists and is a finite (N, 2+) array; its md5 is recorded
      (inverse_config.json, summary) and identifies the target on a resume;
   2. the target's saxs-fft N_grid equals the simulation side's (bo, C6);
-  3. first-peak detection with the metric_kwargs actually used ({} =
-     defaults): a dispersed target is reported and the run continues (the
+  3. first-peak detection with the metric_kwargs actually used (CONFIG
+     "metric_kwargs", {} = defaults; keys checked by
+     metrics.shift_rmse_params): a dispersed target is reported and the run continues (the
      metric's dispersed rule applies); a target that is not dispersed must
      have a find_peaks peak. The target compared with itself gives loss 0;
   4. compare_q_range is None;
@@ -31,7 +32,7 @@ Startup checks, all before the first simulation:
      bound of n is above 5 and m_rel lies in [0, 1];
   7. on a resume, the settings that define the run equal the ones in
      out_root/inverse_config.json (only max_evals and the parallel settings
-     may change; batch_size is locked);
+     may change; batch_size and metric_kwargs are locked);
   8. batch_size > 1 needs parallel=True (BATCH_NEEDS_PARALLEL).
 """
 import argparse
@@ -73,6 +74,7 @@ DEFAULTS = {
     "metric": "shift_rmse",
     "scattering": "saxsfft",
     "compare_q_range": None,     # must stay None (shift_rmse compares over the overlap)
+    "metric_kwargs": {},         # overrides of the metric's defaults, e.g. {"lambda_shift": 0.0}
     "mc_dfm_root": None,         # None: $MC_DFM_ROOT
     "parallel_cfg": None,
 }
@@ -85,8 +87,8 @@ SIM_NAMES = ("U0", "r0", "n")    # must be in "search", plus one of m / m_rel
 # is the md5 recorded at the first start, so the target file may move but
 # its content may not change. gp_log_dir is compared relative to out_root
 # when it lies inside it, so the whole run folder may move.
-LOCKED = ("target_md5", "N", "density", "search", "potential", "metric", "scattering",
-          "compare_q_range", "bo_seed", "batch_size", "gp_log_dir", "steps")
+LOCKED = ("target_md5", "N", "density", "search", "potential", "metric", "metric_kwargs",
+          "scattering", "compare_q_range", "bo_seed", "batch_size", "gp_log_dir", "steps")
 
 RMAX_GRID_POINTS = 6
 
@@ -156,6 +158,7 @@ def normalize_config(raw, overrides=None):
             f"compare_q_range must be None (shift_rmse compares over the curve overlap); "
             f"got {cfg['compare_q_range']!r}"
         )
+    cfg["metric_kwargs"] = _metric_kwargs(cfg)
     if not isinstance(cfg["parallel"], bool):
         raise ConfigError(f"parallel must be True or False; got {cfg['parallel']!r}")
     cfg["batch_size"] = int(cfg["batch_size"])
@@ -210,6 +213,21 @@ def normalize_config(raw, overrides=None):
     return cfg
 
 
+def _metric_kwargs(cfg):
+    """The metric's own kwargs (METRICS) overridden by CONFIG "metric_kwargs";
+    keys and values are checked by the metric's parameter function."""
+    extra = cfg["metric_kwargs"]
+    if not isinstance(extra, dict):
+        raise ConfigError(f"metric_kwargs must be a dict; got {extra!r}")
+    kwargs = _plain({**METRICS[cfg["metric"]]["metric_kwargs"], **extra})
+    import metrics
+    try:
+        metrics.shift_rmse_params(kwargs)
+    except ValueError as exc:
+        raise ConfigError(f"metric_kwargs: {exc}") from exc
+    return kwargs
+
+
 def _plain(obj):
     """JSON-comparable copy: tuples become lists; ints stay ints, other
     numbers become floats (1 == 1.0, so either compares equal)."""
@@ -243,8 +261,11 @@ def locked_fields(cfg):
 def _snapshot_locked(snapshot):
     """Locked fields of a snapshot; an absolute gp_log_dir inside the
     snapshot's own out_root (inverse_config.json before 2026-10-11) is read
-    as relative, like locked_fields writes it now."""
+    as relative, like locked_fields writes it now. A snapshot without
+    metric_kwargs (before 2026-10-14) ran with the defaults, {}."""
     old = dict(snapshot["locked"])
+    # Runs started before metric_kwargs was a CONFIG key used the defaults.
+    old.setdefault("metric_kwargs", {})
     gp = old.get("gp_log_dir")
     if gp and Path(gp).is_absolute() and snapshot.get("out_root"):
         old["gp_log_dir"] = _gp_log_key(gp, snapshot["out_root"])
@@ -304,7 +325,7 @@ def build_objective(bo, cfg, ps, dataset):
         scattering_method=scattering["scattering_method"],
         scattering_kwargs=dict(scattering["scattering_kwargs"]),
         metric=metric["metric"], compare_q_range=cfg["compare_q_range"],
-        metric_kwargs=dict(metric["metric_kwargs"]),
+        metric_kwargs=dict(cfg["metric_kwargs"]),
         parallel=cfg["parallel"], parallel_cfg=parallel_cfg(cfg),
     )
 
@@ -336,7 +357,7 @@ def check_target(cfg):
         raise ConfigError(f"target must be a finite (N, 2+) array [q, S]; got shape {arr.shape}")
     curve = metrics._sanitize_curve(arr)
 
-    kwargs = METRICS[cfg["metric"]]["metric_kwargs"]
+    kwargs = cfg["metric_kwargs"]
     p = metrics.shift_rmse_params(kwargs)
     peak = metrics.detect_first_peak(
         curve, search_range=p["peak_search_range"], prominence_frac=p["prominence_frac"],
@@ -533,6 +554,15 @@ def _block_statuses(path):
     return out
 
 
+def _loss_text(cfg):
+    """One line naming the loss and the metric_kwargs that differ from the defaults."""
+    import metrics
+    lam = metrics.shift_rmse_params(cfg["metric_kwargs"])["lambda_shift"]
+    which = (f"metric_kwargs {cfg['metric_kwargs']}" if cfg["metric_kwargs"] else "defaults")
+    return (f"shift_rmse ({which}): loss = rmse + lambda_shift * |ln(q1_sim / q1_tgt)|, "
+            f"lambda_shift = {lam:g}")
+
+
 def write_summary(cfg, bo, snapshot=None):
     """Best evaluation and loss components, from bo_trajectory.csv."""
     out_root = Path(cfg["out_root"])
@@ -566,7 +596,8 @@ def write_summary(cfg, bo, snapshot=None):
         "commits": commits,
         "dirty_starts": sum(1 for s in starts if s.get("dirty")),
         "snapshot": str(out_root / SNAPSHOT),
-        "loss": "shift_rmse (defaults): loss = rmse + lambda_shift * |ln(q1_sim / q1_tgt)|",
+        "loss": _loss_text(cfg),
+        "metric_kwargs": cfg["metric_kwargs"],
         "max_evals": cfg["max_evals"],
         "batch_size": cfg["batch_size"],
         "n_successful": len(successful),
