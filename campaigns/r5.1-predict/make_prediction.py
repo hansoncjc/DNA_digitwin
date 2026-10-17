@@ -6,7 +6,7 @@ except ``N`` (seed: run_simulation's default, as in the R3.2 evaluations).
     python make_prediction.py --list                      # mapped parameters and checks, no simulation
     python make_prediction.py --index I --out PRED_ROOT   # one condition (Slurm array task)
 
-Condition I is ``predict_config.CONDITIONS[I]`` (p0-p13). Before anything is
+Condition I is ``predict_config.CONDITIONS[I]`` (p0-p15). Before anything is
 written, every condition is checked: ``check_mapped_params`` and the table
 bounds of ``simulation.resolve_table_bounds`` (rmin < rmax, rmax < L/2); one
 failing condition stops ``--list`` with exit code 1 and ``--index`` before

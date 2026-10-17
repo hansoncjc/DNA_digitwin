@@ -2,9 +2,11 @@
 R5.1: forward prediction of S(q) with the trained physics-based mapping (2026-10-14).
 
 Prediction only: the mapping trained in R3.2 (eval 56) is applied to
-conditions chosen by the author; nothing is compared with a ground truth.
-Conditions that already have an R3.1 ground-truth curve (training d0-d23 or
-held-out h0-h4) are not run (author, 2026-10-14).
+conditions chosen by the author; no loss against a ground truth is computed.
+Training conditions (d0-d23) are not run: R3.2 already evaluated eval 56
+there. Held-out cells on the grids (h0, h3) were first left out too
+(author, 2026-10-14) and added on 2026-10-16 (author) as p14, p15, so the
+figures can show the prediction next to their ground truth.
 
 Coefficients: R3.2 eval 56 (best total loss 0.607), full precision from the
 R3.2 ``Optimization_Results/bo_trajectory.csv`` (Desktop copy
@@ -16,7 +18,12 @@ Conditions, two grids (author, 2026-10-14):
           C_anchor = 45 and a column C_NaCl = 60; the 8 new cells.
   part 2: C_anchor = 100, axes C_NaCl (0, 10, 20, 40) x L_bridge (20, 40, 80,
           120); the 6 cells without a ground truth (L_bridge 20 and 80 are
-          d4-d7, d16-d19; (40, 100, 20) is h0 and (120, 100, 20) is h3).
+          d4-d7, d16-d19), then the 2 held-out cells (40, 100, 20) = h0 and
+          (120, 100, 20) = h3.
+
+Ids follow run order: p0-p13 (submitted 2026-10-14) are the grid cells with
+no ground truth, p14-p15 the grid cells with a held-out ground truth, so the
+ids and Slurm array indices of the runs already made do not change.
 
 Forward model: function defaults, N = 5000, density 0.005, run_simulation's
 default seed (42, as in the R3.2 evaluations), one run per condition, S(q) on
@@ -51,7 +58,7 @@ PART2_C_ANCHOR = 100.0
 PART2_L_BRIDGE = (20.0, 40.0, 80.0, 120.0)
 PART2_C_NACL = (0.0, 10.0, 20.0, 40.0)
 
-_GT_KEYS = {(c["L_bridge"], c["C_anchor"], c["C_NaCl"]): c["id"] for c in GT_CONDITIONS}
+_GT_ROLES = {(c["L_bridge"], c["C_anchor"], c["C_NaCl"]): c["role"] for c in GT_CONDITIONS}
 
 
 def training_range_tag(L_bridge, C_anchor, C_NaCl):
@@ -68,16 +75,18 @@ def _grid():
     part1 = [(PART1_L_BRIDGE, c, s) for c in PART1_C_ANCHOR for s in PART1_C_NACL]
     part2 = [(L, PART2_C_ANCHOR, s) for L in PART2_L_BRIDGE for s in PART2_C_NACL]
     conds = []
-    for part, grid in (("part1", part1), ("part2", part2)):
-        for L, c, s in grid:
-            if (L, c, s) in _GT_KEYS:
-                continue
-            conds.append({
-                "id": f"p{len(conds)}", "L_bridge": L, "C_anchor": c, "C_NaCl": s,
-                "part": part, "range": training_range_tag(L, c, s),
-            })
+    # first the cells with no ground truth (p0-p13), then those with a held-out one
+    for gt_role in (None, "heldout"):
+        for part, grid in (("part1", part1), ("part2", part2)):
+            for L, c, s in grid:
+                if _GT_ROLES.get((L, c, s)) != gt_role:
+                    continue
+                conds.append({
+                    "id": f"p{len(conds)}", "L_bridge": L, "C_anchor": c, "C_NaCl": s,
+                    "part": part, "range": training_range_tag(L, c, s),
+                })
     return conds
 
 
-#: Prediction conditions p0-p13 (Slurm array index = list index).
+#: Prediction conditions p0-p15 (Slurm array index = list index).
 CONDITIONS = _grid()

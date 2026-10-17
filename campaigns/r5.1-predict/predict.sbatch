@@ -1,7 +1,8 @@
 #!/bin/bash
-# R5.1 prediction: one GPU job per condition (array 0-13 = p0-p13 of predict_config.CONDITIONS).
+# R5.1 prediction: one GPU job per condition (array 0-15 = p0-p15 of predict_config.CONDITIONS).
 # Run from the campaign working directory, with R51_REPO set to the pinned checkout:
-#   sbatch --array=0-13 --export=ALL,R51_REPO=$REPO $REPO/campaigns/r5.1-predict/predict.sbatch
+#   sbatch --array=0-15 --export=ALL,R51_REPO=$REPO $REPO/campaigns/r5.1-predict/predict.sbatch
+# p0-p13 ran on 2026-10-14; the held-out cells p14, p15 (h0, h3) were added later: --array=14,15
 # Smoke test (2 conditions, short):
 #   sbatch --array=0,13 --export=ALL,R51_REPO=$REPO,PRED_OUT=pred_smoke,PRED_STEPS=200000 $REPO/campaigns/r5.1-predict/predict.sbatch
 #SBATCH -J r51_pred
