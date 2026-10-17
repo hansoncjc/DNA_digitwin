@@ -291,3 +291,61 @@ def test_objective_rejects_bad_metric_kwargs():
     with pytest.raises(ValueError, match="saxsfft"):
         bo.make_global_objective([], _ps(), ffpath="", mode="map", metric="shift_rmse",
                                  scattering_method="mcdfm")
+
+
+# ---------------- intensity_scale (R4, 2026-10-16) ---------------- #
+
+_SCALE_PAIRS = {
+    "crystal": lambda: (crystal_curve(), FCC_SIMS["q1_0145"]()),
+    "fluid": lambda: (fluid_curve(), FLUID_SIMS["q1_029"]()),
+    "gas_sim": lambda: (crystal_curve(), gas_curve(seed=7)),
+    "gas_both": lambda: (gas_curve(seed=5), gas_curve(seed=6)),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_SCALE_PAIRS))
+def test_intensity_scale_default_is_asymptote(name):
+    tgt, sim = _SCALE_PAIRS[name]()
+    assert shift_rmse_params()["intensity_scale"] == "asymptote"
+    loss0, diag0, *_ = shift_rmse_loss(tgt, sim, None)
+    loss1, diag1, *_ = shift_rmse_loss(tgt, sim, None,
+                                      metric_kwargs={"intensity_scale": "asymptote"})
+    assert loss1 == loss0
+    assert diag1["anchor_scale"] == diag0["anchor_scale"]
+    assert diag0["intensity_scale"] == "asymptote"
+
+
+def test_intensity_scale_none_compares_unscaled():
+    tgt, sim = _SCALE_PAIRS["crystal"]()
+    sim_scaled = sim.copy()
+    sim_scaled[:, 1] *= 1.7
+    kw = {"intensity_scale": "none"}
+    loss, diag, grid, log_exp, log_sim = shift_rmse_loss(tgt, sim_scaled, None, metric_kwargs=kw)
+    assert diag["anchor_scale"] == 1.0 and diag["intensity_scale"] == "none"
+    # same curves without the factor: log_sim moves by exactly log10(1.7)
+    *_, log_sim_1 = shift_rmse_loss(tgt, sim, None, metric_kwargs=kw)
+    assert np.allclose(log_sim - log_sim_1, np.log10(1.7))
+    # the asymptote scaling cancels the factor, "none" does not
+    ref = shift_rmse_loss(tgt, sim, None)[0]
+    assert shift_rmse_loss(tgt, sim_scaled, None)[0] == pytest.approx(ref, rel=1e-12)
+    assert loss != pytest.approx(ref, rel=1e-3)
+    # peaks and the spacing term do not depend on the scaling
+    d_asym = shift_rmse_loss(tgt, sim_scaled, None)[1]
+    assert diag["q1_tgt"] == d_asym["q1_tgt"] and diag["q1_sim"] == d_asym["q1_sim"]
+    assert diag["shift_term"] == d_asym["shift_term"]
+
+
+def test_intensity_scale_none_needs_no_asymptote_band():
+    tgt = crystal_curve(q=_qa()[_qa() < 0.0505])          # no points in (0.085, 0.100)
+    sim = FCC_SIMS["q1_0145"]()
+    with pytest.raises(MetricFailed, match="asymptote band"):
+        shift_rmse_loss(tgt, sim, None)
+    loss, diag, *_ = shift_rmse_loss(tgt, sim, None, metric_kwargs={"intensity_scale": "none"})
+    assert np.isfinite(loss)
+    assert not any(diag["fallbacks"][k] for k in (
+        "asymptote_exp_tail_fallback", "asymptote_sim_tail_fallback", "asymptote_zero_den_unity"))
+
+
+def test_intensity_scale_choices():
+    with pytest.raises(ValueError, match="intensity_scale"):
+        shift_rmse_params({"intensity_scale": "fit"})

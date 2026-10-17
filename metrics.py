@@ -10,7 +10,7 @@ Metrics (``metric=``):
   Distance ``dp_coeff*dp + (1 - dp_coeff)*da`` on t in [0, 1]
   (compare_saxs_curves).
 - ``"shift_rmse"`` (saxs-fft path): log10 RMSE on the reduced axis
-  x = q / q1 after high-q asymptote scaling, plus
+  x = q / q1 after high-q asymptote scaling (or none), plus
   lambda * |ln(q1_sim / q1_tgt)| (shift_rmse_loss; parameters in
   SHIFT_RMSE_DEFAULTS). The mapping and inverse-design campaigns use it.
 
@@ -286,6 +286,11 @@ def compare_saxs_curves(
 # mapping ground truth that contains dispersed conditions; skipping the
 # alignment alone already ranks flat curves outside the top 20 of both
 # fluid runs.
+#
+# ``intensity_scale = "none"`` (R4, 2026-10-16) skips the asymptote scaling:
+# the simulated curve is compared at its own intensity. It is for measured
+# targets, whose S(q) does not level off at 1 in the asymptote band; the
+# default "asymptote" is unchanged.
 
 SHIFT_RMSE_DEFAULTS = {
     "peak_search_range": (0.006, 0.12),
@@ -301,6 +306,7 @@ SHIFT_RMSE_DEFAULTS = {
     "asymptote_fallback": "fail",
     "asymptote_tail_frac": 0.75,
     "asymptote_zero_den": "fail",
+    "intensity_scale": "asymptote",
 }
 
 _SHIFT_RMSE_RANGES = ("peak_search_range", "asymptote_band")
@@ -308,6 +314,7 @@ _SHIFT_RMSE_CHOICES = {
     "no_peak": ("fallback", "fail"),
     "asymptote_fallback": ("tail", "fail"),
     "asymptote_zero_den": ("unity", "fail"),
+    "intensity_scale": ("asymptote", "none"),
 }
 
 
@@ -354,6 +361,10 @@ def shift_rmse_params(metric_kwargs=None):
     asymptote_zero_den : {"unity", "fail"}
         Simulated band mean non-finite or below 1e-12: scale 1.0 or fail.
         "fail".
+    intensity_scale : {"asymptote", "none"}
+        "asymptote" scales the simulated curve by the asymptote band (above);
+        "none" compares it unscaled (scale 1.0) and ignores the asymptote
+        parameters. "asymptote".
     """
     unknown = set(metric_kwargs or {}) - set(SHIFT_RMSE_DEFAULTS)
     if unknown:
@@ -631,14 +642,19 @@ def shift_rmse_loss(exp_data, sim_data, q_range, metric_kwargs=None):
         window_abs = (x_lo * tgt_scale, x_hi * tgt_scale)
         window_source = "overlap"
 
-    anchor, asym_info = asymptote_scale(
-        exp_curve, sim_curve,
-        band=p["asymptote_band"],
-        min_points=p["asymptote_min_points"],
-        fallback=p["asymptote_fallback"],
-        tail_frac=p["asymptote_tail_frac"],
-        zero_den=p["asymptote_zero_den"],
-    )
+    if p["intensity_scale"] == "asymptote":
+        anchor, asym_info = asymptote_scale(
+            exp_curve, sim_curve,
+            band=p["asymptote_band"],
+            min_points=p["asymptote_min_points"],
+            fallback=p["asymptote_fallback"],
+            tail_frac=p["asymptote_tail_frac"],
+            zero_den=p["asymptote_zero_den"],
+        )
+    else:
+        anchor = 1.0
+        asym_info = {"exp_tail_fallback": False, "sim_tail_fallback": False,
+                     "zero_den": False}
     sim_scaled = sim_curve.copy()
     sim_scaled[:, 1] = sim_scaled[:, 1] * anchor
     log_exp, log_sim, grid = _resample_reduced(
@@ -674,6 +690,7 @@ def shift_rmse_loss(exp_data, sim_data, q_range, metric_kwargs=None):
         "x_scale_tgt": float(tgt_scale),
         "x_scale_sim": float(sim_scale),
         "anchor_scale": float(anchor),
+        "intensity_scale": p["intensity_scale"],
         "window_abs": [float(window_abs[0]), float(window_abs[1])],
         "window_source": window_source,
         "q_range": None if q_range is None else [float(q_range[0]), float(q_range[1])],
