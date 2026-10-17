@@ -36,7 +36,7 @@ DNA_digitwin/
 ├── campaigns/
 │   ├── r3.1-gt/          # R3.1: virtual ground truth (conditions, coefficients, generation, QC)
 │   ├── r3.2-physics-validate/  # R3.2: BO training of the physics-based mapping on it
-│   ├── r4-measured/      # R4: physics-based mapping trained on six measured SAXS curves
+│   ├── r4-measured/      # R4: physics-based mapping trained on six measured SAXS curves (data/ in the repo)
 │   ├── r5.1-predict/     # R5.1: S(q) predicted with the R3.2 eval-56 coefficients at new conditions
 │   └── inverse/
 │       ├── inverse-example/  # inverse.py example config (smoke tests), sbatch templates
@@ -216,9 +216,8 @@ is emitted if non-default values are supplied).
 
   `intensity_scale="none"` (default `"asymptote"`) skips the asymptote
   scaling and compares the simulated curve at its own intensity; the
-  asymptote parameters are then unused. R4 uses it, with
-  `dispersed_delta=0.25`, because the measured S(q) does not level off at
-  1 in the band and its first peaks reach only `s_max − 1 = 0.44–0.76`
+  asymptote parameters are then unused. R4 uses it because the measured
+  S(q) does not level off at 1 in the band
   (`campaigns/r4-measured/r4_config.py`).
 
   The diagnostics key `loss` is the total `M4 + shift_term` (it was `mse`

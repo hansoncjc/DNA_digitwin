@@ -2,12 +2,13 @@
 R4 driver: BO over the physics-based mapping coefficients against six measured
 SAXS curves, one GPU job per condition per evaluation (as R3.2).
 
-    python run_r4.py --data DATA_DIR --out OUT_ROOT --check-only   # startup checks, no BO
-    python run_r4.py --data DATA_DIR --out OUT_ROOT [--max-evals N]
-    python run_r4.py --data DATA_DIR --out OUT_SMOKE --smoke --steps 200000
+    python run_r4.py --out OUT_ROOT --check-only   # startup checks, no BO
+    python run_r4.py --out OUT_ROOT [--max-evals N]
+    python run_r4.py --out OUT_SMOKE --smoke --steps 200000
 
-DATA_DIR holds the six I(q) files of ``r4_config.CONDITIONS``. Every start
-first runs the startup checks and stops on any failure:
+The six I(q) files of ``r4_config.CONDITIONS`` are read from the repo copy
+``r4_config.DATA_DIR`` (``data/``); ``--data`` points elsewhere for tests
+only. Every start first runs the startup checks and stops on any failure:
   - each file exists and has the md5 in the config;
   - the measured S(q) (trim_tail, extract_exp_sq, as the objective computes
     it) has a first peak under the R4 shift_rmse settings and is not
@@ -41,7 +42,7 @@ sys.path.insert(0, str(HERE))
 
 import r4_config as config  # noqa: E402
 
-SMOKE_IDS = {"d0", "d5"}   # C_anchor 20 (L 20) and L_bridge 80
+SMOKE_IDS = {"d0", "d5"}   # L_bridge 20 / C_anchor 60 and L_bridge 80
 
 
 def md5(path):
@@ -77,7 +78,7 @@ def build_datasets(data_dir, ids=None):
             id=c["id"],
             exp_path=Path(data_dir) / c["file"],
             exp=ExperimentalParams(L_bridge=c["L_bridge"], C_anchor=c["C_anchor"],
-                                   C_NaCl=config.C_NACL),
+                                   C_NaCl=c["C_NaCl"]),
             sim=SimulationParams(density=config.DENSITY),
             datatype=config.DATATYPE,
         )
@@ -106,7 +107,7 @@ def box_fraction(cond, n=4096, seed=0):
                                                                                                dtype=torch.float64)
     ok = 0
     for x in X:
-        p = physics_map(cond["L_bridge"], cond["C_anchor"], config.C_NACL,
+        p = physics_map(cond["L_bridge"], cond["C_anchor"], cond["C_NaCl"],
                         **dict(zip(names, x.tolist())))
         try:
             check_mapped_params(p["U0"], p["n"], p["m"])
@@ -134,7 +135,7 @@ def startup_checks(datasets, ffpath, out_root):
     for ds in datasets:
         c = cond_by_id[ds.id]
         row = {"id": ds.id, "file": c["file"], "L_bridge": c["L_bridge"],
-               "C_anchor": c["C_anchor"], "C_NaCl": config.C_NACL}
+               "C_anchor": c["C_anchor"], "C_NaCl": c["C_NaCl"]}
         if not ds.exp_path.exists():
             problems.append(f"{ds.id}: missing {ds.exp_path}")
             report["conditions"].append(row)
@@ -155,7 +156,7 @@ def startup_checks(datasets, ffpath, out_root):
                             f"(s_max - 1 = {pk.s_max - 1:.3f} < {p['dispersed_delta']})")
         elif pk.n_peaks_found == 0:
             problems.append(f"{ds.id}: no first peak in {p['peak_search_range']}")
-        m = physics_map(c["L_bridge"], c["C_anchor"], config.C_NACL, **init)
+        m = physics_map(c["L_bridge"], c["C_anchor"], c["C_NaCl"], **init)
         row["init_mapped"] = m
         try:
             check_mapped_params(m["U0"], m["n"], m["m"])
@@ -163,7 +164,8 @@ def startup_checks(datasets, ffpath, out_root):
             problems.append(f"{ds.id}: initial point {exc}")
         row["box_fraction_inside_limits"] = box_fraction(c)
         report["conditions"].append(row)
-        print(f"[r4] {ds.id} L {c['L_bridge']:.0f} C_anchor {c['C_anchor']:.0f}: "
+        print(f"[r4] {ds.id} L {c['L_bridge']:.0f} C_anchor {c['C_anchor']:.0f} "
+              f"NaCl {c['C_NaCl']:.0f}: "
               f"{row['n_points']} pts q {row['q_min']:.5f}-{row['q_max']:.5f}, "
               f"q1 {row['q1']:.5f}, s_max-1 {row['s_max_minus_1']:.3f}, "
               f"dispersed {row['dispersed']}; N_grid: "
@@ -197,7 +199,8 @@ def parallel_cfg(a):
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", required=True, help="folder with the six I(q) files")
+    ap.add_argument("--data", default=str(config.DATA_DIR),
+                    help="folder with the six I(q) files (default: the repo copy; tests only)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-evals", type=int, default=config.MAX_EVALS,
                     help="successful evaluations in total, resumes included")

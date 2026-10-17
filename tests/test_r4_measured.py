@@ -1,5 +1,6 @@
-"""R4 (training on measured curves): config, startup checks, and both objective
-paths on synthetic I(q) files (stub simulation, stub botorch, stub launcher)."""
+"""R4 (training on measured curves): config and the repo data copy, startup
+checks, and both objective paths on synthetic I(q) files (stub simulation,
+stub botorch, stub launcher)."""
 import hashlib
 import json
 import sys
@@ -26,28 +27,56 @@ import train_config as r32  # noqa: E402
 
 def test_config():
     assert [c["id"] for c in r4.CONDITIONS] == [f"d{i}" for i in range(6)]
-    assert {(c["L_bridge"], c["C_anchor"]) for c in r4.CONDITIONS} == {
-        (20.0, 20.0), (20.0, 60.0), (20.0, 100.0), (20.0, 140.0), (40.0, 100.0), (80.0, 100.0)}
-    assert len({c["file"] for c in r4.CONDITIONS}) == 6
-    assert r4.C_NACL == 10.0
+    # a cross around L_bridge 20, C_anchor 100, 10 mM
+    assert [(c["L_bridge"], c["C_anchor"], c["C_NaCl"]) for c in r4.CONDITIONS] == [
+        (20.0, 60.0, 10.0), (20.0, 100.0, 10.0), (20.0, 140.0, 10.0),
+        (20.0, 100.0, 20.0), (20.0, 100.0, 40.0), (80.0, 100.0, 10.0)]
+    for c in r4.CONDITIONS:
+        assert c["file"] == (f"chol_{c['C_anchor']:03.0f}_nacl_{c['C_NaCl']:02.0f}"
+                             f"_bridge_{c['L_bridge']:02.0f}.npy")
     assert r4.PARAM_CFG is r32.PARAM_CFG and r4.N == r32.N and r4.DENSITY == r32.DENSITY
-    p = shift_rmse_params(r4.METRIC_KWARGS)
-    assert p["intensity_scale"] == "none" and p["dispersed_delta"] == 0.25
+    assert "fixed" not in r4.PARAM_CFG["K_s"]
     assert (r4.DATATYPE, r4.TRIM_TAIL, r4.MAX_EVALS) == ("iq", 200, 100)
     assert (run_r4.REPO / r4.FORMFACTOR).exists()
 
 
+def test_loss_is_the_default_except_intensity_scale():
+    p = shift_rmse_params(r4.METRIC_KWARGS)
+    assert p["intensity_scale"] == "none"
+    assert {k: v for k, v in p.items() if k != "intensity_scale"} == {
+        k: v for k, v in shift_rmse_params().items() if k != "intensity_scale"}
+    # dispersed_delta is written out in the config, and changing it there reaches the loss
+    assert r4.METRIC_KWARGS["dispersed_delta"] == 0.5
+    assert shift_rmse_params(dict(r4.METRIC_KWARGS, dispersed_delta=0.3))["dispersed_delta"] == 0.3
+
+
+def test_repo_data_copy_matches_the_md5():
+    assert r4.DATA_DIR == CAMPAIGNS / "r4-measured" / "data"
+    assert sorted(f.name for f in r4.DATA_DIR.glob("*.npy")) == sorted(c["file"] for c in r4.CONDITIONS)
+    for c in r4.CONDITIONS:
+        assert hashlib.md5((r4.DATA_DIR / c["file"]).read_bytes()).hexdigest() == c["md5"]
+        arr = np.load(r4.DATA_DIR / c["file"])
+        assert arr.ndim == 2 and arr.shape[1] == 3 and arr.shape[0] > r4.TRIM_TAIL
+
+
 @pytest.mark.parametrize("cond", r4.CONDITIONS, ids=lambda c: c["id"])
-def test_initial_point_inside_limits(cond):
+def test_the_whole_box_maps_inside_the_limits(cond):
     init = {k: v["init"] for k, v in r4.PARAM_CFG.items()}
-    p = physics_map(cond["L_bridge"], cond["C_anchor"], r4.C_NACL, **init)
+    p = physics_map(cond["L_bridge"], cond["C_anchor"], cond["C_NaCl"], **init)
     check_mapped_params(p["U0"], p["n"], p["m"])
+    assert run_r4.box_fraction(cond, n=512) == 1.0
 
 
-def test_c_anchor_20_is_only_partly_inside_the_box():
-    fractions = {c["id"]: run_r4.box_fraction(c, n=512) for c in r4.CONDITIONS}
-    assert 0.3 < fractions["d0"] < 0.7
-    assert all(fractions[i] == 1.0 for i in ("d1", "d2", "d3", "d4", "d5"))
+def test_startup_checks_pass_on_the_repo_data(tmp_path, capsys):
+    out = tmp_path / "out"
+    run_r4.main(["--out", str(out), "--check-only", "--mc-dfm-root", ""])
+    rep = json.loads((out / "r4_startup_checks.json").read_text())
+    assert rep["problems"] == []
+    rows = {row["id"]: row for row in rep["conditions"]}
+    assert all(row["dispersed"] is False and row["n_peaks_found"] > 0 for row in rows.values())
+    assert all(0.013 < rows[i]["q1"] < 0.0141 for i in ("d0", "d1", "d2", "d3", "d4"))
+    assert 0.0100 < rows["d5"]["q1"] < 0.0110          # L_bridge 80: larger spacing
+    assert min(row["s_max_minus_1"] for row in rows.values()) > 0.5
 
 
 # ------------------------------------------------- synthetic measured curves
@@ -89,7 +118,7 @@ def test_startup_checks_pass(data, tmp_path):
 
 def test_startup_checks_fail_on_md5_and_dispersed(tmp_path, monkeypatch):
     folder = tmp_path / "I(q)"
-    _write_iq(folder, peak_amp=0.05)          # flat: dispersed at delta 0.25
+    _write_iq(folder, peak_amp=0.05)          # flat: dispersed at delta 0.5
     with pytest.raises(SystemExit) as exc:
         run_r4.main(["--data", str(folder), "--out", str(tmp_path / "o"), "--check-only",
                      "--mc-dfm-root", ""])
@@ -119,17 +148,13 @@ def test_sequential_smoke(data, tmp_path, stub_forward, fake_botorch):  # noqa: 
                  "--mc-dfm-root", ""])
     blocks = [l for l in (out / "bo_trajectory.csv").read_text().splitlines()
               if l.startswith("# Iteration")]
-    ok = [int(l.split()[2].split(",")[0]) for l in blocks if ",total_loss," in l]
-    assert len(ok) == 2
-    # a failed block can only be a point that maps C_anchor = 20 below U0 = 0.5
-    if len(blocks) > 2:
-        assert "Mapped parameters outside the checked range: U0=" in (out / "error_d0.txt").read_text()
-    for eval_id in ok:
+    assert len(blocks) == 2 and all(",total_loss," in l for l in blocks)
+    for eval_id in (0, 1):
         for ds in ("d0", "d5"):
             diag = json.loads((out / f"eval_{eval_id:03d}" / ds / "shift_rmse_diagnostics.json")
                               .read_text())
             assert diag["intensity_scale"] == "none" and diag["anchor_scale"] == 1.0
-            assert diag["params"]["dispersed_delta"] == 0.25
+            assert diag["params"]["dispersed_delta"] == 0.5
             assert diag["aligned"] is True and diag["window_abs"][1] < 0.09
 
 
@@ -153,11 +178,7 @@ def test_parallel_job_specs_carry_the_r4_settings(data, tmp_path, stub_forward,
     monkeypatch.setattr(parallel, "submit_jobs_with_retry", submit)
     out = tmp_path / "out"
     run_r4.main(["--data", str(data), "--out", str(out), "--smoke", "--mc-dfm-root", ""])
-    # two successful evaluations, each submitted as both conditions at once; a point
-    # that maps C_anchor = 20 below U0 = 0.5 fails before submission (no GPU job)
-    names = sorted(s["name"] for s in specs)
-    evals = sorted({n[:3] for n in names})
-    assert len(evals) == 2 and names == sorted(f"{e}_d{d}" for e in evals for d in ("00", "05"))
+    assert sorted(s["name"] for s in specs) == ["i00_d00", "i00_d05", "i01_d00", "i01_d05"]
     for s in specs:
         loss = s["worker_config"]["loss"]
         assert (loss["datatype"], loss["trim_tail"]) == ("iq", 200)

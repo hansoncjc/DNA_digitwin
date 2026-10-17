@@ -1,15 +1,15 @@
 """
 Tables and figures for the R4 note (training on measured curves).
 
-Usage: python summarize_r4.py RUN_DIR DATA_DIR FIG_DIR [--eval N]
+Usage: python summarize_r4.py RUN_DIR FIG_DIR [--eval N]
 
 RUN_DIR is the downloaded Optimization_Results copy (bo_trajectory.csv and
-whichever eval_XXX folders were downloaded); DATA_DIR holds the six I(q)
-files of r4_config.CONDITIONS. Both are read only. ``--eval`` picks the
+whichever eval_XXX folders were downloaded), read only; the measured I(q)
+files are the repo copies in r4_config.DATA_DIR. ``--eval`` picks the
 evaluation drawn against the measured curves (default: the best). Writes
 next to this script:
   r4_evals.csv       one row per evaluation: status (ok / FAILED / ABANDONED),
-                     coefficients, A_eff = A (1 + 10 K_s), total loss, best so far
+                     coefficients, total loss, best so far
   r4_conditions.csv  one row per condition at the drawn evaluation: mapped
                      (U0, r0, n, m), loss, and, when the eval folder is there,
                      m4, shift term, q1 of both curves, aligned / dispersed
@@ -68,15 +68,14 @@ def eval_table(df):
     ev = g[COEFFS].first()
     ev["status"] = g["status"].first()
     ev["total_loss"] = g["loss"].sum(min_count=1).where(ev["status"] == "ok")
-    ev["A_eff"] = ev["A"] * (1.0 + config.C_NACL * ev["K_s"])
     ev["best_so_far"] = ev["total_loss"].cummin()
     return ev.reset_index().rename(columns={"iteration": "eval"})
 
 
-def measured_sq(data_dir, cond):
+def measured_sq(cond):
     from scattering import extract_exp_sq
 
-    arr = np.load(Path(data_dir) / cond["file"])[:, :2]
+    arr = np.load(config.DATA_DIR / cond["file"])[:, :2]
     lo, hi = config.EXTRACT_Q_WINDOW
     return extract_exp_sq(arr[:-config.TRIM_TAIL], ffpath=str(REPO / config.FORMFACTOR),
                           q_min=lo, q_max=hi)
@@ -85,7 +84,6 @@ def measured_sq(data_dir, cond):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("run_dir")
-    ap.add_argument("data_dir")
     ap.add_argument("fig_dir")
     ap.add_argument("--eval", type=int, default=None)
     a = ap.parse_args()
@@ -104,8 +102,9 @@ def main():
     coeffs = ev.set_index("eval").loc[pick, COEFFS].to_dict()
     rows = []
     for c in config.CONDITIONS:
-        m = physics_map(c["L_bridge"], c["C_anchor"], config.C_NACL, **coeffs)
-        row = {"id": c["id"], "L_bridge": c["L_bridge"], "C_anchor": c["C_anchor"], **m}
+        m = physics_map(c["L_bridge"], c["C_anchor"], c["C_NaCl"], **coeffs)
+        row = {"id": c["id"], "L_bridge": c["L_bridge"], "C_anchor": c["C_anchor"],
+               "C_NaCl": c["C_NaCl"], **m}
         hit = df[(df["iteration"] == pick) & (df["dataset_id"] == c["id"])]
         row["loss"] = float(hit["loss"].iloc[0]) if len(hit) else np.nan
         diag_path = run / f"eval_{pick:03d}" / c["id"] / "shift_rmse_diagnostics.json"
@@ -117,7 +116,7 @@ def main():
     pd.DataFrame(rows).to_csv(HERE / "r4_conditions.csv", index=False)
 
     # trajectory
-    fig, ax = plt.subplots(1 + len(COEFFS) + 1, 1, figsize=(8, 13), sharex=True)
+    fig, ax = plt.subplots(1 + len(COEFFS), 1, figsize=(8, 11), sharex=True)
     ax[0].semilogy(ok["eval"], ok["total_loss"], "o", ms=3, color="0.4", label="total loss")
     ax[0].semilogy(ok["eval"], ok["best_so_far"], "-", color="C3", label="best so far")
     bad = ev[ev["status"] != "ok"]
@@ -125,10 +124,9 @@ def main():
         ax[0].axvline(e, color="C1", lw=0.5, alpha=0.5)
     ax[0].legend(fontsize=8)
     ax[0].set_title(f"R4: {len(ok)} ok, {len(bad)} failed / abandoned (orange)")
-    for axi, name in zip(ax[1:], COEFFS + ["A_eff"]):
+    for axi, name in zip(ax[1:], COEFFS):
         axi.plot(ok["eval"], ok[name], "o", ms=3)
-        if name in config.PARAM_CFG:
-            axi.set_ylim(*config.PARAM_CFG[name]["bounds"])
+        axi.set_ylim(*config.PARAM_CFG[name]["bounds"])
         axi.set_ylabel(name)
     ax[-1].set_xlabel("evaluation")
     fig.tight_layout()
@@ -138,7 +136,7 @@ def main():
     # S(q) at the drawn evaluation
     fig, axes = plt.subplots(2, 3, figsize=(16, 9))
     for axi, c, row in zip(axes.ravel(), config.CONDITIONS, rows):
-        tgt = measured_sq(a.data_dir, c)
+        tgt = measured_sq(c)
         axi.loglog(tgt[:, 0], tgt[:, 1], ".", ms=3, color="C3", label="measured")
         sim_path = run / f"eval_{pick:03d}" / c["id"] / "S(q)_data" / "average_structure_factor.npy"
         if sim_path.exists():
@@ -146,7 +144,7 @@ def main():
             axi.loglog(sim[:, 0], sim[:, 1], "-", color="C2", lw=1, label=f"eval {pick}")
         axi.axhline(1, color="k", lw=0.6)
         axi.set_title(f"{c['id']}: L {c['L_bridge']:.0f}, C_anchor {c['C_anchor']:.0f}, "
-                      f"loss {row['loss']:.3f}", fontsize=10)
+                      f"NaCl {c['C_NaCl']:.0f}, loss {row['loss']:.3f}", fontsize=10)
         axi.set_xlabel("q (Å⁻¹)")
     axes[0, 0].legend(fontsize=8)
     fig.tight_layout()
