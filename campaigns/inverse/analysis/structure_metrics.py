@@ -389,7 +389,7 @@ def plot_ptm(path, rows, cutoff):
 
 
 @_with_rc
-def plot_convergence(path, evals_csv):
+def plot_convergence(path, evals_csv, lambda_shift=1.0):
     import matplotlib.pyplot as plt
     with open(evals_csv, newline="") as fh:
         rows = [r for r in csv.DictReader(fh) if r["loss"]]
@@ -407,7 +407,9 @@ def plot_convergence(path, evals_csv):
     ax.step(eid[order], np.minimum.accumulate(loss[order]), where="post", color=INK, lw=2,
             label="best so far")
     ax.set_xlabel("evaluation id (vertical lines: batches)")
-    ax.set_ylabel("loss = M4 + |ln(q1_sim/q1_tgt)|")
+    ax.set_ylabel("loss = M4" if lambda_shift == 0 else
+                  "loss = M4 + |ln(q1_sim/q1_tgt)|" if lambda_shift == 1 else
+                  f"loss = M4 + {lambda_shift:g} |ln(q1_sim/q1_tgt)|")
     ax.legend(frameon=False)
     _style(ax)
     fig.tight_layout()
@@ -575,7 +577,8 @@ def main(argv=None):
     plot_ptm(out / "ptm.png", rows, cutoffs[0])
     if summary is not None:
         plot_convergence(out / "convergence.png",
-                         Path(a.run).expanduser() / "pack_summary" / "evals.csv")
+                         Path(a.run).expanduser() / "pack_summary" / "evals.csv",
+                         lambda_shift=mp["lambda_shift"])
     np.savez(out / "gr.npz", r=r, **{lab: g for lab, g in curves})
 
     settings = {
