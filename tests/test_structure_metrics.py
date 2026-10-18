@@ -48,3 +48,28 @@ def test_first_peak_refined():
     r1, g1 = sm.first_peak(r, g)
     assert r1 == pytest.approx(1.234, abs=0.005)
     assert g1 == pytest.approx(4.0, rel=0.02)
+
+
+def test_metric_kwargs_from_run(tmp_path):
+    import json
+    run = tmp_path / "r6.8a"
+    (run / "Optimization_Results").mkdir(parents=True)
+    snap = {"locked": {"metric_kwargs": {"lambda_shift": 0.0}}}
+    (run / "Optimization_Results" / "inverse_config.json").write_text(json.dumps(snap))
+    assert sm.metric_kwargs_from_run(run) == {"lambda_shift": 0.0}
+    snap["locked"].pop("metric_kwargs")            # runs before 2026-10-14
+    (run / "Optimization_Results" / "inverse_config.json").write_text(json.dumps(snap))
+    assert sm.metric_kwargs_from_run(run) == {}
+
+
+@pytest.mark.parametrize("lam", [0.0, 1.0, 2.0])
+def test_lambda_reaches_the_recomputed_loss(lam):
+    sm._stub_mcdfm()
+    from shift_rmse_curves import crystal_curve
+    tgt, sim = crystal_curve(q1=0.0129), crystal_curve(q1=0.0131, amp=6.0)
+    base, _ = sm.sq_metrics(tgt, sim)                         # defaults: lambda 1
+    diag, _ = sm.sq_metrics(tgt, sim, {"lambda_shift": lam})
+    assert base["shift_term"] > 0
+    assert diag["m4"] == pytest.approx(base["m4"])
+    assert diag["shift_term"] == pytest.approx(lam * base["shift_term"])
+    assert diag["loss"] == pytest.approx(diag["m4"] + lam * base["shift_term"])

@@ -18,8 +18,11 @@ defaults: the last 100 frames, every 5th, i.e. 20 frames); for the target,
 on the frames named in meta.json (s_q_common.frames, step):
 
 1. S(q) loss. S(q) recomputed with scattering.convert_to_SAXS_fft defaults
-   (CPU, as in R6) and scored with metrics.shift_rmse_loss (defaults)
-   against the target S(q) (--target-sq, default cpu/target_sq.npy): total
+   (CPU, as in R6) and scored with metrics.shift_rmse_loss against the
+   target S(q) with the run's metric_kwargs: with --run the ones locked in
+   Optimization_Results/inverse_config.json ({} when the key is absent, as
+   in runs before 2026-10-14), with --gsd those of --metric-kwargs (JSON,
+   default {}); e.g. {"lambda_shift": 0.0} for R6.8a/b. The S(q) (--target-sq, default cpu/target_sq.npy): total
    loss, M4, spacing term. When the GSD sits in an eval folder, the run-time
    S(q) (S(q)_data/average_structure_factor.npy) and loss
    (shift_rmse_diagnostics.json) are read for the check: the run-time S(q)
@@ -146,9 +149,10 @@ def recompute_sq(gsd_path, workdir):
     return np.load(workdir / "S(q)_data" / "average_structure_factor.npy")
 
 
-def sq_metrics(target_sq, sim_sq):
+def sq_metrics(target_sq, sim_sq, metric_kwargs=None):
     import metrics
-    loss, diag, grid, log_exp, log_sim = metrics.shift_rmse_loss(target_sq, sim_sq, None)
+    loss, diag, grid, log_exp, log_sim = metrics.shift_rmse_loss(
+        target_sq, sim_sq, None, metric_kwargs=metric_kwargs)
     return diag, (grid, log_exp, log_sim)
 
 
@@ -252,6 +256,13 @@ def first_peak(r, g, prominence_frac=0.3):
 
 
 # ------------------------------------------------------------------ inputs
+
+
+def metric_kwargs_from_run(run_dir):
+    """The run's locked metric_kwargs from inverse_config.json; {} when the
+    key is absent (runs started before 2026-10-14 used the defaults)."""
+    snap = json.loads((Path(run_dir) / "Optimization_Results" / "inverse_config.json").read_text())
+    return dict(snap.get("locked", {}).get("metric_kwargs") or {})
 
 
 def configurations_from_run(run_dir, top):
@@ -466,6 +477,9 @@ def main(argv=None):
     ap.add_argument("--dr", type=float, default=0.02)
     ap.add_argument("--rdf-range", type=float, nargs=2, default=[0.0, 10.0])
     ap.add_argument("--loss-tol", type=float, default=5e-3)
+    ap.add_argument("--metric-kwargs", default=None,
+                    help='with --gsd: JSON metric_kwargs of the run, e.g. \'{"lambda_shift": 0}\' '
+                         "(default {}); with --run they are read from inverse_config.json")
     ap.add_argument("--reuse-sq", action="store_true",
                     help="use <out>/<label>/sq_recomputed.npy when present")
     ap.add_argument("--no-render", action="store_true")
@@ -483,8 +497,12 @@ def main(argv=None):
     target_sq = np.load(a.target_sq or tdir / "cpu" / "target_sq.npy")
     summary = None
     if a.run:
+        if a.metric_kwargs is not None:
+            ap.error("--metric-kwargs goes with --gsd; --run reads the run's own")
         configs, summary = configurations_from_run(Path(a.run).expanduser(), a.top)
+        metric_kwargs = metric_kwargs_from_run(Path(a.run).expanduser())
     else:
+        metric_kwargs = json.loads(a.metric_kwargs) if a.metric_kwargs else {}
         labels = a.labels or [Path(g).stem for g in a.gsd]
         configs = [(lab, Path(g), {}) for lab, g in zip(labels, a.gsd)]
     cutoffs = list(dict.fromkeys(a.ptm_cutoffs))
@@ -493,7 +511,12 @@ def main(argv=None):
     tgt_frames = select_frames(gsd_n_frames(tgt_gsd), meta["s_q_common"]["frames"],
                                meta["s_q_common"].get("step", 1))
     import metrics
-    tgt_peak = metrics.detect_first_peak(metrics._sanitize_curve(target_sq))
+    mp = metrics.shift_rmse_params(metric_kwargs)          # raises on unknown keys
+    print(f"[structure_metrics] metric_kwargs {metric_kwargs} "
+          f"(lambda_shift = {mp['lambda_shift']:g})")
+    tgt_peak = metrics.detect_first_peak(
+        metrics._sanitize_curve(target_sq), search_range=mp["peak_search_range"],
+        prominence_frac=mp["prominence_frac"], dispersed_delta=mp["dispersed_delta"])
     row, r, g_tgt = analyse("target", tgt_gsd, tgt_frames, cutoffs, a.r_max, a.dr, render_dir)
     row.update({"q1": None if tgt_peak.dispersed else tgt_peak.q1, "loss": 0.0})
     rows, curves = [row], [("target", g_tgt)]
@@ -512,7 +535,7 @@ def main(argv=None):
                 sim_sq = recompute_sq(gsd, Path(tmp) / label)
             cache.parent.mkdir(parents=True, exist_ok=True)
             np.save(cache, sim_sq)
-        diag, reduced = sq_metrics(target_sq, sim_sq)
+        diag, reduced = sq_metrics(target_sq, sim_sq, metric_kwargs)
         n_frames = gsd_n_frames(gsd)
         indices = select_frames(n_frames, *FORWARD_FRAMES)
         row, _, g = analyse(label, gsd, indices, cutoffs, a.r_max, a.dr, render_dir)
@@ -535,11 +558,12 @@ def main(argv=None):
             if abs(row["loss_diff"]) > a.loss_tol:
                 failed.append(label)
         if rt_sq is not None:
-            rescored, _ = sq_metrics(target_sq, rt_sq)
+            rescored, _ = sq_metrics(target_sq, rt_sq, metric_kwargs)
             row["loss_runtime_sq_rescored"] = rescored["loss"]
             same_grid = rt_sq.shape == sim_sq.shape and np.allclose(rt_sq[:, 0], sim_sq[:, 0])
             row["sq_max_abs_diff"] = (float(np.max(np.abs(rt_sq[:, 1] - sim_sq[:, 1])))
                                       if same_grid else None)
+            # curve-to-curve distance with the defaults, whatever the run's lambda
             row["sq_shift_rmse_vs_runtime"] = sq_metrics(rt_sq, sim_sq)[0]["loss"]
         plot_sq(out / f"sq_{label}.png", label, target_sq, sim_sq, diag, reduced)
         rows.append(row)
@@ -562,6 +586,8 @@ def main(argv=None):
                             "(N/2 * (N/V_box) * shell volume); minimum image",
         "r_max": a.r_max, "dr": a.dr, "rdf_range": a.rdf_range,
         "gr_rmsd_rel": "gr_rmsd / RMS(g_tgt) on rdf_range",
+        "metric_kwargs": metric_kwargs,
+        "sq_shift_rmse_vs_runtime": "shift_rmse defaults (run-time vs recomputed S(q))",
         "loss_tol": a.loss_tol, "check_failed": failed,
     }
     (out / "metrics.json").write_text(json.dumps({"settings": settings, "rows": rows},
