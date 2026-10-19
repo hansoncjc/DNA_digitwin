@@ -45,7 +45,9 @@ Python: written for the HOOMD venv (3.9+).
 """
 from __future__ import annotations
 
+import getpass
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -193,12 +195,65 @@ exit $EXIT_CODE
 # SLURM helpers
 # ---------------------------------------------------------------------------
 
-def sbatch_submit(sbatch_path: Path) -> str:
+# sbatch can fail when the Slurm controller does not answer in time
+# ("Socket timed out on send/recv operation"; R4 master stopped three times on
+# 2026-10-17/18). A failed call is retried after SBATCH_RETRY_WAIT seconds, up
+# to SBATCH_ATTEMPTS calls in all. The controller may have queued the job
+# before the reply was lost, so each retry first looks for a queued job that
+# runs this same script and takes its id instead of submitting a second one.
+SBATCH_ATTEMPTS = 5
+SBATCH_RETRY_WAIT = 60.0
+
+
+def _queued_job_for_script(sbatch_path: Path) -> Optional[str]:
+    """Id of a queued or running job of this user whose batch script is
+    ``sbatch_path``, or None. Raises CalledProcessError if squeue fails."""
+    out = subprocess.check_output(
+        ["squeue", "-h", "-u", getpass.getuser(), "-n", sbatch_path.stem, "-o", "%i|%o"],
+        text=True, stderr=subprocess.STDOUT,
+    )
+    target = os.path.realpath(sbatch_path)
+    for line in out.strip().splitlines():
+        job_id, _, command = line.partition("|")
+        if command.strip() and os.path.realpath(command.strip()) == target:
+            return job_id.strip()
+    return None
+
+
+def _sbatch_once(sbatch_path: Path) -> str:
     out = subprocess.check_output(["sbatch", str(sbatch_path)], text=True).strip()
     for tok in out.split():
         if tok.isdigit():
             return tok
     raise RuntimeError(f"Could not parse sbatch output: {out!r}")
+
+
+def sbatch_submit(sbatch_path: Path) -> str:
+    """Submit ``sbatch_path`` and return the Slurm job id (see SBATCH_ATTEMPTS)."""
+    sbatch_path = Path(sbatch_path)
+    for attempt in range(1, SBATCH_ATTEMPTS + 1):
+        if attempt > 1:
+            time.sleep(SBATCH_RETRY_WAIT)
+            try:
+                queued = _queued_job_for_script(sbatch_path)
+            except subprocess.CalledProcessError as e:
+                print(f"[launcher] squeue check before resubmitting {sbatch_path.name} "
+                      f"failed (attempt {attempt}/{SBATCH_ATTEMPTS}): {e.output}",
+                      file=sys.stderr)
+                continue
+            if queued is not None:
+                print(f"[launcher] {sbatch_path.name}: sbatch had failed but job "
+                      f"{queued} is queued; using it")
+                return queued
+        try:
+            return _sbatch_once(sbatch_path)
+        except subprocess.CalledProcessError as e:
+            if attempt == SBATCH_ATTEMPTS:
+                raise
+            print(f"[launcher] sbatch {sbatch_path.name} failed (attempt "
+                  f"{attempt}/{SBATCH_ATTEMPTS}, exit {e.returncode}); retrying in "
+                  f"{SBATCH_RETRY_WAIT:.0f} s", file=sys.stderr)
+    raise RuntimeError(f"sbatch {sbatch_path}: no attempt left")
 
 
 def squeue_states(job_ids: List[str]) -> dict:
