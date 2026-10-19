@@ -1,12 +1,13 @@
 """
 Figures for the R3.2 note (vault 02_Logs/02_testings/2026-10-09 BO_new_mapping_all_coeff), Results 2-4.
 
-Usage: python plot_r32.py RUN_DIR GT_DIR OUT_DIR [--floor 0.599] [--floor-csv CSV] [--threshold T]
+Usage: python plot_r32.py RUN_DIR GT_DIR OUT_DIR [--floor 0.599 0.689] [--floor-csv CSV] [--threshold T]
 
 RUN_DIR: downloaded Optimization_Results copy; GT_DIR: Sweep8_R3.1_GT (both
 read only). r32_evals.csv and r32_conditions.csv are read from this folder
-(summarize_r32.py). --floor draws the truth-loss floor (total over 24
-conditions), --threshold the success threshold once it is set. Writes
+(summarize_r32.py). --floor takes the total loss of each truth evaluation and
+draws their mean and range; --floor-csv (r32_truth_floor.csv of
+truth_floor_r32.py) plots every loss_* column per condition; --threshold the success threshold once it is set. Writes
 r32_loss_history.png, r32_per_condition.png and r32_sq_best_d0_d23.png into
 OUT_DIR. The S(q) main figure (3 x 4 grid with snapshots) is
 ../best_eval/plot_grid.py.
@@ -67,9 +68,13 @@ def fig_loss_history(ev, out, floor, threshold):
     ax.axhline(rep.loss.mean(), color=BLUE, lw=0.8, ls=":")
     ax.text(31, rep.loss.mean() * 0.955, f"repeat set {rep.loss.mean():.3f} +- {rep.loss.std(ddof=1):.3f} (band: +- 1 sd)",
             color=BLUE, fontsize=8, va="top")
-    if floor is not None:
-        ax.axhline(floor, color=INK, lw=1.0, ls="--")
-        ax.text(1, floor * 0.97, f"truth-loss floor {floor:.3f} (one truth evaluation)", fontsize=8, va="top")
+    if floor:
+        lo, hi, mean = min(floor), max(floor), float(np.mean(floor))
+        ax.axhspan(lo, hi, color=INK, alpha=0.08, lw=0)
+        ax.axhline(mean, color=INK, lw=1.0, ls="--")
+        vals = ", ".join(f"{f:.3f}" for f in floor)
+        ax.text(1, lo * 0.97, f"truth-loss floor {mean:.3f} ({len(floor)} truth evaluation"
+                f"{'s' if len(floor) > 1 else ''}: {vals})", fontsize=8, va="top")
     if threshold is not None:
         ax.axhline(threshold, color=AQUA, lw=1.2)
         ax.text(ev.index.max(), threshold * 1.03, f"success threshold {threshold:g}", color=AQUA,
@@ -107,7 +112,7 @@ def fig_per_condition(cond, out, floor_csv):
     salt = sorted(cond.C_NaCl.unique())
     norm = LogNorm(1e-3, 0.15)
     cmap = plt.get_cmap("Blues")
-    fl = pd.read_csv(floor_csv).set_index("id").loss if floor_csv else None
+    fl = pd.read_csv(floor_csv).set_index("id").filter(like="loss_") if floor_csv else None
     fig = plt.figure(figsize=(12.5, 8.4))
     gs = fig.add_gridspec(2, 2, height_ratios=[1, 0.85], hspace=0.38)
     axes = [fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])]
@@ -144,8 +149,10 @@ def fig_per_condition(cond, out, floor_csv):
                 label="repeat set: mean +- sd (line: min to max)")
     ax.scatter(x + 0.18, cond.loss_best, s=22, color=RED, zorder=3, label="best evaluation")
     if fl is not None:
-        ax.scatter(x - 0.18, fl.reindex(cond.id).values, s=22, marker="D", color=INK, zorder=3,
-                   label="truth-loss floor")
+        for k, col in enumerate(fl.columns):
+            ax.scatter(x - 0.18, fl[col].reindex(cond.id).values, s=22, marker="D" if k == 0 else "s",
+                       facecolor=INK if k == 0 else "none", edgecolor=INK, zorder=3,
+                       label=f"truth-loss floor, {col.replace('loss_', '')}")
     ax.set_yscale("log")
     ax.set_xticks(x, cond.id, fontsize=8)
     ax.set_ylabel("per-condition loss")
@@ -196,7 +203,8 @@ def fig_sq_all(cond, run, gt_dir, best, out):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("run"); ap.add_argument("gt"); ap.add_argument("out")
-    ap.add_argument("--floor", type=float, default=None)
+    ap.add_argument("--floor", type=float, nargs="+", default=None,
+                    help="total loss of each truth evaluation")
     ap.add_argument("--floor-csv", default=None, help="per-condition floor: columns id, loss")
     ap.add_argument("--threshold", type=float, default=None)
     a = ap.parse_args()
