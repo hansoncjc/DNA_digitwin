@@ -86,8 +86,10 @@ INK = "#0b0b0b"
 MUTED = "#8a8985"
 SERIES = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4")
 PTM_COLORS = dict(zip(PTM_TYPES, SERIES), OTHER="#c9c8c3")
-# S(q) overlay: target violet, simulation green (reference palette), alpha 0.8.
-SQ_TARGET, SQ_SIM, SQ_ALPHA = "#4a3aa7", "#008300", 0.8
+# S(q) overlay, project colour rule (2026-10-17): designed references warm,
+# computed results cool; inverse-design target orange, inverse-design result
+# purple, alpha 0.8.
+SQ_TARGET, SQ_SIM, SQ_ALPHA = "#E66A00", "#7B2CBF", 0.8
 
 
 def _stub_mcdfm():
