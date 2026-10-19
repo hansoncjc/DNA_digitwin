@@ -1,0 +1,3 @@
+# Preserve input bytes: provenance.json records SHA-256 of source files.
+inputs/**/*.csv -text
+inputs/*.csv -text

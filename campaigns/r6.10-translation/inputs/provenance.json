@@ -1,0 +1,46 @@
+{
+  "r3.2_eval_056.csv": {
+    "source": "/Users/hanson/Desktop/11_R32_analysis/bo_trajectory.csv (iteration 56 only)",
+    "sha256": "5759e4f2cb81f61264bf25900513248551b2c36de76bef03642024f21d8018f2"
+  },
+  "r6.4/gp_log/states/ntrain_0100_final.pt": {
+    "source": "/Users/hanson/Desktop/10_R6_analysis/r6.4/Optimization_Results/gp_log/states/ntrain_0100_final.pt",
+    "sha256": "a0c0881538e25f15ac43be3cf273918fa695d2b797f3fbd3a9ed2810f02ee230"
+  },
+  "r6.4/gp_log/gp_log.jsonl": {
+    "source": "/Users/hanson/Desktop/10_R6_analysis/r6.4/Optimization_Results/gp_log/gp_log.jsonl",
+    "sha256": "340eaf66699fc187804a14554ad60af7e6644261d06942a73af9945df5cc17a8"
+  },
+  "r6.4/bo_trajectory.csv": {
+    "source": "/Users/hanson/Desktop/10_R6_analysis/r6.4/Optimization_Results/bo_trajectory.csv",
+    "sha256": "d7b673bf9c256cab381bf32d9387857768390e9e26157763ee9bb9156a7e04d8"
+  },
+  "r6.4/inverse_config.json": {
+    "source": "/Users/hanson/Desktop/10_R6_analysis/r6.4/Optimization_Results/inverse_config.json",
+    "sha256": "a26e396fc4938729c43a044a902c52753f6d4d13946cb6adace789314f5031bb"
+  },
+  "r6.4/target_sq.npy": {
+    "source": "campaigns/inverse/inverse-targets/fcc_rho0.10_D45.7_pad2.2/cpu/target_sq.npy",
+    "sha256": "90b7bda50cac0eb3f5d26f6e4f39bd6dd65caa05ba999970261c58ff73a5a409"
+  },
+  "r6.5/gp_log/states/ntrain_0100_final.pt": {
+    "source": "/Users/hanson/Desktop/10_R6_analysis/r6.5/Optimization_Results/gp_log/states/ntrain_0100_final.pt",
+    "sha256": "609e1bf9e8e46686a028664d73f888b886248912f93b70c12bcae7403f1628f4"
+  },
+  "r6.5/gp_log/gp_log.jsonl": {
+    "source": "/Users/hanson/Desktop/10_R6_analysis/r6.5/Optimization_Results/gp_log/gp_log.jsonl",
+    "sha256": "7d4fdde8090525a6b4217ec7709a7749e2c72dca0a366feff2e0a668feba51f7"
+  },
+  "r6.5/bo_trajectory.csv": {
+    "source": "/Users/hanson/Desktop/10_R6_analysis/r6.5/Optimization_Results/bo_trajectory.csv",
+    "sha256": "aa3aed1f12d47c83b5614c86afada79c8252c39473a39eece8a4f7c0b215d7c2"
+  },
+  "r6.5/inverse_config.json": {
+    "source": "/Users/hanson/Desktop/10_R6_analysis/r6.5/Optimization_Results/inverse_config.json",
+    "sha256": "dc674ffc760d0fca6d5f4527b7c0e1635e81dc7a639d3f57fd46991a15719b00"
+  },
+  "r6.5/target_sq.npy": {
+    "source": "campaigns/inverse/inverse-targets/fcc_rho0.05_D57.6_pad1.738/cpu/target_sq.npy",
+    "sha256": "12d6cb3255fe2e7fe2f31edccbb1e3f66052c8e471d40ca04c436dad9b52c39b"
+  }
+}

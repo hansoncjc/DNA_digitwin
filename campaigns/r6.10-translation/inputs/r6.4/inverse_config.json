@@ -1,0 +1,102 @@
+{
+  "description": "R6.4 FCC rho*=0.10, CPU target S(q); batch BO 10 x 10. S(q) on CPU both sides; CPU S(q) depends on the CPU model (another node: shift_rmse 1.7e-3 vs this target)",
+  "out_root": "/mmfs1/gscratch/zeelab/hanson/codes/DNA_lipid_silica/testing/inverse/r6/r6.4-fcc0.10/Optimization_Results",
+  "target": {
+    "path": "/mmfs1/gscratch/zeelab/hanson/codes/DNA_lipid_silica/DNA_digitwin_r6/campaigns/inverse/inverse-targets/fcc_rho0.10_D45.7_pad2.2/cpu/target_sq.npy",
+    "md5": "9131767b29aa1004d8ffb092891ea359",
+    "points": 508,
+    "q_range": [
+      0.0016512743581678165,
+      0.1304506742952575
+    ],
+    "dispersed": false,
+    "q1": 0.012891227079411456,
+    "s_peak": 8.032857291533013,
+    "s_max": 6.967904419993822,
+    "n_peaks_found": 4,
+    "metric_kwargs": {}
+  },
+  "rmax_check": {
+    "rmax": 14.484663111426874,
+    "L_half": 50.05660256547879,
+    "at": {
+      "U0": 8.0,
+      "r0": 3.5,
+      "n": 5.5,
+      "m_rel": 0.0
+    },
+    "grid_points": 2401
+  },
+  "locked": {
+    "target_md5": "9131767b29aa1004d8ffb092891ea359",
+    "N": 5017,
+    "density": 0.005,
+    "search": {
+      "U0": {
+        "bounds": [
+          0.5,
+          8.0
+        ],
+        "init": 3.0
+      },
+      "r0": {
+        "bounds": [
+          2.0,
+          3.5
+        ],
+        "init": 2.5
+      },
+      "n": {
+        "bounds": [
+          5.5,
+          15.0
+        ],
+        "init": 12.0
+      },
+      "m_rel": {
+        "bounds": [
+          0.0,
+          1.0
+        ],
+        "init": 0.2857142857142857
+      }
+    },
+    "potential": "mie_r0",
+    "metric": "shift_rmse",
+    "scattering": "saxsfft",
+    "compare_q_range": null,
+    "bo_seed": 0,
+    "batch_size": 10,
+    "gp_log_dir": "gp_log",
+    "steps": null
+  },
+  "starts": [
+    {
+      "time": "2026-10-12T01:43:35",
+      "config_path": "/mmfs1/gscratch/zeelab/hanson/codes/DNA_lipid_silica/DNA_digitwin_r6/campaigns/inverse/r6.4-fcc0.10/config.py",
+      "out_root": "/mmfs1/gscratch/zeelab/hanson/codes/DNA_lipid_silica/testing/inverse/r6/r6.4-fcc0.10/Optimization_Results",
+      "commit": "7eba805e3b0a0f3e77f1ac0737252f1593e91ca4",
+      "dirty": false,
+      "host": "n3462",
+      "slurm_job_id": "41773155",
+      "max_evals": 100,
+      "parallel": true,
+      "parallel_cfg": {
+        "partition": "gpu-a40",
+        "account": "zeelab",
+        "mem": "10G",
+        "time": "04:00:00",
+        "module_loads": [
+          "cuda/11.8"
+        ],
+        "venv_activate": "/gscratch/zeelab/hanson/codes/HOOMD-start/hoomd-venv/bin/activate",
+        "max_job_retries": 2,
+        "poll_interval": 30.0,
+        "max_wait": 21600,
+        "code_root": "/mmfs1/gscratch/zeelab/hanson/codes/DNA_lipid_silica/DNA_digitwin_r6",
+        "mc_dfm_root": "/gscratch/zeelab/hanson/codes/DNA_lipid_silica/MC-DFM"
+      },
+      "device": null
+    }
+  ]
+}
