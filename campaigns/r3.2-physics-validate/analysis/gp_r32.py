@@ -24,9 +24,10 @@ botorch 0.10 on the cluster: ScaleKernel(Matern 5/2, ARD), constant mean,
 Gaussian noise, Standardize on train_y = -loss). bo.load_gp_model cannot be
 used locally: botorch >= 0.12 builds a different default kernel, so the saved
 state_dict does not load. The rebuild is checked against the posterior mean
-and sd that run_bo logged for every fitted GP (best point and candidate).
-The run was cut by the walltime, so there is no stage="final" GP; the last
-acquisition GP (n_train = 80) is fitted on all 80 evaluations.
+and sd that run_bo logged for every fitted GP (best point and candidates;
+rows of GP log format 1 and 2). The analysed GP is the last row of the log:
+stage="final" when the run ended normally (R3.2: n_train = 100), otherwise the
+last acquisition GP.
 """
 import json
 import sys
@@ -100,8 +101,12 @@ def check_rebuild(run, rows):
     worst = 0.0
     for r in rows:
         gp = GP(run, r)
-        m, s = gp(np.array([r["best_unit"], r["candidate_unit"]]))
-        ref = [r["best_post_mean_loss"], r["candidate_post_mean_loss"], r["best_post_std_loss"], r["candidate_post_std_loss"]]
+        if r["gp_log_version"] == 1:
+            cu, cm, cs = [r["candidate_unit"]], [r["candidate_post_mean_loss"]], [r["candidate_post_std_loss"]]
+        else:
+            cu, cm, cs = r["candidates_unit"], r["candidates_post_mean_loss"], r["candidates_post_std_loss"]
+        m, s = gp(np.array([r["best_unit"], *cu]))
+        ref = [r["best_post_mean_loss"], *cm, r["best_post_std_loss"], *cs]
         worst = max(worst, np.abs(np.r_[m, s] - np.array(ref)).max())
     return worst
 
@@ -125,15 +130,19 @@ def main(run, out):
           f"rebuild vs logged posterior: max abs difference {worst:.2e}")
     last = rows[-1]
     gp = GP(run, last)
-    traj = [l.split(",") for l in (run / "bo_trajectory.csv").read_text().splitlines()
-            if l and not l.startswith(("#", "iteration"))]
+    lines = (run / "bo_trajectory.csv").read_text().splitlines()
+    complete = {int(l.split(",")[0].split()[-1]) for l in lines if l.startswith("# Iteration") and ",total_loss," in l}
     ev = {}
-    for t in traj:
-        ev.setdefault(int(t[0]), [float(x) for x in t[3:8]])
+    for l in lines:
+        if l and not l.startswith(("#", "iteration")):
+            t = l.split(",")
+            if int(t[0]) in complete:
+                ev.setdefault(int(t[0]), [float(x) for x in t[3:8]])
+    print(f"GP analysed: stage {last['stage']}, n_train {last['n_train']}, {last['state_file']}; "
+          f"{len(ev)} complete evaluations in the trajectory")
     ub = np.array(last["best_unit"])
     pb = to_phys(ub)
-    best_eval = int(last["best_index"])
-    assert np.allclose(pb, ev[best_eval])
+    best_eval = next(e for e, v in ev.items() if np.allclose(v, pb))   # best_index counts training rows, not eval ids
 
     # posterior-mean minimum
     starts = [ub] + [gp.X[i] for i in np.argsort(gp.X @ np.zeros(5))[:0]] + list(gp.X[np.argsort(gp(gp.X)[0])[:10]])
@@ -209,13 +218,13 @@ def main(run, out):
     ax.set_title("(a) lengthscales; short = the loss changes fast along that coefficient", loc="left", fontsize=9.5)
     ax.set_ylim(0.08, 3.0)
     ax.legend(frameon=False, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=2,
-              title="at n = 80", title_fontsize=8)
+              title=f"at n = {n[-1]}", title_fontsize=8)
     ax = axes[1]
     ax.plot(n, nsd, color=INK2)
     ax.set_yscale("log")
     ax.set_xlabel("training points of the GP")
     ax.set_ylabel("GP noise sd (loss units)")
-    ax.set_title(f"(b) fitted noise level: {nsd[-1]:.3f} at n = 80", loc="left", fontsize=9.5)
+    ax.set_title(f"(b) fitted noise level: {nsd[-1]:.3f} at n = {n[-1]}", loc="left", fontsize=9.5)
     fig.tight_layout()
     fig.savefig(out / "r32_gp_lengthscales.png", bbox_inches="tight")
     plt.close(fig)

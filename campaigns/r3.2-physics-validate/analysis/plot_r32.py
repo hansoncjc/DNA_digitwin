@@ -88,8 +88,11 @@ def fig_loss_history(ev, out, floor, threshold):
     ax.set_xlim(-1, ev.index.max() + 1)
     ax.set_xlabel("evaluation")
     ax.set_ylabel("total shift_rmse loss")
-    ax.set_title("(a) loss history (eval 0 = initial point; 80 of 100 evaluations before the walltime)",
-                 loc="left", fontsize=9.5)
+    missing = [e for e in range(int(ev.index.min()), int(ev.index.max()) + 1) if e not in ev.index]
+    for e in missing:   # evaluation ids without a complete block (abandoned at a resume, or failed)
+        ax.axvline(e, color=MUTED, lw=0.8, ls=":")
+    ax.set_title(f"(a) loss history (eval 0 = initial point; {len(ev)} complete evaluations; "
+                 f"dotted: ids without a complete block {missing})", loc="left", fontsize=9.5)
     ax.legend(frameon=False, fontsize=8, loc="upper right", ncol=2)
     for i, c in enumerate(COEFFS):
         a = fig.add_subplot(gs[1, i])

@@ -1,12 +1,15 @@
 """
 Tables for the R3.2 note (2026-10-09 BO_new_mapping_all_coeff), Results 1-4.
 
-Usage: python summarize_r32.py RUN_DIR GT_DIR
+Usage: python summarize_r32.py RUN_DIR GT_DIR [DIAG_DIR]
 
 RUN_DIR is the downloaded Optimization_Results copy (bo_trajectory.csv,
 loss_components.txt, the master log r32_master_*.out, gp_log/, and whichever
 eval_XXX folders were downloaded); GT_DIR is the R3.1 Sweep8_R3.1_GT folder.
-Both are read only. Writes next to this script:
+DIAG_DIR (optional) holds eval_XXX/<id>/shift_rmse_diagnostics.json of every
+evaluation. All read only. Only evaluations whose trajectory block is complete
+("total_loss") are counted; ABANDONED and FAILED blocks are listed. Every
+r32_master_*.out in RUN_DIR is read. Writes next to this script:
   r32_evals.csv       one row per evaluation: coefficients, a_n, total loss,
                       best so far, launcher time, GPU-job failures/retries,
                       requeues (pending count going up), d2 state, repeat set
@@ -16,6 +19,8 @@ Both are read only. Writes next to this script:
                       heights from the downloaded evaluations
   r32_gpu.csv         GPU model per host, from the job logs of the downloaded
                       evaluations
+  r32_smax.csv        (with DIAG_DIR) per evaluation and condition: simulated
+                      smoothed s_max - 1, loss, block status; row "target"
 """
 import glob
 import json
@@ -38,16 +43,24 @@ REPEAT_RADIUS = 0.05   # unit-cube distance to the last evaluation that defines 
 
 
 def read_trajectory(path):
+    """Rows of the complete blocks, and {eval: status} of every block
+    ("total_loss", or the status word of a FAILED / ABANDONED block)."""
     lines = Path(path).read_text().splitlines()
     header = next(l for l in lines if l.startswith("iteration,"))
     cols = header.split(",")
+    status = {}
+    for l in lines:
+        m = re.match(r"# Iteration (\d+),([A-Za-z_]+)(?:,([A-Z]+))?", l)
+        if m:
+            status[int(m.group(1))] = "total_loss" if m.group(2) == "total_loss" else (m.group(3) or m.group(2))
     rows = [l.split(",") for l in lines if l and not l.startswith("#") and not l.startswith("iteration,")]
     df = pd.DataFrame(rows, columns=cols)
     for c in cols:
         if c != "dataset_id":
             df[c] = pd.to_numeric(df[c], errors="coerce")
     df["iteration"] = df["iteration"].astype(int)
-    return df
+    ok = [e for e, st in status.items() if st == "total_loss"]
+    return df[df.iteration.isin(ok)].copy(), status
 
 
 def read_master(path):
@@ -95,10 +108,11 @@ def gpu_by_host(run):
     return {h: "/".join(sorted(v)) for h, v in out.items()}
 
 
-def main(run, gt_dir):
+def main(run, gt_dir, diag_dir=None):
     run, gt_dir, out = Path(run), Path(gt_dir), Path(__file__).resolve().parent
     out.mkdir(parents=True, exist_ok=True)
-    traj = read_trajectory(run / "bo_trajectory.csv")
+    traj, status = read_trajectory(run / "bo_trajectory.csv")
+    print("blocks not counted:", {e: st for e, st in status.items() if st != "total_loss"})
     lc = pd.read_csv(run / "loss_components.txt")
     tot = traj.groupby("iteration").loss.sum()
     assert np.allclose(tot.values, lc.groupby("iteration").loss.sum().reindex(tot.index).values)
@@ -118,7 +132,10 @@ def main(run, gt_dir):
         (sh[c] == 0.0).astype(int) for c in sh.columns if (sh[c] != 0.0).any())
     master_files = sorted(run.glob("r32_master_*.out"))
     if master_files:
-        ms = read_master(master_files[0])
+        ms = {}
+        for f in master_files:
+            ms.update(read_master(f))
+        print("master logs:", [f.name for f in master_files])
         for e, d in ms.items():
             if e not in ev.index:     # cut off by the walltime: no trajectory block
                 print(f"eval {e}: in the master log, not in the trajectory; "
@@ -172,6 +189,21 @@ def main(run, gt_dir):
     cond = pd.DataFrame(rows)
     cond.to_csv(out / "r32_conditions.csv", index=False, float_format="%.6g")
 
+    # ------------------------------------------------------------ s_max of every evaluation
+    if diag_dir is not None:
+        recs = []
+        for p in sorted(Path(diag_dir).glob("eval_*")):
+            e = int(p.name[5:])
+            for f in sorted(p.glob("d*/shift_rmse_diagnostics.json")):
+                d = json.loads(f.read_text())
+                recs.append({"eval": e, "id": f.parent.name, "status": status.get(e, "no block"),
+                             "smax1_sim": d["peak_sim"]["s_max"] - 1, "smax1_tgt": d["peak_tgt"]["s_max"] - 1,
+                             "loss": d["loss"]})
+        sm = pd.DataFrame(recs)
+        ok = sm[sm.status == "total_loss"]
+        assert np.allclose(ok.loss.values, [piv.loc[e, c] for e, c in zip(ok["eval"], ok["id"])])
+        sm.to_csv(out / "r32_smax.csv", index=False, float_format="%.6g")
+
     # ------------------------------------------------------------ GPU per host
     gh = gpu_by_host(run)
     gpu = pd.DataFrame(sorted(gh.items()), columns=["host", "gpu"])
@@ -216,4 +248,4 @@ def main(run, gt_dir):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:3])
+    main(*sys.argv[1:4])
