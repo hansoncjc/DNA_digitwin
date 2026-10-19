@@ -1,7 +1,9 @@
 {
   "r3.2_eval_056.csv": {
     "source": "/Users/hanson/Desktop/11_R32_analysis/bo_trajectory.csv (iteration 56 only)",
-    "sha256": "5759e4f2cb81f61264bf25900513248551b2c36de76bef03642024f21d8018f2"
+    "sha256": "9a60dc1a700e846e916acd9bb9203ac4b484c69828cd2d36c5ea51069d60fe8e",
+    "source_sha256": "5759e4f2cb81f61264bf25900513248551b2c36de76bef03642024f21d8018f2",
+    "normalization": "CRLF to LF only; CSV fields unchanged"
   },
   "r6.4/gp_log/states/ntrain_0100_final.pt": {
     "source": "/Users/hanson/Desktop/10_R6_analysis/r6.4/Optimization_Results/gp_log/states/ntrain_0100_final.pt",
@@ -13,7 +15,9 @@
   },
   "r6.4/bo_trajectory.csv": {
     "source": "/Users/hanson/Desktop/10_R6_analysis/r6.4/Optimization_Results/bo_trajectory.csv",
-    "sha256": "d7b673bf9c256cab381bf32d9387857768390e9e26157763ee9bb9156a7e04d8"
+    "sha256": "093a3ba04f36ab9c00887aa27e2ad10b3572009d80bf1e2ca1e8c2f3057d2244",
+    "source_sha256": "d7b673bf9c256cab381bf32d9387857768390e9e26157763ee9bb9156a7e04d8",
+    "normalization": "CRLF to LF only; CSV fields unchanged"
   },
   "r6.4/inverse_config.json": {
     "source": "/Users/hanson/Desktop/10_R6_analysis/r6.4/Optimization_Results/inverse_config.json",
@@ -33,7 +37,9 @@
   },
   "r6.5/bo_trajectory.csv": {
     "source": "/Users/hanson/Desktop/10_R6_analysis/r6.5/Optimization_Results/bo_trajectory.csv",
-    "sha256": "aa3aed1f12d47c83b5614c86afada79c8252c39473a39eece8a4f7c0b215d7c2"
+    "sha256": "cd2a7482bd81ba3c0109723850ce043dc30c7944a650e0551ac8ed3015c25132",
+    "source_sha256": "aa3aed1f12d47c83b5614c86afada79c8252c39473a39eece8a4f7c0b215d7c2",
+    "normalization": "CRLF to LF only; CSV fields unchanged"
   },
   "r6.5/inverse_config.json": {
     "source": "/Users/hanson/Desktop/10_R6_analysis/r6.5/Optimization_Results/inverse_config.json",

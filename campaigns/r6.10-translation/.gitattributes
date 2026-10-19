@@ -1,3 +1,3 @@
-# Preserve input bytes: provenance.json records SHA-256 of source files.
-inputs/**/*.csv -text
-inputs/*.csv -text
+# Canonical LF input text; provenance hashes describe these committed bytes.
+inputs/**/*.csv text eol=lf
+inputs/*.csv text eol=lf

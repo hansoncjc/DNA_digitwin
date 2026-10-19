@@ -35,7 +35,9 @@ required. A candidate is a surrogate prediction, not a demonstrated recovery.
 `config.py`, `translate.py`, `check_translation.py` and the two sbatch files
 are the only campaign programs. Tests: `tests/test_r610_translation.py`.
 
-`inputs/provenance.json` records original sources and SHA-256 hashes.
+`inputs/provenance.json` records original sources and SHA-256 hashes. CSV
+inputs use canonical LF line endings; their original source-byte hashes are
+retained as `source_sha256`. Runtime checks use the canonical file hashes.
 All files below must be committed with the campaign (no LFS pointer or
 external Desktop input at runtime):
 
