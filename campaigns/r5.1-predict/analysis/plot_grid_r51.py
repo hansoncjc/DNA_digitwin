@@ -15,7 +15,10 @@ drawn: those cells show the predictions p14, p15 (author, 2026-10-17).
 Each panel: log-log, alpha 0.8 where two curves overlap and 1 for a single
 curve, legend lower right, snapshots upper right
 (gsd-tools ``render``, front view, defaults except the colour, which matches
-the line). Big arrows: increasing condition along each axis; same width and
+the line). A red dashed vertical line marks q1 of the model curve (the
+prediction, or eval 56 in a training cell; metrics.detect_first_peak with the
+shift_rmse defaults; legend entry "First Peak"); none where that curve is
+dispersed. Big arrows: increasing condition along each axis; same width and
 margins as the R3.2 figure, length set by the grid.
 
 PRED_RUN holds predictions/<id>/ (R5.1 download); GT_DIR is the R3.1 folder
@@ -39,7 +42,9 @@ from matplotlib.patches import FancyArrowPatch
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
+sys.path.insert(0, str(HERE.parents[2]))
 import predict_config as config  # noqa: E402
+from metrics import _sanitize_curve, detect_first_peak  # noqa: E402
 from predict_config import GT_CONDITIONS  # noqa: E402
 
 EVAL = 56
@@ -111,6 +116,11 @@ def panel(ax, c, curves):
     alpha = 0.8 if len(curves) > 1 else 1.0     # translucent only where curves overlap
     for s, color, label, _, _ in curves:
         ax.loglog(s[:, 0], s[:, 1], color=color, alpha=alpha, lw=1.6, label=label)
+    # q1 of the model curve (last in the list: prediction, or eval 56 next to the ground truth)
+    peak = detect_first_peak(_sanitize_curve(curves[-1][0]))
+    if not peak.dispersed:
+        ax.axvline(peak.q1, color="red", ls="--", lw=1.0, label="First Peak")
+    print(f"{c['id']}: {'dispersed' if peak.dispersed else f'q1 = {peak.q1:.5f}'}")
     ax.set_xlim(1.5e-3, 0.135)
     ax.set_ylim(0.07, 40)
     ax.grid(True, which="major", alpha=0.3, lw=0.5)
