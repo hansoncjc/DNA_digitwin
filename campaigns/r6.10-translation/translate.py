@@ -142,8 +142,12 @@ class SavedGP:
                            'saved_gpytorch': bundle.get('gpytorch_version')}
 
     def predict(self, points, c):
+        return self.predict_unit(unit_points(points, c, self.names))
+
+    def predict_unit(self, unit):
+        """Latent mean and SD (loss units) at R6 unit-cube points, columns in self.names."""
         # Marginal variances only: no huge grid-by-grid covariance allocation.
-        unit = unit_points(points, c, self.names)
+        unit = np.atleast_2d(unit)
         means, stds = [], []
         with self.torch.no_grad():
             for block in np.array_split(unit, max(1, (len(unit) + 255) // 256)):
@@ -258,23 +262,31 @@ def plot_all(results, c, out):
     save(fig, 'mapping_vs_r6')
 
 
+def validated_inputs():
+    """Hash-check bundled inputs, read eval-56 coefficients, load and validate BOTH GPs."""
+    provenance = json.loads((cfg.INPUTS / 'provenance.json').read_text())
+    for name, info in provenance.items():
+        if hashlib.sha256((cfg.INPUTS / name).read_bytes()).hexdigest() != info['sha256']:
+            raise ValueError(f'Input changed: {name}')
+    return provenance, coefficients(), [(run, SavedGP(run)) for run in cfg.RUNS]
+
+
+def versions():
+    import importlib.metadata
+    return {p: importlib.metadata.version(p) for p in ('torch', 'botorch', 'gpytorch', 'numpy', 'scipy')}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--validate-only', action='store_true')
     ap.add_argument('--out', type=Path, default=cfg.OUT_ROOT / 'translation')
     a = ap.parse_args()
-    provenance = json.loads((cfg.INPUTS / 'provenance.json').read_text())
-    for name, info in provenance.items():
-        if hashlib.sha256((cfg.INPUTS / name).read_bytes()).hexdigest() != info['sha256']:
-            raise ValueError(f'Input changed: {name}')
-    c = coefficients()
-    gps = [(run, SavedGP(run)) for run in cfg.RUNS]  # Validate BOTH before any optimization.
+    provenance, c, gps = validated_inputs()  # Validate BOTH before any optimization.
     report = {'coefficients': c, 'validation': [gp.validation for _, gp in gps],
               'input_provenance': provenance, 'feasible_r0': feasible_r0(c),
               'objective': 'latent posterior mean loss', 'grid_size': cfg.GRID_SIZE,
               'multistart': cfg.MULTISTART, 'optimizations': {}, 'families': {}}
-    import importlib.metadata
-    report['versions'] = {p: importlib.metadata.version(p) for p in ('torch','botorch','gpytorch','numpy','scipy')}
+    report['versions'] = versions()
     if a.validate_only:
         print(json.dumps(report, indent=2))
         return

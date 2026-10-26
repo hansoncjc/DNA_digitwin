@@ -173,6 +173,57 @@ No Desktop data are moved/deleted by this campaign. Later vault note name and
 image-copy destination require the author's confirmation. Paper TIMELINE,
 EXIST_PROBLEMS and vault discrepancies are not edited by these scripts.
 
+## x-space rerun (advisor meeting 2026-10-21)
+
+`translate_x.py` minimizes the same saved GP means directly over the
+conditions, mu(f(x)) with x = (L_bridge, C_anchor, C_NaCl), as in the
+Methods objective. It only maps forward and never inverts the mapping, so
+another mapping replaces `trained_mapping` alone. Inputs, hashes and GP
+validation are those of `translate.py`; the first translation and its
+outputs are left unchanged.
+
+- Feasible set: x >= 0 and f(x) inside the R6 box, the same set as the first
+  translation, so the optimum is expected to agree; the rerun checks it.
+  `X_BOX` (L 0-250 bp, anchor 0-800, salt 0-100 mM) only makes the grid
+  finite; the run stops if the box preimage reaches its upper L or anchor
+  face. Salt 0-100 mM is the stated scope of the salt direction.
+- Steps: 161x161x21 grid; global 3D SLSQP from separated starts with the
+  R6 box as inequality constraints; the same over (L_bridge, C_anchor) at
+  every grid salt (5 mM steps), each checked by a 41x41 finer grid.
+- Salt is degenerate when every slice minimum is within `FLAT_TOL` of the
+  others and the 3D search finds nothing lower. The representative point is
+  the optimum within `FLAT_TOL` of the overall minimum whose salt is closest
+  to 20 mM (decision-log convention), so a degenerate run reports 20 mM.
+- `same_as_first`: |mean difference| <= `SAME_MU_TOL` and distance to the
+  first 20 mM condition, normalized by `X_BOX` widths, <= `SAME_X_TOL`.
+  If true for both runs, the four existing checks stand; otherwise freeze
+  `check_candidates.proposed.csv` as in "Review and freeze candidates",
+  keeping the old file in Git history, and rerun the four checks.
+- Translation cost: mean at the representative point minus the mean at the
+  observed BO best, both from the same GP (not observed losses).
+
+```bash
+python3 -m pytest tests/test_r610_translation.py tests/test_r610_translation_x.py
+python3 "$R610_REPO/campaigns/r6.10-translation/translate_x.py" --validate-only
+sbatch --export=ALL,R610_REPO="$R610_REPO" "$R610_REPO/campaigns/r6.10-translation/translate_x.sbatch"
+```
+
+Outputs under `.../r6.10-translate/translation_x/` (refuses to overwrite):
+
+- `translation_x_results.csv`: one row per run: representative x and f(x),
+  mean/SD, 3D minimum, `slice_min_range`, `salt_degenerate`, the first
+  condition and its mean, `same_as_first`, mean/SD at the BO best,
+  `translation_cost`, range flags, largest deviation of the numerical
+  equivalence curve from the first translation's analytical family.
+- `salt_profile_<run>.csv`: slice optimum at every grid salt.
+- `check_candidates.proposed.csv`: four checks at the representative point.
+- `figure_data/<run>_grid3d.npz` (full grid), `<run>_slice_salt20mM.npz`
+  ((L_bridge, C_anchor) at 20 mM), `<run>_slice_bridge.npz` ((C_anchor,
+  C_NaCl) at the representative bridge length): `axis_*`, `mean_loss`,
+  `std_loss`, `inside` (f(x) in the R6 box; NaN outside), `x_representative`,
+  `x_first`. No figures are drawn here.
+- `translation_x_report.json`: validation, settings, optimizer records.
+
 ## Status and handoff
 
 Implementation prepared; tests, GP validation, translation, visual review and
