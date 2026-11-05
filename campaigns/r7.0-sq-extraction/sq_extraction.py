@@ -101,6 +101,76 @@ def sphere_pd(q, radius, pd, nsigma=3.0, npts=35):
     return (f ** 2 * wv2).sum(axis=1) / wv2.sum()
 
 
+def apply_correction(q, correction):
+    """Multiplicative correction r(q) from ``empirical_correction`` (1 where absent)."""
+    if correction is None:
+        return np.ones_like(np.asarray(q, dtype=float))
+    grid, r = correction
+    return np.interp(q, grid, r, left=1.0, right=1.0)
+
+
+def form_factor(q, radius, pd, correction=None):
+    """``sphere_pd`` times an optional empirical correction (see ``empirical_correction``)."""
+    return sphere_pd(q, radius, pd) * apply_correction(q, correction)
+
+
+def empirical_correction(curves, radius, pd, scales, backgrounds, q_range=(0.015, 0.075),
+                         taper=0.005, smooth=15, dq=3.4e-4):
+    """Measured correction r(q) = P_true / sphere_pd from dispersed samples.
+
+    Each curve gives (I - B_k) / (c_k sphere_pd); these are averaged on a
+    common grid of step ``dq`` with weights 1/sigma^2, smoothed
+    (Savitzky-Golay, ``smooth`` points, order 2) and set to 1 outside
+    ``q_range`` with a linear ``taper`` (A^-1) inside each end. The curves must
+    have S = 1 in ``q_range``; use only samples without structure.
+
+    Returns a dict with the grid, the raw mean, its error and the smoothed,
+    tapered correction ``r``.
+    """
+    q_lo = min(float(q.min()) for q, _, _ in curves)
+    q_hi = max(float(q.max()) for q, _, _ in curves)
+    grid = np.arange(q_lo, q_hi, dq)
+    num = np.zeros_like(grid)
+    den = np.zeros_like(grid)
+    for (q, i, s), c, b in zip(curves, scales, backgrounds):
+        if s is None:
+            raise ValueError("empirical_correction needs sigma for every curve")
+        p = sphere_pd(q, radius, pd)
+        ok = (grid >= q.min()) & (grid <= q.max())
+        y = np.interp(grid[ok], q, (i - b) / (c * p))
+        sy = np.interp(grid[ok], q, s / (c * p))
+        num[ok] += y / sy ** 2
+        den[ok] += 1.0 / sy ** 2
+    with np.errstate(invalid="ignore", divide="ignore"):
+        raw = num / den
+        err = 1.0 / np.sqrt(den)
+    sm = savgol_filter(np.nan_to_num(raw, nan=1.0), smooth, 2)
+    lo, hi = q_range
+    w = np.clip(np.minimum((grid - lo) / taper, (hi - grid) / taper), 0.0, 1.0)
+    r = 1.0 + w * (sm - 1.0)
+    return {"q": grid, "r": r, "raw": raw, "err": err, "q_range": [float(lo), float(hi)],
+            "taper": float(taper), "smooth": int(smooth)}
+
+
+def mean_s_artifact(sq_curves, band=(0.026, 0.045), step=2.5e-4):
+    """RMS of (mean S - 1) over ``band`` on a common absolute-q grid.
+
+    Structure peaks sit at different q in different samples and partly
+    average out; a form-factor error sits at the same q in every sample and
+    does not. Returns (rms, grid, mean S).
+    """
+    grid = np.arange(band[0], band[1], step)
+    rows = []
+    for sq in sq_curves:
+        q, s = sq[:, 0], sq[:, 1]
+        if q.min() <= band[0] and q.max() >= band[1]:
+            rows.append(np.interp(grid, q, savgol_filter(s, 7, 2)))
+    if not rows:
+        return np.nan, grid, np.full_like(grid, np.nan)
+    mean = np.mean(rows, axis=0)
+    return float(np.sqrt(np.mean((mean - 1.0) ** 2))), grid, mean
+
+
 def first_ff_minimum(radius, pd=0.0):
     """q of the first minimum of ``sphere_pd`` (qR = 4.4934 when pd = 0)."""
     q = np.linspace(3.5 / radius, 5.5 / radius, 2001)
@@ -241,8 +311,11 @@ def seam_ratio(q, i, sigma, q_merge, half_width=0.003):
 
 
 def fit_formfactor_joint(curves, window=DEFAULT_FIT_WINDOW, radius0=134.0, pd0=0.1,
-                         rel_floor=DEFAULT_REL_FLOOR):
+                         rel_floor=DEFAULT_REL_FLOOR, fixed=False, correction=None):
     """Fit I_k = c_k * P(q; R, pd) + B_k (B_k >= 0) in ``window``, R and pd shared.
+
+    With ``fixed=True``, R = ``radius0`` and pd = ``pd0`` are held and only the
+    c_k and B_k are fitted. ``correction`` multiplies P (``form_factor``).
 
     ``curves`` is a list of (q, I, sigma). Residuals are divided by
     sqrt(sigma^2 + (rel_floor * I)^2); the floor stands for the structure left
@@ -259,6 +332,8 @@ def fit_formfactor_joint(curves, window=DEFAULT_FIT_WINDOW, radius0=134.0, pd0=0
     n = len(curves)
 
     def unpack(p):
+        if fixed:
+            return radius0, pd0, np.exp(p[:n]), p[n:2 * n]
         return p[0], p[1], np.exp(p[2:2 + n]), p[2 + n:2 + 2 * n]
 
     def resid(p):
@@ -266,15 +341,15 @@ def fit_formfactor_joint(curves, window=DEFAULT_FIT_WINDOW, radius0=134.0, pd0=0
         out = []
         for k, (q, i, _) in enumerate(curves):
             m = masks[k]
-            out.append((i[m] - (c[k] * sphere_pd(q[m], radius, pd) + b[k])) / sig[k])
+            out.append((i[m] - (c[k] * form_factor(q[m], radius, pd, correction) + b[k])) / sig[k])
         return np.concatenate(out)
 
-    p0 = [radius0, pd0]
-    p0 += [float(np.log(np.median(i[m] / sphere_pd(q[m], radius0, pd0))))
+    p0 = [] if fixed else [radius0, pd0]
+    p0 += [float(np.log(np.median(i[m] / form_factor(q[m], radius0, pd0, correction))))
            for (q, i, _), m in zip(curves, masks)]
     p0 += [0.0] * n
-    lb = [0.6 * radius0, 0.01] + [-np.inf] * n + [0.0] * n
-    ub = [1.4 * radius0, 0.4] + [np.inf] * n + [np.inf] * n
+    lb = ([] if fixed else [0.6 * radius0, 0.01]) + [-np.inf] * n + [0.0] * n
+    ub = ([] if fixed else [1.4 * radius0, 0.4]) + [np.inf] * n + [np.inf] * n
     fit = least_squares(resid, p0, bounds=(lb, ub))
     radius, pd, c, b = unpack(fit.x)
     dof = max(fit.fun.size - fit.x.size, 1)
@@ -286,12 +361,13 @@ def fit_formfactor_joint(curves, window=DEFAULT_FIT_WINDOW, radius0=134.0, pd0=0
         "background": [float(v) for v in b],
         "chi2_red": float(np.sum(fit.fun ** 2) / dof),
         "rel_floor": float(rel_floor),
+        "fixed_formfactor": bool(fixed),
     }
 
 
-def extract_sq(q, i, sigma, radius, pd, scale, background):
+def extract_sq(q, i, sigma, radius, pd, scale, background, correction=None):
     """(N, 3) array [q, S, sigma_S] with S = (I - B) / (c P)."""
-    denom = scale * sphere_pd(q, radius, pd)
+    denom = scale * form_factor(q, radius, pd, correction)
     s = (i - background) / denom
     ds = sigma / denom if sigma is not None else np.full_like(q, np.nan)
     return np.column_stack([q, s, ds])
@@ -393,6 +469,21 @@ def old_extraction(q, i, ffpath, trim_tail):
 # ------------------------------------------------------------------ CLI
 
 
+def _plot_correction(out, ec):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    ok = np.isfinite(ec["raw"])
+    ax.errorbar(ec["q"][ok], ec["raw"][ok], ec["err"][ok], fmt=".", ms=2, color="0.6", lw=0.5,
+                label="weighted mean of (I - B)/(c P_sphere)")
+    ax.plot(ec["q"], ec["r"], "r-", label=f"correction used ({ec['q_range'][0]}-{ec['q_range'][1]})")
+    ax.axhline(1, color="k", ls=":")
+    ax.set_xscale("log"); ax.set_ylim(0.5, 1.8); ax.set_xlabel("q (A$^{-1}$)"); ax.legend(fontsize=8)
+    ax.set_title("empirical form-factor correction r(q) = P / P_sphere")
+    fig.tight_layout(); fig.savefig(out / "ff_correction.png", dpi=110); plt.close(fig)
+
+
 def _plots(out, names, curves, merges, ff, joint, new_sq, old_sq, peak_window):
     import matplotlib
     matplotlib.use("Agg")
@@ -465,6 +556,12 @@ def main(argv=None):
                     help="q window of the first structure peak")
     ap.add_argument("--tail-window", nargs=2, type=float, default=(0.06, 0.075))
     ap.add_argument("--no-scan", action="store_true", help="skip the fit-window and per-file scans")
+    ap.add_argument("--fix-ff", nargs=2, type=float, metavar=("R_A", "PD"),
+                    help="hold R and pd (e.g. from a fit to dispersed samples); fit only scale and background")
+    ap.add_argument("--ff-correction", help="ff_correction.npy written by --write-correction; multiplies P")
+    ap.add_argument("--write-correction", action="store_true",
+                    help="the files are dispersed samples: write ff_correction.npy from them")
+    ap.add_argument("--correction-range", nargs=2, type=float, default=(0.015, 0.075))
     args = ap.parse_args(argv)
 
     out = Path(args.out)
@@ -475,10 +572,34 @@ def main(argv=None):
     merges = [find_merge(q) for q, _, _ in curves]
 
     ff = audit_formfactor(args.ff)
-    joint = fit_formfactor_joint(curves, tuple(args.fit_window), ff["radius_A"], ff["pd"], args.rel_floor)
+    correction = None
+    if args.ff_correction and not args.fix_ff:
+        raise SystemExit("--ff-correction belongs to one R and pd: pass them with --fix-ff")
+    if args.ff_correction:
+        arr = np.load(args.ff_correction)
+        correction = (arr[:, 0], arr[:, 1])
+    if args.fix_ff:
+        joint = fit_formfactor_joint(curves, tuple(args.fit_window), args.fix_ff[0], args.fix_ff[1],
+                                     args.rel_floor, fixed=True, correction=correction)
+    else:
+        joint = fit_formfactor_joint(curves, tuple(args.fit_window), ff["radius_A"], ff["pd"], args.rel_floor)
+
+    corr_info = None
+    if args.write_correction:
+        if correction is not None:
+            raise SystemExit("--write-correction and --ff-correction are exclusive")
+        ec = empirical_correction(curves, joint["radius_A"], joint["pd"], joint["scale"],
+                                  joint["background"], q_range=tuple(args.correction_range))
+        np.save(out / "ff_correction.npy", np.column_stack([ec["q"], ec["r"], ec["raw"], ec["err"]]))
+        corr_info = {"file": "ff_correction.npy", "columns": ["q", "r", "raw_mean", "raw_err"],
+                     "radius_A": joint["radius_A"], "pd": joint["pd"],
+                     **{k: ec[k] for k in ("q_range", "taper", "smooth")}}
+        _plot_correction(out, ec)
+    elif correction is not None:
+        corr_info = {"file": str(args.ff_correction)}
 
     scan = {}
-    if not args.no_scan:
+    if not args.no_scan and not args.fix_ff:
         scan["windows"] = [
             {k: v for k, v in fit_formfactor_joint(curves, w, ff["radius_A"], ff["pd"], args.rel_floor).items()
              if k in ("window", "radius_A", "pd", "chi2_red")}
@@ -502,7 +623,8 @@ def main(argv=None):
     cluster_window = (args.peak_window[1], q_ffmin)
     rows, new_sq, old_sq = [], [], []
     for k, (name, (q, i, s), mg) in enumerate(zip(names, curves, merges)):
-        sq = extract_sq(q, i, s, joint["radius_A"], joint["pd"], joint["scale"][k], joint["background"][k])
+        sq = extract_sq(q, i, s, joint["radius_A"], joint["pd"], joint["scale"][k], joint["background"][k],
+                        correction)
         np.save(out / f"{name}_sq.npy", sq)
         new_sq.append(sq)
         try:
@@ -524,9 +646,9 @@ def main(argv=None):
         row["background_share_at_0.075"] = float(b / np.interp(0.075, q, i))
         ext = iq4_extrema(q, i, r_ref)
         ref = model_extrema["formfactor_file_no_background"]
-        for name in ext:
-            row[f"iq4_{name}"] = ext[name]
-            row[f"iq4_{name}_vs_file"] = ext[name] / ref[name]
+        for ek in ext:
+            row[f"iq4_{ek}"] = ext[ek]
+            row[f"iq4_{ek}_vs_file"] = ext[ek] / ref[ek]
         for tag, curve in (("old", old), ("new", sq)):
             if curve is None:
                 continue
@@ -552,6 +674,11 @@ def main(argv=None):
         "joint_fit": joint,
         "first_ff_min_q_refit": q_ffmin,
         "iq4_extrema_models": model_extrema,
+        "ff_correction": corr_info,
+        "mean_s_artifact_rms_0.026_0.045": {
+            "new": mean_s_artifact(new_sq)[0],
+            "current": mean_s_artifact([o for o in old_sq if o is not None])[0],
+        },
         "cluster_window": list(cluster_window),
         "scan": scan,
         "files": [str(f) for f in files],

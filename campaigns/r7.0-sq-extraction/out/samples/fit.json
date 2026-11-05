@@ -1,0 +1,141 @@
+{
+  "formfactor_file": {
+    "file": "formfactors/sasmodels_sphere_fit.txt",
+    "n_points": 246,
+    "q_min": 0.003311000000000001,
+    "q_max": 0.09044799999999999,
+    "radius_A": 134.20661157920517,
+    "pd": 0.10000000149011917,
+    "scale": 16.809491660707533,
+    "background": 0.0010000000000004547,
+    "rms_ln_resid": 9.700443635083717e-14,
+    "background_share_at_qmax": 0.23536923221912545,
+    "background_share_at_0.075": 0.13751901388059226,
+    "first_ff_min_q": 0.03329195147262253
+  },
+  "joint_fit": {
+    "window": [
+      0.033,
+      0.12
+    ],
+    "radius_A": 123.49081950730982,
+    "pd": 0.1268353914120481,
+    "scale": [
+      14.139329631208524,
+      99.83296589278623,
+      72.70484061542483,
+      126.54887998024924,
+      86.14207286584859,
+      97.67987195291877,
+      124.09195929442522,
+      124.41866419571343,
+      13.83112515626947,
+      128.06090915415007,
+      154.6072480595234,
+      119.18330233165265,
+      113.73865361272279,
+      13.100450042463285,
+      121.9629346359847,
+      134.26624088126178,
+      109.80169120700648,
+      111.26979345233165,
+      96.45914025987008,
+      98.40206012503182,
+      7.2531269572868595,
+      85.14216715124853,
+      94.3205847723907,
+      92.80580826976177,
+      83.22509308590833
+    ],
+    "background": [
+      0.0019995267724981247,
+      0.01322431538041886,
+      0.009011410708250076,
+      0.015098532972699173,
+      0.010748957344326909,
+      0.012855941330995031,
+      0.013936818833892365,
+      0.014942731861720595,
+      0.0032453408778312857,
+      0.016172238365292673,
+      0.019417216724761703,
+      0.015558323936576928,
+      0.015837526580433445,
+      0.002857367220628833,
+      0.03695463135648507,
+      0.03487040783092409,
+      0.02846268296350331,
+      0.015389063200168742,
+      0.013876935561721274,
+      0.015005449069453466,
+      0.015801876890544585,
+      0.01182565447456265,
+      0.013967784740153118,
+      0.014610725319736487,
+      0.014349029385644434
+    ],
+    "chi2_red": 2.226592626968202,
+    "rel_floor": 0.03,
+    "fixed_formfactor": true
+  },
+  "first_ff_min_q_refit": 0.03626990263624312,
+  "iq4_extrema_models": {
+    "formfactor_file_no_background": {
+      "min1": 0.03254669121348196,
+      "max2": 0.044261927878559836,
+      "min2": 0.055934417854048755,
+      "max3": 0.06742645846023683
+    },
+    "formfactor_file_as_is": {
+      "min1": 0.032533721923111596,
+      "max2": 0.04430596225151774,
+      "min2": 0.05580378199700893,
+      "max3": 0.06782431399489776
+    },
+    "joint_refit": {
+      "min1": 0.03480586518222869,
+      "max2": 0.04730028131937925,
+      "min2": 0.0598421772460271,
+      "max3": 0.07217455632488975
+    }
+  },
+  "ff_correction": {
+    "file": "campaigns/r7.0-sq-extraction/out/reference/ff_correction.npy"
+  },
+  "mean_s_artifact_rms_0.026_0.045": {
+    "new": 0.06057434828488449,
+    "current": 0.35344715838288093
+  },
+  "cluster_window": [
+    0.02,
+    0.03626990263624312
+  ],
+  "scan": {},
+  "files": [
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_020_nacl_00_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_020_nacl_10_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_020_nacl_20_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_020_nacl_20_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_020_nacl_30_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_020_nacl_30_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_020_nacl_40_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_020_nacl_40_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_060_nacl_00_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_060_nacl_10_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_060_nacl_20_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_060_nacl_30_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_060_nacl_40_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_100_nacl_00_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_100_nacl_10_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_100_nacl_10_bridge_40.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_100_nacl_10_bridge_80.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_100_nacl_20_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_100_nacl_30_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_100_nacl_40_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_140_nacl_00_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_140_nacl_10_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_140_nacl_20_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_140_nacl_30_bridge_20.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_140_nacl_40_bridge_20.npy"
+  ]
+}

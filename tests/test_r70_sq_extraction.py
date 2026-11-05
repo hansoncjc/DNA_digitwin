@@ -115,3 +115,53 @@ def test_iq4_extrema_monodisperse():
     ext2 = sx.iq4_extrema(q, sx.sphere_pd(q, 0.96 * r, 0.0), r)
     for k in ext:
         assert ext2[k] / ext[k] == pytest.approx(1 / 0.96, rel=2e-3)
+
+
+def _dispersed_with_bump(seed, bump):
+    """I = c * P_sphere * (1 + bump(q)) + B, sigma 2 % of I, S = 1."""
+    rng = np.random.default_rng(seed)
+    q = np.arange(0.004, 0.16, 3.4e-4)
+    c, b = 50.0 + 10 * seed, 0.002
+    i = c * sx.sphere_pd(q, 123.5, 0.127) * (1 + bump(q)) + b
+    sig = 0.02 * i
+    return q, i * (1 + 0.02 * rng.standard_normal(q.size)), sig, c, b
+
+
+def test_empirical_correction_recovers_a_bump():
+    bump = lambda q: 0.3 * np.exp(-0.5 * ((q - 0.045) / 0.004) ** 2)
+    data = [_dispersed_with_bump(k, bump) for k in range(6)]
+    ec = sx.empirical_correction([(q, i, s) for q, i, s, _, _ in data], 123.5, 0.127,
+                                 [c for *_, c, _ in data], [b for *_, b in data])
+    m = (ec["q"] > 0.03) & (ec["q"] < 0.07)
+    np.testing.assert_allclose(ec["r"][m], 1 + bump(ec["q"][m]), atol=0.03)
+    assert np.all(ec["r"][(ec["q"] < 0.015) | (ec["q"] > 0.075)] == 1.0)
+    p = sx.form_factor(np.array([0.045]), 123.5, 0.127, (ec["q"], ec["r"]))
+    assert p[0] / sx.sphere_pd(np.array([0.045]), 123.5, 0.127)[0] == pytest.approx(1.3, abs=0.03)
+
+
+def test_mean_s_artifact():
+    q = np.linspace(0.005, 0.1, 400)
+    flat = [np.column_stack([q, np.ones_like(q)]) for _ in range(3)]
+    assert sx.mean_s_artifact(flat)[0] == pytest.approx(0.0, abs=1e-12)
+    bumped = [np.column_stack([q, 1 + 0.2 * np.exp(-0.5 * ((q - 0.035) / 0.002) ** 2)]) for _ in range(3)]
+    assert sx.mean_s_artifact(bumped)[0] > 0.05
+
+
+def test_cli_dispersed_reference_then_bridged(tmp_path):
+    d = REPO / "Experimental_Data" / "Huat" / "SAXS_data_rt_Collection"
+    if not d.exists():
+        pytest.skip("Experimental_Data not in this checkout")
+    disp = [str(d / f"chol_{c}_nacl_10_bridge_00.npy") for c in ("060", "100", "140")]
+    ref = sx.main(["--ff", str(FF_FILE), "--out", str(tmp_path / "ref"), "--fit-window", "0.015", "0.16",
+                   "--no-scan", "--write-correction"] + disp)
+    j = ref["joint_fit"]
+    assert 118 < j["radius_A"] < 130 and 0.1 < j["pd"] < 0.16
+    corr = tmp_path / "ref" / "ff_correction.npy"
+    assert corr.exists()
+    rep = sx.main(["--ff", str(FF_FILE), "--out", str(tmp_path / "br"), "--fix-ff", str(j["radius_A"]),
+                   str(j["pd"]), "--ff-correction", str(corr), str(d / "chol_100_nacl_10_bridge_20.npy")])
+    assert rep["joint_fit"]["fixed_formfactor"] and rep["joint_fit"]["radius_A"] == j["radius_A"]
+    assert np.isfinite(rep["mean_s_artifact_rms_0.026_0.045"]["new"])
+    with pytest.raises(SystemExit):
+        sx.main(["--ff", str(FF_FILE), "--out", str(tmp_path / "x"), "--ff-correction", str(corr),
+                 str(d / "chol_100_nacl_10_bridge_20.npy")])

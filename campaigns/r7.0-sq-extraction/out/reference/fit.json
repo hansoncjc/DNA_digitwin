@@ -1,0 +1,131 @@
+{
+  "formfactor_file": {
+    "file": "formfactors/sasmodels_sphere_fit.txt",
+    "n_points": 246,
+    "q_min": 0.003311000000000001,
+    "q_max": 0.09044799999999999,
+    "radius_A": 134.20661157920517,
+    "pd": 0.10000000149011917,
+    "scale": 16.809491660707533,
+    "background": 0.0010000000000004547,
+    "rms_ln_resid": 9.700443635083717e-14,
+    "background_share_at_qmax": 0.23536923221912545,
+    "background_share_at_0.075": 0.13751901388059226,
+    "first_ff_min_q": 0.03329195147262253
+  },
+  "joint_fit": {
+    "window": [
+      0.015,
+      0.16
+    ],
+    "radius_A": 123.49081950730982,
+    "pd": 0.1268353914120481,
+    "scale": [
+      14.114696891518406,
+      13.800144011434519,
+      13.906625848472252,
+      13.730284862521504,
+      13.051269890394666,
+      13.513694622101722,
+      13.029472039327139,
+      13.323342009048842,
+      13.253808393826164,
+      13.379878670882645,
+      12.397648108718753,
+      13.270729652205707,
+      14.696091938226687,
+      14.131746764587918,
+      13.762501742463671,
+      13.826562862307945,
+      12.740045804386597
+    ],
+    "background": [
+      0.00220700622956016,
+      0.0020930930108118235,
+      0.0021640858571613636,
+      0.002226446163312684,
+      0.0025380191307803764,
+      0.002272330626710203,
+      0.0021952131938514476,
+      0.003029001665887163,
+      0.003498531473006316,
+      0.0020245327083127573,
+      0.0032624969386414056,
+      0.0025997407604527005,
+      0.002932490298066265,
+      0.002584104932343861,
+      0.002254991594556738,
+      0.0024118923492924592,
+      0.0067735737982668005
+    ],
+    "chi2_red": 1.3863594463724775,
+    "rel_floor": 0.03,
+    "fixed_formfactor": false
+  },
+  "first_ff_min_q_refit": 0.03626990263624312,
+  "iq4_extrema_models": {
+    "formfactor_file_no_background": {
+      "min1": 0.03254669121348196,
+      "max2": 0.044261927878559836,
+      "min2": 0.055934417854048755,
+      "max3": 0.06742645846023683
+    },
+    "formfactor_file_as_is": {
+      "min1": 0.032533721923111596,
+      "max2": 0.04430596225151774,
+      "min2": 0.05580378199700893,
+      "max3": 0.06782431399489776
+    },
+    "joint_refit": {
+      "min1": 0.03480586518222869,
+      "max2": 0.04730028131937925,
+      "min2": 0.0598421772460271,
+      "max3": 0.07217455632488975
+    }
+  },
+  "ff_correction": {
+    "file": "ff_correction.npy",
+    "columns": [
+      "q",
+      "r",
+      "raw_mean",
+      "raw_err"
+    ],
+    "radius_A": 123.49081950730982,
+    "pd": 0.1268353914120481,
+    "q_range": [
+      0.015,
+      0.075
+    ],
+    "taper": 0.005,
+    "smooth": 15
+  },
+  "mean_s_artifact_rms_0.026_0.045": {
+    "new": 0.17389200888506692,
+    "current": 0.33583682394537034
+  },
+  "cluster_window": [
+    0.02,
+    0.03626990263624312
+  ],
+  "scan": {},
+  "files": [
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_020_nacl_00_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_020_nacl_10_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_060_nacl_00_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_060_nacl_10_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_060_nacl_20_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_060_nacl_30_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_060_nacl_40_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_100_nacl_00_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_100_nacl_10_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_100_nacl_20_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_100_nacl_30_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_100_nacl_40_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_140_nacl_00_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_140_nacl_10_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_140_nacl_20_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_140_nacl_30_bridge_00.npy",
+    "Experimental_Data/Huat/SAXS_data_rt_Collection/chol_140_nacl_40_bridge_00.npy"
+  ]
+}
