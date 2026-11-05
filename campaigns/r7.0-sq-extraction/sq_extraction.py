@@ -496,7 +496,7 @@ def main(argv=None):
     for r in rows:
         keys += [k for k in r if k not in keys]
     with open(out / "summary.csv", "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=keys)
+        w = csv.DictWriter(fh, fieldnames=keys, lineterminator="\n")
         w.writeheader()
         for r in rows:
             w.writerow({k: (f"{v:.6g}" if isinstance(v, float) else v) for k, v in r.items()})
