@@ -101,3 +101,17 @@ def test_cli_on_two_r4_curves(tmp_path):
         assert (tmp_path / name).exists()
     sq = np.load(tmp_path / "chol_100_nacl_10_bridge_80_sq.npy")
     assert sq.shape[1] == 3 and np.all(np.isfinite(sq[:, 2]))
+
+
+def test_iq4_extrema_monodisperse():
+    r = 130.0
+    q = np.linspace(0.02, 0.1, 6000)
+    ext = sx.iq4_extrema(q, sx.sphere_pd(q, r, 0.0), r)
+    # zeros of the sphere amplitude: tan(x) = x
+    assert ext["min1"] * r == pytest.approx(4.4934, abs=0.01)
+    assert ext["min2"] * r == pytest.approx(7.7253, abs=0.01)
+    assert ext["min1"] < ext["max2"] < ext["min2"] < ext["max3"]
+    # a smaller radius moves every extremum up by R_ref / R
+    ext2 = sx.iq4_extrema(q, sx.sphere_pd(q, 0.96 * r, 0.0), r)
+    for k in ext:
+        assert ext2[k] / ext[k] == pytest.approx(1 / 0.96, rel=2e-3)

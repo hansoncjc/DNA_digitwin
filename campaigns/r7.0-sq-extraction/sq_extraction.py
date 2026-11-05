@@ -107,6 +107,39 @@ def first_ff_minimum(radius, pd=0.0):
     return float(q[np.argmin(sphere_pd(q, radius, pd))])
 
 
+# Search windows of the I q^4 extrema in units of q * R_ref: first minimum,
+# second maximum, second minimum, third maximum (monodisperse sphere:
+# qR = 4.49, 5.76, 7.73, 9.10 for P; the q^4 factor moves the maxima up).
+IQ4_EXTREMA = (("min1", 3.9, 5.36, "min"), ("max2", 5.36, 6.97, "max"),
+               ("min2", 6.97, 8.84, "min"), ("max3", 8.30, 10.7, "max"))
+
+
+def iq4_extrema(q, y, radius_ref, smooth=9):
+    """Positions (A^-1) of the extrema of y q^4 listed in ``IQ4_EXTREMA``.
+
+    ln(y q^4) is Savitzky-Golay smoothed (window ``smooth``, order 2) inside
+    each window, the extreme point is refined by a parabola. Windows with
+    fewer than ``smooth + 2`` points give NaN.
+    """
+    out = {}
+    for name, lo, hi, kind in IQ4_EXTREMA:
+        m = (q >= lo / radius_ref) & (q <= hi / radius_ref)
+        if m.sum() < smooth + 2:
+            out[name] = np.nan
+            continue
+        qq = q[m]
+        ys = savgol_filter(np.log(y[m] * qq ** 4), smooth, 2)
+        k = int(np.argmin(ys) if kind == "min" else np.argmax(ys))
+        if 0 < k < qq.size - 1:
+            y0, y1, y2 = ys[k - 1:k + 2]
+            den = y0 - 2.0 * y1 + y2
+            d = float(np.clip(0.5 * (y0 - y2) / den, -1, 1)) if abs(den) > 1e-15 else 0.0
+            out[name] = float(qq[k] + d * (qq[k + 1] - qq[k]))
+        else:
+            out[name] = float(qq[k])
+    return out
+
+
 def audit_formfactor(path):
     """Fit a form-factor file as ``scale * sphere_pd(q; R, pd) + background``.
 
@@ -458,6 +491,14 @@ def main(argv=None):
                                      "chi2_red": f1["chi2_red"]})
 
     q_ffmin = first_ff_minimum(joint["radius_A"], joint["pd"])
+    r_ref = ff["radius_A"]
+    q_dense = np.linspace(0.5 * 3.9 / r_ref, 1.5 * 10.7 / r_ref, 4000)
+    model_extrema = {
+        "formfactor_file_no_background": iq4_extrema(q_dense, sphere_pd(q_dense, r_ref, ff["pd"]), r_ref),
+        "formfactor_file_as_is": iq4_extrema(
+            q_dense, sphere_pd(q_dense, r_ref, ff["pd"]) + ff["background"] / ff["scale"], r_ref),
+        "joint_refit": iq4_extrema(q_dense, sphere_pd(q_dense, joint["radius_A"], joint["pd"]), r_ref),
+    }
     cluster_window = (args.peak_window[1], q_ffmin)
     rows, new_sq, old_sq = [], [], []
     for k, (name, (q, i, s), mg) in enumerate(zip(names, curves, merges)):
@@ -481,6 +522,11 @@ def main(argv=None):
                        seam_ratio=ratio, seam_ratio_err=err)
         b = joint["background"][k]
         row["background_share_at_0.075"] = float(b / np.interp(0.075, q, i))
+        ext = iq4_extrema(q, i, r_ref)
+        ref = model_extrema["formfactor_file_no_background"]
+        for name in ext:
+            row[f"iq4_{name}"] = ext[name]
+            row[f"iq4_{name}_vs_file"] = ext[name] / ref[name]
         for tag, curve in (("old", old), ("new", sq)):
             if curve is None:
                 continue
@@ -505,6 +551,7 @@ def main(argv=None):
         "formfactor_file": {k: v for k, v in ff.items() if not k.startswith("_")},
         "joint_fit": joint,
         "first_ff_min_q_refit": q_ffmin,
+        "iq4_extrema_models": model_extrema,
         "cluster_window": list(cluster_window),
         "scan": scan,
         "files": [str(f) for f in files],

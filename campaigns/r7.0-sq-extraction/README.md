@@ -26,7 +26,11 @@ with P the sasmodels sphere, Gaussian radius polydispersity, 3 sigma / 35
 points. 0.001 is SasView's default `background`. It is 14 % of the divisor at
 q = 0.075 and 24 % at q = 0.090; no resolution smearing is in the file. Its q
 grid is the union of measured grids (167-184 of each R4 file's q values are in
-it), so it was exported from a fit to measured data.
+it): it is the SasView fit of bare silica NPs at 2 mg/mL (confirmed by the
+author, 2026-11-05). The background belongs to that measurement and should
+not be in the divisor. Its diameter, 26.8 nm, differs from `d_si = 24.6` nm,
+the silica diameter used as the simulation length unit (`datasets.physics_map`,
+saxs-fft q conversion); where 24.6 nm comes from is not recorded here.
 
 **The R4 I(q) are two detector distances merged.** Below
 q_merge = 0.0263-0.0301 A^-1 (different in each file) the q step is
@@ -50,7 +54,25 @@ there, R and pd shared, c_k and B_k >= 0 per curve):
 | 0.045-0.09 / 0.12 / 0.143 | 131.5 / 132.0 / 132.4 | 0.098-0.102 | 1.3-2.8 |
 
 Per-file fits in 0.033-0.12 give R = 127.7-128.7 A, pd = 0.109-0.113. The
-file's 134.2 A is outside every window's value. A 5 % radius error matters most
+file's 134.2 A is outside every window's value.
+
+The extrema of I q^4 do not depend on that fit (`iq4_*` columns of
+`summary.csv`, ratio to the bare-silica model in parentheses):
+
+| | min 1 | max 2 | min 2 | max 3 |
+|---|---|---|---|---|
+| bare silica, R 134.2 A | 0.0326 | 0.0443 | 0.0559 | 0.0674 |
+| six R4 curves | 0.0334-0.0347 (1.025-1.066) | 0.0457-0.0470 (1.033-1.063) | 0.0566-0.0588 (1.012-1.051) | 0.0671-0.0719 (0.995-1.066) |
+
+23 of the 24 ratios are above 1, median about 1.04: an apparent radius about
+4 % below the bare silica. A coating does not move all extrema alike: with a
+supported bilayer (10 A water gap, 9 A heads, 28 A tails) with or without a
+DNA layer of 60-100 A, the shift is -4 % to +7 % for single extrema, but the
+second minimum moves by -0.5 % to 0 % in every case tried, against +1.2 % to
++5.1 % measured. A smaller silica (another batch) or a q calibration that
+differs between the bare-silica and the R4 measurements would move all
+extrema alike; the bare-silica I(q) and the calibration of both sessions are
+needed to tell them apart. A 5 % radius error matters most
 just below the first minimum, where |d ln P / d ln q| = 8-12 (1.6 at the first
 structure peak).
 
