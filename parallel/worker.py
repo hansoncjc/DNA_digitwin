@@ -22,6 +22,7 @@ Expected JSON config layout::
 
     {
       "outdir": "/abs/path/sim_dir",
+      "owner":  "i37_d00:<hex>",   # written by the launcher (prepare_jobs)
       "run_kwargs": {
           "density": 0.005,  # number density N/V in particles/σ³ (NOT volume fraction)
           "U_0": 3.0, "r0": 2.5, "n": 12.0, "m": 6.0,
@@ -46,6 +47,13 @@ Expected JSON config layout::
           "metric_kwargs":    {}       # shift_rmse parameters (metrics.shift_rmse_params)
       }
     }
+
+Folder ownership: the launcher writes ``<outdir>/OWNER`` with the token it
+puts in ``owner``. The worker checks it before it writes anything, after the
+simulation, and before the final flag; when OWNER holds another token (this
+job was given up and a newer one took the folder) it exits with status 3 and
+writes nothing more. The S(q) is computed from the GSD this run's simulation
+wrote (``run_simulation``'s ``gsd_path``), never from another GSD in the folder.
 
 Status flag files written in <outdir>::
 
@@ -86,8 +94,36 @@ from metrics     import MetricFailed, compare_to_exp, compare_to_exp_saxsfft  # 
 # Flag helpers
 # ---------------------------------------------------------------------------
 
+OWNER_FILE = "OWNER"     # same name as parallel.submit_parallel.OWNER_FILE
+NOT_OWNER_EXIT = 3
+
+
+class NotOwner(Exception):
+    """The folder now belongs to another job; this one must not write there."""
+
+
+def _owner_of(outdir: Path):
+    try:
+        return (outdir / OWNER_FILE).read_text().strip()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
+def _check_owner(outdir: Path, token: str) -> None:
+    current = _owner_of(outdir)
+    if current != token:
+        raise NotOwner(f"{outdir} belongs to {current!r}, not to this job ({token!r})")
+
+
 def _write_flag(outdir: Path, name: str, text: str = "") -> None:
     (outdir / name).write_text(text)
+
+
+def _write_final_flag(outdir: Path, token: str, name: str, text: str) -> None:
+    """Write DONE / METRIC_FAILED / FAILED and remove RUNNING, if still the owner."""
+    _check_owner(outdir, token)
+    _write_flag(outdir, name, text)
+    (outdir / "RUNNING").unlink(missing_ok=True)
 
 
 def _clear_flags(outdir: Path) -> None:
@@ -135,25 +171,32 @@ def _load_exp_curve(exp_path: str, trim_tail: int) -> np.ndarray:
     return arr
 
 
-def _run_pipeline(cfg: dict, save_dir: Path, state: dict) -> dict:
+def _run_pipeline(cfg: dict, save_dir: Path, state: dict, owner: str) -> dict:
     """
     Execute sim -> SAXS conversion -> compare-to-exp. Returns a dict
     {"loss": float, "sim_result": dict} on success; raises on failure.
     ``state["sim_result"]`` is set as soon as the simulation finishes, so
-    the caller can report it when a later stage fails.
+    the caller can report it when a later stage fails. Raises ``NotOwner``
+    before the S(q) is written if the folder changed hands meanwhile.
     """
-    # 1) Simulation
-    sim_result = run_simulation(outdir=str(save_dir), **cfg["run_kwargs"])
-    state["sim_result"] = sim_result
-
-    # 2) Sim -> S(q)
     scat = cfg.get("scattering", {}) or {}
     method = scat.get("method", "saxsfft")
     sc_kw  = dict(scat.get("kwargs", {}) or {})
+    if "path" in sc_kw:
+        raise ValueError("scattering kwargs must not set 'path': the S(q) is "
+                         "computed from the GSD of this run's simulation")
+
+    # 1) Simulation
+    sim_result = run_simulation(outdir=str(save_dir), **cfg["run_kwargs"])
+    state["sim_result"] = sim_result
+    _check_owner(save_dir, owner)
+
+    # 2) Sim -> S(q), from this run's own GSD
+    gsd_path = str(sim_result["gsd_path"])
     if method == "saxsfft":
-        convert_to_SAXS_fft(str(save_dir), **sc_kw)
+        convert_to_SAXS_fft(str(save_dir), path=gsd_path, **sc_kw)
     else:
-        convert_to_SAXS(str(save_dir), **sc_kw)
+        convert_to_SAXS(str(save_dir), path=gsd_path, **sc_kw)
 
     # 3) Compare to experiment
     loss_cfg     = cfg["loss"]
@@ -222,9 +265,22 @@ def main(argv):
 
     cfg    = json.loads(Path(argv[1]).read_text())
     outdir = Path(cfg["outdir"])
-    if not outdir.exists():
-        outdir.mkdir(parents=True)
+    owner  = cfg.get("owner")
+    if not owner:
+        print("[worker] config has no 'owner' (written by parallel.prepare_jobs)",
+              file=sys.stderr)
+        return 2
+    try:
+        return _run(cfg, outdir, owner)
+    except NotOwner as exc:
+        print(f"[worker] {exc}; exiting without writing into it", file=sys.stderr)
+        return NOT_OWNER_EXIT
 
+
+def _run(cfg: dict, outdir: Path, owner: str) -> int:
+    # Before anything is written: an older job that starts after a newer one
+    # took the folder must not clear the newer job's flags.
+    _check_owner(outdir, owner)
     host = os.uname().nodename
     _clear_flags(outdir)
     _write_flag(
@@ -236,7 +292,7 @@ def main(argv):
     t0 = time.time()
     state: dict = {}
     try:
-        out = _run_pipeline(cfg, outdir, state)
+        out = _run_pipeline(cfg, outdir, state, owner)
         dt  = time.time() - t0
 
         summary = {
@@ -245,10 +301,11 @@ def main(argv):
             "loss":             float(out["loss"]),
             "result":           _stringify(out["sim_result"]),
         }
-        _write_flag(outdir, "DONE", json.dumps(summary, indent=2))
-        (outdir / "RUNNING").unlink(missing_ok=True)
+        _write_final_flag(outdir, owner, "DONE", json.dumps(summary, indent=2))
         print(f"[worker] SUCCESS loss={out['loss']:.6g} in {dt:.1f}s -> {outdir}")
         return 0
+    except NotOwner:
+        raise
     except MetricFailed as exc:
         dt = time.time() - t0
         summary = {
@@ -257,19 +314,18 @@ def main(argv):
             "reason":           str(exc),
             "result":           _stringify(state.get("sim_result", {})),
         }
-        _write_flag(outdir, "METRIC_FAILED", json.dumps(summary, indent=2))
-        (outdir / "RUNNING").unlink(missing_ok=True)
+        _write_final_flag(outdir, owner, "METRIC_FAILED", json.dumps(summary, indent=2))
         print(f"[worker] METRIC_FAILED after {dt:.1f}s -> {outdir}: {exc}", file=sys.stderr)
         return 0
     except Exception:
         dt = time.time() - t0
         tb = traceback.format_exc()
-        _write_flag(
+        _write_final_flag(
             outdir,
+            owner,
             "FAILED",
             f"run_time_seconds={dt:.1f}\nhost={host}\n\n{tb}",
         )
-        (outdir / "RUNNING").unlink(missing_ok=True)
         print(f"[worker] FAILED after {dt:.1f}s -> {outdir}\n{tb}", file=sys.stderr)
         return 1
 

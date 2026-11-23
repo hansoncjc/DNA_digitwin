@@ -278,7 +278,10 @@ Builds a callable `objective(x_unit, ffpath)` that, for one BO query:
    production (GSD frame 0) is logged and returned as `n_pairs_below_rmin`,
    with `min_pair_distance`.
 4. Converts GSD → S(q) via either `convert_to_SAXS` (MC-DFM) or
-   `convert_to_SAXS_fft` (FFT-based, default `N_grid=600`). The
+   `convert_to_SAXS_fft` (FFT-based, default `N_grid=600`), always from
+   the GSD this evaluation's simulation wrote (`gsd_path` of
+   `run_simulation`), never from another GSD in the folder;
+   `scattering_kwargs` must not set `path`. The
    simulation and a saxs-fft target must use the same `N_grid`. In
    `mode="sim"` the objective infers each `datatype="sq"` target's
    `N_grid` from its q grid (`scattering.estimate_saxsfft_n_grid`) and
@@ -454,11 +457,16 @@ Steps after maintenance, a walltime end or a preemption:
 
 1. Check that the old master has stopped (`squeue -u $USER`). Run one master
    per `out_root`.
-2. With `parallel=True`, GPU jobs of the last batch outlive a master
-   that hit its walltime. Their names are `i<eval>_d<k>`, e.g. `i37_d00`
-   for eval 37, dataset `d0` (retries add `_r<n>`); a batch has one per
-   point and dataset. List them with `squeue -u $USER -o "%i %j"` and
-   `scancel` them. Left running they only write into abandoned folders.
+2. With `parallel=True`, a master that exits (normal end, an exception,
+   or SIGTERM at its walltime or from `scancel`) cancels the GPU jobs it
+   submitted; its log ends with
+   `[launcher] SIGTERM: cancelled N job(s)` (or `master exit: ...`). Only a
+   master killed without SIGTERM (SIGKILL, node failure, out of memory)
+   leaves them running, and so does a failed `scancel` (the log then says
+   `scancel failed; cancel by hand: scancel <ids>`). Check with
+   `squeue -u $USER -o "%i %j"`: the GPU jobs are named `i<eval>_d<k>`, e.g.
+   `i37_d00` for eval 37, dataset `d0` (retries add `_r<n>`); `scancel` any
+   that are left. Left running they only write into abandoned folders.
 3. Resubmit the same sbatch script, from the same repo copy, with the same
    settings and `out_root`.
 4. Check the first lines of the new master's log:
@@ -629,8 +637,20 @@ GPU job (`parallel_cfg`) and polls its flag files.
   resubmitted up to `max_job_retries` times in the same folder; if every try
   fails, the evaluation fails, is not counted, and BO acquires a new
   candidate (up to 5 attempts per step). The master keeps running.
-- Walltime end of the master: the GPU jobs of the current batch keep
-  running. `scancel` them (names `i<eval>_d00`) and resubmit the master.
+- A GPU job without a result after `max_wait` (queued or running) is
+  given up: the launcher `scancel`s it, waits until `squeue` no longer
+  lists it (up to 300 s), and only then resubmits it in the same folder
+  (`[launcher] max_wait exceeded: cancelling ...` in the master log).
+- Each submission writes a new token to `eval_XXX/<ds>/OWNER` and passes
+  it to its worker. A worker whose token is no longer in `OWNER` (an older
+  submission that is still running or starts late) exits with status 3 and
+  writes nothing into the folder, so it cannot overwrite or delete the
+  newer job's flags or S(q). Files of an earlier attempt (a partial GSD,
+  `potential_energy.csv`) stay in the folder; the S(q) is computed from the
+  current attempt's own GSD.
+- Walltime end of the master: it receives SIGTERM and cancels the GPU jobs
+  of the current batch (see **Resuming a run**, step 2); resubmit the
+  master.
 - Maintenance stops both; resubmit the master afterwards.
 
 Either way the walltime should end before a maintenance window starts, and

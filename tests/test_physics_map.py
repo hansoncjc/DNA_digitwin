@@ -191,7 +191,7 @@ def test_parallel_prepare_map_mode(tmp_path):
 def stub_pipeline(monkeypatch):
     def fake_sim(density, U_0, r0, n, m, outdir, **kw):
         b = resolve_table_bounds(U_0, n, m, r0, N=5000, density=density)
-        return {"rmax": b["rmax"], "t_tol": b["t_tol"], "n_pairs_below_rmin": 0}
+        return {"gsd_path": str(Path(outdir) / "DNA_assembly_fake.gsd"), "rmax": b["rmax"], "t_tol": b["t_tol"], "n_pairs_below_rmin": 0}
 
     def fake_saxs(save_dir, **kw):
         d = Path(save_dir) / "S(q)_data"

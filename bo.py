@@ -780,7 +780,11 @@ def _start_parallel_eval(
     job names ``i<eval>_d<k>``; eval ids are never reused, so names do not
     repeat within a campaign.
     """
-    from parallel import submit_jobs_with_retry  # lazy import
+    from parallel import install_signal_handlers, submit_jobs_with_retry  # lazy import
+
+    # Main thread: SIGTERM (walltime end, scancel of the master) cancels the
+    # GPU jobs; atexit does the same on exit or an uncaught exception.
+    install_signal_handlers()
 
     job_specs, plans, fail_records, fail_reason = _parallel_prepare_eval_jobs(
         datasets=datasets,
@@ -823,7 +827,8 @@ def _start_parallel_eval(
             except BaseException as exc:   # re-raised by _finish_parallel_eval
                 handle["error"] = exc
 
-        # Daemon: a master that raises does not wait for the other jobs.
+        # Daemon: a master that raises does not wait for the other jobs; it
+        # cancels them on the way out (parallel.cancel_live_jobs, atexit).
         thread = threading.Thread(target=submit, name=f"eval_{eval_id:03d}", daemon=True)
         handle["thread"] = thread
         thread.start()
@@ -985,6 +990,9 @@ def make_global_objective(
     _validate_param_mode(ps, mode)
     if mode == "sim" and scattering_method == "saxsfft":
         _check_target_n_grid(datasets, scattering_kwargs, trim_tail)
+    if "path" in (scattering_kwargs or {}):
+        raise ValueError("scattering_kwargs must not set 'path': each evaluation's "
+                         "S(q) is computed from the GSD its own simulation wrote")
     metric_kwargs = dict(metric_kwargs or {})
     if metric == "shift_rmse":
         if scattering_method != "saxsfft":
@@ -1055,10 +1063,12 @@ def make_global_objective(
 
                 # ---- 2) Sim → S(q) ----
                 _sc_kw = dict(scattering_kwargs) if scattering_kwargs else {}
+                # From this run's own GSD, not whichever GSD sorts first.
+                _gsd = str(sim_result["gsd_path"])
                 if scattering_method == "saxsfft":
-                    convert_to_SAXS_fft(save_dir, **_sc_kw)
+                    convert_to_SAXS_fft(save_dir, path=_gsd, **_sc_kw)
                 else:
-                    convert_to_SAXS(save_dir, **_sc_kw)
+                    convert_to_SAXS(save_dir, path=_gsd, **_sc_kw)
 
                 # ---- 3) Compare to experiment ----
                 cand_paths = [

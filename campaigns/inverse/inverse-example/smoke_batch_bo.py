@@ -91,7 +91,7 @@ def _patch_forward_model(bo):
         Path(outdir, "analytic_params.json").write_text(json.dumps(
             {"U0": U_0, "r0": r0, "n": n, "m": m}))
         b = resolve_table_bounds(U_0, n, m, r0, N=kw.get("N", N), density=density)
-        return {"rmax": b["rmax"], "t_tol": b["t_tol"], "n_pairs_below_rmin": 0}
+        return {"gsd_path": str(Path(outdir) / "DNA_assembly_fake.gsd"), "rmax": b["rmax"], "t_tol": b["t_tol"], "n_pairs_below_rmin": 0}
 
     def fake_saxs(save_dir, **kw):
         p = json.loads(Path(save_dir, "analytic_params.json").read_text())

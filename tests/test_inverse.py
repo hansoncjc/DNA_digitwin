@@ -56,7 +56,7 @@ def pipeline(monkeypatch):
         if i == state["kill_at"]:
             raise _Killed()
         b = resolve_table_bounds(U_0, n, m, r0, N=kw["N"], density=density)
-        return {"rmax": b["rmax"], "t_tol": b["t_tol"], "n_pairs_below_rmin": 0}
+        return {"gsd_path": str(Path(outdir) / "DNA_assembly_fake.gsd"), "rmax": b["rmax"], "t_tol": b["t_tol"], "n_pairs_below_rmin": 0}
 
     def fake_saxs(save_dir, **kw):
         d = Path(save_dir) / "S(q)_data"

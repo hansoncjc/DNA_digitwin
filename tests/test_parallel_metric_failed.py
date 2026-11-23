@@ -15,8 +15,11 @@ def _worker_cfg(tmp_path, metric_kwargs):
     exp_path = tmp_path / "target.npy"
     np.save(exp_path, crystal_curve())
     outdir = tmp_path / "eval_000" / "d0"
+    outdir.mkdir(parents=True)                       # as prepare_jobs does
+    (outdir / sp.OWNER_FILE).write_text("i0_d00:test\n")
     cfg = {
         "outdir": str(outdir),
+        "owner": "i0_d00:test",
         "run_kwargs": {"density": 0.005, "U_0": 3.0, "r0": 2.5, "n": 12.0, "m": 6.0},
         "scattering": {"method": "saxsfft", "kwargs": {}},
         "loss": {
@@ -34,7 +37,7 @@ def _worker_cfg(tmp_path, metric_kwargs):
 @pytest.fixture
 def fake_pipeline(monkeypatch):
     def fake_sim(outdir, **kw):
-        return {"rmax": 4.9465, "t_tol": 0.1 / kw["U_0"], "n_pairs_below_rmin": 2}
+        return {"gsd_path": str(Path(outdir) / "DNA_assembly_fake.gsd"), "rmax": 4.9465, "t_tol": 0.1 / kw["U_0"], "n_pairs_below_rmin": 2}
 
     def fake_saxs(save_dir, **kw):
         d = Path(save_dir) / "S(q)_data"

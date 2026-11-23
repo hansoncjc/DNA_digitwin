@@ -131,7 +131,7 @@ def test_startup_checks_fail_on_md5_and_dispersed(tmp_path, monkeypatch):
 @pytest.fixture
 def stub_forward(monkeypatch):
     def fake_sim(density, U_0, r0, n, m, outdir, **kw):
-        return {"rmax": 3.0 * r0, "t_tol": 0.03, "n_pairs_below_rmin": 0}
+        return {"gsd_path": str(Path(outdir) / "DNA_assembly_fake.gsd"), "rmax": 3.0 * r0, "t_tol": 0.03, "n_pairs_below_rmin": 0}
 
     def fake_saxs(save_dir, **kw):
         d = Path(save_dir) / "S(q)_data"

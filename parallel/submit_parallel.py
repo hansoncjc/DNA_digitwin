@@ -41,17 +41,36 @@ and returns a list of `Job` objects with `done_status`, `slurm_state`,
 `host`, `run_time_seconds`, etc. populated. Callers read per-job losses
 by reading `<sim_dir>/DONE` (JSON) written by the worker.
 
+Cancellation and folder ownership (TIMELINE 1.1, C32):
+
+- Every job ``submit_jobs`` submitted is finished or cancelled when it returns
+  or raises: a job without a terminal flag after ``max_wait`` (or when the
+  launcher itself raises) is ``scancel``-ed, and ``submit_jobs`` waits until
+  Slurm no longer lists it. A retry in the same ``sim_dir`` is submitted only
+  after that.
+- Every submitted job stays in a process-wide list until it ends. The master
+  cancels the jobs left in it when it exits: normal exit, uncaught exception
+  (``atexit``) or SIGTERM (``install_signal_handlers``; walltime end, scancel
+  of the master). A master killed with SIGKILL cannot do this.
+- ``prepare_jobs`` writes ``<sim_dir>/OWNER`` with a new token per job and
+  passes the token to the worker. A worker whose token is no longer in
+  ``OWNER`` (an older attempt still running) writes nothing into the folder.
+
 Python: written for the HOOMD venv (3.9+).
 """
 from __future__ import annotations
 
+import atexit
 import getpass
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Optional
@@ -79,6 +98,7 @@ class Job:
     done_status:      Optional[str] = None  # "DONE" / "METRIC_FAILED" / "FAILED" / None
     run_time_seconds: Optional[float] = None
     host:             str = ""
+    owner:            str = ""           # token in <sim_dir>/OWNER (prepare_jobs)
 
 
 @dataclass
@@ -256,7 +276,8 @@ def sbatch_submit(sbatch_path: Path) -> str:
     raise RuntimeError(f"sbatch {sbatch_path}: no attempt left")
 
 
-def squeue_states(job_ids: List[str]) -> dict:
+def _squeue_query(job_ids: List[str]) -> Optional[dict]:
+    """``{id: state}`` of the listed jobs, or None if squeue itself failed."""
     if not job_ids:
         return {}
     cmd = ["squeue", "-h", "-o", "%i %T", "-j", ",".join(job_ids)]
@@ -266,7 +287,7 @@ def squeue_states(job_ids: List[str]) -> dict:
         if "Invalid job id specified" in (e.output or ""):
             return {}
         print(f"[launcher] squeue error: {e.output}", file=sys.stderr)
-        return {}
+        return None
 
     states: dict = {}
     for line in out.strip().splitlines():
@@ -274,6 +295,143 @@ def squeue_states(job_ids: List[str]) -> dict:
         if len(parts) >= 2:
             states[parts[0]] = parts[1]
     return states
+
+
+def squeue_states(job_ids: List[str]) -> dict:
+    states = _squeue_query(job_ids)
+    return {} if states is None else states
+
+
+# scancel is retried like sbatch, but fewer times: it runs on the way out.
+SCANCEL_ATTEMPTS = 3
+SCANCEL_RETRY_WAIT = 10.0
+# After scancel, wait until Slurm no longer lists the job (KillWait, epilog):
+# CANCEL_POLLS squeue checks CANCEL_POLL_WAIT seconds apart (300 s in all).
+CANCEL_POLLS = 30
+CANCEL_POLL_WAIT = 10.0
+# scancel answers for a job that ended in the meantime; nothing is left to cancel.
+_SCANCEL_ALREADY_GONE = ("Invalid job id specified", "already completing or completed")
+
+
+def scancel(job_ids: Iterable[str]) -> bool:
+    """``scancel`` the given ids in one call (SCANCEL_ATTEMPTS tries). True
+    when Slurm accepted it."""
+    ids = [str(i) for i in job_ids if i]
+    if not ids:
+        return True
+    for attempt in range(1, SCANCEL_ATTEMPTS + 1):
+        try:
+            subprocess.check_output(["scancel", *ids], text=True, stderr=subprocess.STDOUT)
+            return True
+        except subprocess.CalledProcessError as e:
+            msg = e.output or ""
+            if any(tag in msg for tag in _SCANCEL_ALREADY_GONE):
+                return True
+        except OSError as e:
+            msg = str(e)
+        print(f"[launcher] scancel {' '.join(ids)} failed (attempt "
+              f"{attempt}/{SCANCEL_ATTEMPTS}): {msg.strip()}", file=sys.stderr, flush=True)
+        if attempt < SCANCEL_ATTEMPTS:
+            time.sleep(SCANCEL_RETRY_WAIT)
+    return False
+
+
+def _wait_until_gone(job_ids: List[str]) -> bool:
+    """True once squeue lists none of ``job_ids`` as active (CANCEL_POLLS checks)."""
+    for check in range(CANCEL_POLLS):
+        states = _squeue_query(job_ids)
+        if states is not None and not any(
+            i in states and not _has_ended(states[i]) for i in job_ids
+        ):
+            return True
+        if check < CANCEL_POLLS - 1:
+            time.sleep(CANCEL_POLL_WAIT)
+    return False
+
+
+# Jobs this process submitted and has not yet seen end: {slurm id: job name}.
+# The master cancels what is left here when it exits (cancel_live_jobs).
+_LIVE: dict = {}
+_LIVE_LOCK = threading.RLock()
+_SHUTDOWN = False
+_SIGNAL_HANDLERS_INSTALLED = False
+
+
+class LauncherShutdown(RuntimeError):
+    """Raised by submit_all once the master has started to exit."""
+
+
+def _register(job: "Job") -> bool:
+    """Record a submitted job. False if the master is already exiting."""
+    with _LIVE_LOCK:
+        _LIVE[job.slurm_id] = job.name
+        return not _SHUTDOWN
+
+
+def _unregister(job_ids: Iterable[str]) -> None:
+    with _LIVE_LOCK:
+        for i in job_ids:
+            _LIVE.pop(i, None)
+
+
+def live_jobs() -> dict:
+    """Copy of the jobs this process still waits for, ``{slurm id: name}``."""
+    with _LIVE_LOCK:
+        return dict(_LIVE)
+
+
+def cancel_live_jobs(reason: str = "master exit") -> List[str]:
+    """
+    Cancel every job this process submitted that has not ended, and stop
+    further submissions (``submit_all`` raises ``LauncherShutdown``). Runs at
+    interpreter exit (atexit) and on SIGTERM. Returns the ids it cancelled.
+    """
+    global _SHUTDOWN
+    with _LIVE_LOCK:
+        _SHUTDOWN = True
+        live = dict(_LIVE)
+    if not live:
+        return []
+    listing = ", ".join(f"{name} ({jid})" for jid, name in live.items())
+    print(f"[launcher] {reason}: cancelling {len(live)} job(s) still in Slurm: {listing}",
+          flush=True)
+    if scancel(list(live)):
+        _unregister(live)
+        print(f"[launcher] {reason}: cancelled {len(live)} job(s)", flush=True)
+    else:
+        print(f"[launcher] {reason}: scancel failed; cancel by hand: "
+              f"scancel {' '.join(live)}", file=sys.stderr, flush=True)
+    return list(live)
+
+
+def install_signal_handlers() -> bool:
+    """
+    On SIGTERM (walltime end, scancel of the master), cancel the live jobs,
+    call the previous handler if there is one, then exit with status 143.
+    Only the main thread can install a handler; elsewhere this returns False.
+    Calling it again does nothing.
+    """
+    global _SIGNAL_HANDLERS_INSTALLED
+    if _SIGNAL_HANDLERS_INSTALLED:
+        return True
+    if threading.current_thread() is not threading.main_thread():
+        print("[launcher] install_signal_handlers: not the main thread; "
+              "SIGTERM will not cancel the GPU jobs", file=sys.stderr)
+        return False
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def on_sigterm(signum, frame):
+        cancel_live_jobs("SIGTERM")
+        if callable(previous):
+            previous(signum, frame)
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, on_sigterm)
+    _SIGNAL_HANDLERS_INSTALLED = True
+    return True
+
+
+atexit.register(cancel_live_jobs, "master exit")
 
 
 def sacct_final_state(job_id: str) -> str:
@@ -309,11 +467,20 @@ def _is_terminal_bad_sacct(state: str) -> bool:
     return root.startswith(_TERMINAL_BAD_SACCT)
 
 
+def _has_ended(state: str) -> bool:
+    """True for a squeue/sacct state of a job that no longer runs."""
+    return bool(state) and (
+        _is_terminal_bad_sacct(state) or state.split()[0].startswith("COMPLETED")
+    )
+
+
 # ---------------------------------------------------------------------------
 # Flag-file inspection
 # ---------------------------------------------------------------------------
 
 TERMINAL_FLAGS = ("DONE", "METRIC_FAILED", "FAILED")
+# Token of the job that owns a sim_dir (prepare_jobs, parallel.worker).
+OWNER_FILE = "OWNER"
 # Statuses that must not be resubmitted: the simulation finished. A
 # METRIC_FAILED job has a valid S(q) but no loss; rerunning it cannot help.
 NO_RETRY_STATUSES = ("DONE", "METRIC_FAILED")
@@ -380,6 +547,11 @@ def prepare_jobs(cfg: LauncherConfig, job_specs: Iterable[dict]) -> List[Job]:
         sim_dir = Path(worker_cfg["outdir"])
         if not sim_dir.exists():
             sim_dir.mkdir(parents=True)
+        # The folder belongs to this job from now on: an older job still
+        # running here finds another token in OWNER and writes nothing.
+        owner = f"{name}:{uuid.uuid4().hex}"
+        (sim_dir / OWNER_FILE).write_text(owner + "\n")
+        worker_cfg["owner"] = owner
         # A resumed run reuses eval_XXX/<ds>/. A flag left by a job killed
         # mid-evaluation would be read as this job's result before the new
         # worker starts, so clear it before submitting.
@@ -396,6 +568,7 @@ def prepare_jobs(cfg: LauncherConfig, job_specs: Iterable[dict]) -> List[Job]:
             config_path=cfg.run_dir / "configs" / f"{name}.json",
             sbatch_path=cfg.run_dir / "jobs"    / f"{name}.sbatch",
             out_path=cfg.run_dir / "jobs"    / f"{name}.out",
+            owner=owner,
         )
         job.config_path.write_text(json.dumps(worker_cfg, indent=2))
         job.sbatch_path.write_text(build_sbatch_script(job, cfg))
@@ -405,8 +578,17 @@ def prepare_jobs(cfg: LauncherConfig, job_specs: Iterable[dict]) -> List[Job]:
 
 def submit_all(jobs: List[Job]) -> None:
     for job in jobs:
+        if _SHUTDOWN:
+            raise LauncherShutdown(f"master is exiting; {job.name} not submitted")
         job.slurm_id = sbatch_submit(job.sbatch_path)
         job.state = "SUBMITTED"
+        if not _register(job):
+            # cancel_live_jobs ran while sbatch was answering.
+            print(f"[launcher] {job.name} ({job.slurm_id}) came back after the "
+                  "master started to exit; cancelling it", flush=True)
+            if scancel([job.slurm_id]):
+                _unregister([job.slurm_id])
+            raise LauncherShutdown(f"master is exiting; {job.name} cancelled")
         print(f"[launcher] submitted {job.name} -> SLURM {job.slurm_id}")
 
 
@@ -425,6 +607,10 @@ def poll_until_done(
     with log_path.open("w") as log:
         while True:
             elapsed = time.time() - t0
+            if _SHUTDOWN:
+                # cancel_live_jobs cancelled these jobs; their sacct state
+                # (CANCELLED) is not a result.
+                return
 
             # 1) Flag files are authoritative for completion. Overwrite
             #    slurm_state immediately so a stale RUNNING snapshot from
@@ -464,6 +650,8 @@ def poll_until_done(
                                 f"No flag file written. sacct state: {fs}\n"
                             )
 
+            _unregister(j.slurm_id for j in jobs if j.slurm_id and j.done_status is not None)
+
             # 3) Status line.
             n_done    = sum(1 for j in jobs if j.done_status == "DONE")
             n_metric  = sum(1 for j in jobs if j.done_status == "METRIC_FAILED")
@@ -488,6 +676,47 @@ def poll_until_done(
                 return
 
             time.sleep(poll_interval)
+
+
+def cancel_unfinished(jobs: List[Job], cfg: LauncherConfig, reason: str) -> List[Job]:
+    """
+    scancel every job of ``jobs`` that has no terminal status and wait until
+    Slurm no longer lists it. Their ``done_status`` stays None (the retry
+    logic is unchanged); ``slurm_state`` becomes ``CANCELLED``. Returns the
+    cancelled jobs. If scancel fails they stay in the live list, so the
+    master tries again when it exits.
+    """
+    todo = [j for j in jobs if j.slurm_id and j.done_status is None]
+    if not todo:
+        return []
+    ids = [j.slurm_id for j in todo]
+    listing = ", ".join(f"{j.name} ({j.slurm_id})" for j in todo)
+    lines = [f"[launcher] {reason}: cancelling {len(todo)} unfinished job(s): {listing}"]
+    print(lines[-1], flush=True)
+    if scancel(ids):
+        for j in todo:
+            j.slurm_state = "CANCELLED"
+            j.state = "CANCELLED"
+        _unregister(ids)
+        if _wait_until_gone(ids):
+            lines.append(f"[launcher] cancelled and gone from squeue: {', '.join(ids)}")
+            print(lines[-1], flush=True)
+        else:
+            lines.append(f"[launcher] WARNING: {', '.join(ids)} still listed by squeue "
+                         f"after {CANCEL_POLLS * CANCEL_POLL_WAIT:.0f} s; continuing "
+                         "(a later job in the same folder takes over OWNER)")
+            print(lines[-1], file=sys.stderr, flush=True)
+    else:
+        lines.append(f"[launcher] WARNING: scancel {' '.join(ids)} failed; continuing "
+                     "(a later job in the same folder takes over OWNER; the master "
+                     "tries scancel again when it exits)")
+        print(lines[-1], file=sys.stderr, flush=True)
+    try:
+        with (cfg.run_dir / "launcher.log").open("a") as log:
+            log.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+    return todo
 
 
 def write_summary(jobs: List[Job], cfg: LauncherConfig) -> None:
@@ -636,12 +865,22 @@ def submit_jobs(
     `job.done_status == "FAILED"` for the penalty branch.
     """
     specs = list(job_specs)
+    if _SHUTDOWN:
+        # Not even prepare_jobs: it would take over the folders (OWNER).
+        raise LauncherShutdown(f"master is exiting; {cfg.run_dir} not prepared")
     make_run_dir(cfg.run_dir, clean=clean)
     jobs = prepare_jobs(cfg, specs)
     print(f"[launcher] run_dir = {cfg.run_dir}")
     print(f"[launcher] prepared {len(jobs)} jobs")
 
-    submit_all(jobs)
-    poll_until_done(jobs, cfg, poll_interval=poll_interval, max_wait=max_wait)
+    reason = "launcher error"
+    try:
+        submit_all(jobs)
+        poll_until_done(jobs, cfg, poll_interval=poll_interval, max_wait=max_wait)
+        reason = "max_wait exceeded"
+    finally:
+        # Every job submitted here is finished or cancelled on the way out.
+        if not _SHUTDOWN:
+            cancel_unfinished(jobs, cfg, reason)
     write_summary(jobs, cfg)
     return jobs
