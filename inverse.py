@@ -1,6 +1,9 @@
 """
-Inverse design: BO over simulation parameters (mode="sim") against one
-target S(q). Everything a campaign sets is in a Python module that defines
+Inverse design against one target S(q): BO over simulation parameters
+(mode="sim", the two-step route, step 1), or BO over experimental conditions
+through a mapping file (CONFIG "mapping"; bo mode="map" with the mapping
+coefficients fixed: the one-step route, R7). Everything a campaign sets is
+in a Python module that defines
 ``CONFIG`` (see campaigns/inverse/inverse-example/config.py and the README)
 and runs as sbatch inverse_sequential.sbatch (parallel=False) or
 inverse_parallel.sbatch (parallel=True).
@@ -27,13 +30,23 @@ Startup checks, all before the first simulation:
      have a find_peaks peak. The target compared with itself gives loss 0;
   4. compare_q_range is None;
   5. rmax < L/2 on a grid over the search box (6 points per free axis plus
-     the initial point), with m = 4 + m_rel (n - 5) and n > m;
+     the initial point), with m = 4 + m_rel (n - 5) and n > m; with a
+     mapping, the grid is over the conditions, each point is mapped, and the
+     mapped (U0, n, m) must also pass datasets.check_mapped_params;
   6. the ParamSpace passes bo's mode="sim" rules; with m_rel, the lower
      bound of n is above 5 and m_rel lies in [0, 1];
   7. on a resume, the settings that define the run equal the ones in
      out_root/inverse_config.json (only max_evals and the parallel settings
      may change; batch_size and metric_kwargs are locked);
-  8. batch_size > 1 needs parallel=True (BATCH_NEEDS_PARALLEL).
+  8. batch_size > 1 needs parallel=True (BATCH_NEEDS_PARALLEL);
+  9. with a mapping: the search holds exactly the mapping's conditions, the
+     mapping's d_si is the dataset's, and the target's saxs-fft N_grid check
+     (2) runs as in mode="sim". The mapping file's content (sha256 and
+     coefficients) is locked like the target's md5.
+
+One rule picks the mode: "mapping" None -> the search holds simulation
+parameters (mode="sim"); a mapping file -> the search holds its conditions
+(mode="map", coefficients fixed from the file).
 """
 import argparse
 import copy
@@ -77,6 +90,7 @@ DEFAULTS = {
     "metric_kwargs": {},         # overrides of the metric's defaults, e.g. {"lambda_shift": 0.0}
     "mc_dfm_root": None,         # None: $MC_DFM_ROOT
     "parallel_cfg": None,
+    "mapping": None,             # None: search over simulation parameters; else a mapping file
 }
 PARALLEL_REQUIRED = ("partition", "account", "mem", "time", "module_loads", "venv_activate")
 PARALLEL_OPTIONAL = ("gpus", "poll_interval", "max_wait", "max_job_retries")
@@ -88,7 +102,8 @@ SIM_NAMES = ("U0", "r0", "n")    # must be in "search", plus one of m / m_rel
 # its content may not change. gp_log_dir is compared relative to out_root
 # when it lies inside it, so the whole run folder may move.
 LOCKED = ("target_md5", "N", "density", "search", "potential", "metric", "metric_kwargs",
-          "scattering", "compare_q_range", "bo_seed", "batch_size", "gp_log_dir", "steps")
+          "scattering", "compare_q_range", "bo_seed", "batch_size", "gp_log_dir", "steps",
+          "mapping")
 
 RMAX_GRID_POINTS = 6
 
@@ -179,13 +194,22 @@ def normalize_config(raw, overrides=None):
         raise ConfigError("search must be a dict {name: spec}")
     if "density" in search:
         raise ConfigError("density is the CONFIG key 'density' (fixed), not a search entry")
-    absent = [k for k in SIM_NAMES if k not in search]
-    if absent or ("m" in search) == ("m_rel" in search):
-        raise ConfigError(
-            "search must hold U0, r0, n and exactly one of m, m_rel (each free or "
-            f"\"fixed\"); missing {absent}, m/m_rel: "
-            f"{[k for k in ('m', 'm_rel') if k in search]}"
-        )
+    if cfg["mapping"] is not None:
+        cfg["mapping"] = str(Path(cfg["mapping"]).expanduser().resolve())
+        names = load_cfg_mapping(cfg).condition_names
+        if set(search) != set(names):
+            raise ConfigError(
+                f"with a mapping the search holds exactly its conditions {list(names)} "
+                f"(each free or \"fixed\"); got {sorted(search)}"
+            )
+    else:
+        absent = [k for k in SIM_NAMES if k not in search]
+        if absent or ("m" in search) == ("m_rel" in search):
+            raise ConfigError(
+                "search must hold U0, r0, n and exactly one of m, m_rel (each free or "
+                f"\"fixed\"); missing {absent}, m/m_rel: "
+                f"{[k for k in ('m', 'm_rel') if k in search]}"
+            )
     cfg["search"] = {name: _plain(spec) for name, spec in search.items()}
 
     cfg["target"] = str(Path(cfg["target"]).expanduser().resolve())
@@ -211,6 +235,22 @@ def normalize_config(raw, overrides=None):
         if miss:
             raise ConfigError(f"parallel_cfg is missing: {miss}")
     return cfg
+
+
+def load_cfg_mapping(cfg):
+    """The CONFIG mapping file as a ``mapping.Mapping``, or None."""
+    if cfg.get("mapping") is None:
+        return None
+    import mapping
+    try:
+        return mapping.load_mapping(cfg["mapping"])
+    except mapping.MappingError as exc:
+        raise ConfigError(f"mapping: {exc}") from exc
+
+
+def run_mode(cfg):
+    """bo mode: "map" (BO over conditions through the mapping) or "sim"."""
+    return "sim" if cfg.get("mapping") is None else "map"
 
 
 def _metric_kwargs(cfg):
@@ -253,9 +293,12 @@ def _gp_log_key(gp_log_dir, out_root):
 
 
 def locked_fields(cfg):
-    out = {key: _plain(cfg[key]) for key in LOCKED}
+    out = {key: _plain(cfg[key]) for key in LOCKED if key != "mapping"}
     out["gp_log_dir"] = _gp_log_key(cfg["gp_log_dir"], cfg["out_root"])
-    return out
+    # The mapping's content, not its path: the file may move, not change.
+    m = load_cfg_mapping(cfg)
+    out["mapping"] = None if m is None else _plain(m.locked())
+    return {key: out[key] for key in LOCKED}
 
 
 def _snapshot_locked(snapshot):
@@ -266,6 +309,8 @@ def _snapshot_locked(snapshot):
     old = dict(snapshot["locked"])
     # Runs started before metric_kwargs was a CONFIG key used the defaults.
     old.setdefault("metric_kwargs", {})
+    # Runs started before "mapping" existed searched simulation parameters.
+    old.setdefault("mapping", None)
     gp = old.get("gp_log_dir")
     if gp and Path(gp).is_absolute() and snapshot.get("out_root"):
         old["gp_log_dir"] = _gp_log_key(gp, snapshot["out_root"])
@@ -284,8 +329,14 @@ def _import_pipeline(cfg):
 
 
 def build_param_space(bo, cfg):
-    ps = bo.ParamSpace({**cfg["search"], "density": {"fixed": cfg["density"]}})
-    bo._validate_param_mode(ps, "sim")
+    m = load_cfg_mapping(cfg)
+    if m is None:
+        ps = bo.ParamSpace({**cfg["search"], "density": {"fixed": cfg["density"]}})
+    else:
+        # Coefficients fixed from the file; density is dataset.sim.density.
+        ps = bo.ParamSpace({**{k: {"fixed": v} for k, v in m.coefficients.items()},
+                            **cfg["search"]})
+    bo._validate_param_mode(ps, run_mode(cfg))
     return ps
 
 
@@ -321,7 +372,7 @@ def build_objective(bo, cfg, ps, dataset):
     scattering = SCATTERING[cfg["scattering"]]
     return bo.make_global_objective(
         [dataset], ps, ffpath=str(FORMFACTOR), out_root=cfg["out_root"], trim_tail=0,
-        sim_defaults=sim_defaults(cfg), mode="sim",
+        sim_defaults=sim_defaults(cfg), mode=run_mode(cfg),
         scattering_method=scattering["scattering_method"],
         scattering_kwargs=dict(scattering["scattering_kwargs"]),
         metric=metric["metric"], compare_q_range=cfg["compare_q_range"],
@@ -411,6 +462,9 @@ def check_rmax_grid(cfg, n_points=RMAX_GRID_POINTS):
     from simulation import resolve_table_bounds
 
     search = cfg["search"]
+    m_obj = load_cfg_mapping(cfg)
+    if m_obj is not None:
+        return _check_mapped_grid(cfg, m_obj, n_points)
     m_name = "m_rel" if "m_rel" in search else "m"
     names = ("U0", "r0", "n", m_name)
     axes = [_axis(search[name], n_points) for name in names]
@@ -428,6 +482,52 @@ def check_rmax_grid(cfg, n_points=RMAX_GRID_POINTS):
             worst = {"rmax": float(b["rmax"]), "L_half": float(b["L"] / 2), "at": point}
     worst["grid_points"] = int(np.prod([len(a) for a in axes]))
     return worst
+
+
+def _check_mapped_grid(cfg, m_obj, n_points):
+    """Check 5 with a mapping: every condition-grid point mapped, then
+    check_mapped_params, n > m and rmax < L/2 on the mapped parameters."""
+    from datasets import check_mapped_params
+    from simulation import resolve_table_bounds
+
+    names = m_obj.condition_names
+    axes = [_axis(cfg["search"][name], n_points) for name in names]
+    worst = None
+    for values in itertools.product(*axes):
+        point = {name: float(v) for name, v in zip(names, values)}
+        p = m_obj.apply(point)
+        try:
+            check_mapped_params(p["U0"], p["n"], p["m"])
+        except ValueError as exc:
+            raise ConfigError(f"search box point {point}: {exc}") from exc
+        if not p["n"] > p["m"]:
+            raise ConfigError(f"search box point {point} maps to n <= m ({p})")
+        try:
+            b = resolve_table_bounds(p["U0"], p["n"], p["m"], p["r0"], N=cfg["N"],
+                                     density=cfg["density"])
+        except ValueError as exc:
+            raise ConfigError(f"search box point {point} (mapped {p}): {exc}") from exc
+        if worst is None or b["rmax"] > worst["rmax"]:
+            worst = {"rmax": float(b["rmax"]), "L_half": float(b["L"] / 2), "at": point,
+                     "mapped": {k: float(v) for k, v in p.items()}}
+    worst["grid_points"] = int(np.prod([len(a) for a in axes]))
+    return worst
+
+
+def check_mapping(cfg, bo, dataset):
+    """Check 9 (with a mapping): d_si as the dataset's, target N_grid as mode="sim"."""
+    m = load_cfg_mapping(cfg)
+    if m is None:
+        return None
+    if float(m.constants["d_si"]) != float(dataset.exp.d_si):
+        raise ConfigError(f"mapping d_si={m.constants['d_si']} but the dataset has "
+                          f"d_si={dataset.exp.d_si}")
+    try:
+        bo._check_target_n_grid([dataset], dict(SCATTERING[cfg["scattering"]]["scattering_kwargs"]), 0)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    return {"path": m.path, "sha256": m.sha256, "form": m.form,
+            "coefficients": dict(m.coefficients), "source": dict(m.source)}
 
 
 def git_state():
@@ -476,6 +576,7 @@ def preflight(cfg, bo):
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     dataset = build_dataset(cfg)
+    mapping_info = check_mapping(cfg, bo, dataset)
     rmax = check_rmax_grid(cfg)
     try:
         objective = build_objective(bo, cfg, ps, dataset)   # N_grid check (C6)
@@ -484,6 +585,8 @@ def preflight(cfg, bo):
     snapshot = read_snapshot(cfg["out_root"])
     check_resume_settings(cfg, snapshot)
     info = {"target": target, "rmax": rmax, "git": git_state()}
+    if mapping_info is not None:
+        info["mapping"] = mapping_info
     peak = ("dispersed (no first peak)" if target["dispersed"] else
             f"first peak q1={target['q1']:.5g} (S={target['s_peak']:.3g}, "
             f"{target['n_peaks_found']} peak(s))")
@@ -493,7 +596,11 @@ def preflight(cfg, bo):
         f"{target['q_range'][0]:.5g}-{target['q_range'][1]:.5g}; {peak}; self-loss 0\n"
         f"[inverse] rmax < L/2 on {rmax['grid_points']} grid points; worst rmax="
         f"{rmax['rmax']:.3f} (L/2={rmax['L_half']:.3f}) at {rmax['at']}\n"
-        f"[inverse] commit {info['git']['commit']}"
+        + (f"[inverse] mapping {mapping_info['path']}\n"
+           f"[inverse]   sha256 {mapping_info['sha256']}; {mapping_info['form']}; "
+           f"coefficients {mapping_info['coefficients']}; BO over conditions "
+           f"{list(cfg['search'])}\n" if mapping_info else "")
+        + f"[inverse] commit {info['git']['commit']}"
         + (" (tracked files modified)" if info["git"]["dirty"] else "")
     )
     if info["git"]["dirty"]:
@@ -523,6 +630,7 @@ def write_snapshot(cfg, info, snapshot, config_path):
             "out_root": cfg["out_root"],
             "target": info["target"],
             "rmax_check": info["rmax"],
+            **({"mapping": info["mapping"]} if "mapping" in info else {}),
             "locked": locked_fields(cfg),
             "starts": [],
         }
@@ -588,6 +696,9 @@ def write_summary(cfg, bo, snapshot=None):
             "shift": num(rec, "shift"),
             **{k: num(rec, k) for k in ("U0", "r0", "n", "m", "m_rel", "density")},
         }
+        if cfg.get("mapping") is not None:
+            from datasets import CONDITION_NAMES
+            best.update({k: num(rec, k) for k in CONDITION_NAMES})
     summary = {
         "description": cfg["description"],
         "written": datetime.now().isoformat(timespec="seconds"),
@@ -606,6 +717,8 @@ def write_summary(cfg, bo, snapshot=None):
         "complete": len(successful) >= cfg["max_evals"],
         "best": best,
     }
+    if cfg.get("mapping") is not None:
+        summary["mapping"] = cfg["mapping"]
     (out_root / f"{SUMMARY}.json").write_text(json.dumps(summary, indent=2) + "\n")
 
     lines = [
@@ -614,6 +727,7 @@ def write_summary(cfg, bo, snapshot=None):
         f"out_root    : {summary['out_root']}",
         f"target      : {summary['target']['path']}",
         f"target md5  : {summary['target']['md5']}",
+        *([f"mapping     : {summary['mapping']}"] if "mapping" in summary else []),
         f"commit(s)   : {', '.join(commits) or 'unknown'}"
         + (f"  ({summary['dirty_starts']} start(s) with modified files)"
            if summary["dirty_starts"] else ""),
@@ -632,6 +746,10 @@ def write_summary(cfg, bo, snapshot=None):
                              if best[k] is not None)
             + (f"  m_rel = {best['m_rel']:.6g}" if best["m_rel"] is not None else ""),
         ]
+        if cfg.get("mapping") is not None:
+            from datasets import CONDITION_NAMES
+            lines.append("  conditions: " + "  ".join(
+                f"{k} = {best[k]:.6g}" for k in CONDITION_NAMES if best.get(k) is not None))
     else:
         lines.append("best        : no successful evaluation yet")
     (out_root / f"{SUMMARY}.txt").write_text("\n".join(lines) + "\n")

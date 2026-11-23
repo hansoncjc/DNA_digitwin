@@ -64,7 +64,7 @@ from metrics import (
     load_shift_rmse_components,
     shift_rmse_params,
 )
-from datasets import PHYSICS_COEFFS, check_mapped_params
+from datasets import CONDITION_NAMES, PHYSICS_COEFFS, check_mapped_params, physics_map
 
 # ------------------------- Evaluation failures ------------------------- #
 
@@ -83,6 +83,10 @@ _SIM_PARAMS = {"density", "r0", "U0", "n", "m", "m_rel"}
 
 # Parameters that correspond to mapping coefficients (datasets.physics_map)
 _MAP_PARAMS = set(PHYSICS_COEFFS)
+
+# Experimental conditions mode="map" may also take from the ParamSpace (BO
+# over conditions with the coefficients fixed: one-step inverse design).
+_COND_PARAMS = set(CONDITION_NAMES)
 
 # Coefficient columns of bo_trajectory.csv and sim_params_*.csv, then the
 # simulation parameters. Written in both modes (blank coefficients in "sim",
@@ -124,6 +128,13 @@ def _m_rel_column(G: Dict[str, Any]) -> Dict[str, Any]:
     return {"m_rel": float(G["m_rel"]) if "m_rel" in G else ""}
 
 
+def _condition_columns(G: Dict[str, Any]) -> Dict[str, Any]:
+    """One column per experimental condition the ParamSpace holds (mode="map"),
+    in ``CONDITION_NAMES`` order; none when it holds none, so runs without
+    conditions in the ParamSpace write the same files as before."""
+    return {name: float(G[name]) for name in CONDITION_NAMES if name in G}
+
+
 def _spec_range(spec: Dict[str, Any]) -> Tuple[float, float]:
     """(lo, hi) of a ParamSpace spec; a fixed spec gives (value, value)."""
     if "fixed" in spec:
@@ -158,9 +169,11 @@ def _validate_param_mode(ps, mode: str) -> None:
     """
     Ensure that the ParamSpace configuration is consistent with the chosen mode.
 
-    mode = "map": exactly the physics-based mapping coefficients
-        (``datasets.PHYSICS_COEFFS``), each free or "fixed".
-        n, m, r0, U0 come from the mapping; density from ``dataset.sim``.
+    mode = "map": every physics-based mapping coefficient
+        (``datasets.PHYSICS_COEFFS``), each free or "fixed", and optionally
+        experimental conditions (``datasets.CONDITION_NAMES``), each free or
+        "fixed". n, m, r0, U0 come from the mapping; density from
+        ``dataset.sim``.
     mode = "sim": only direct simulation parameters (density, r0, U0, n, m,
         or m_rel in place of m) are allowed.
     """
@@ -170,12 +183,13 @@ def _validate_param_mode(ps, mode: str) -> None:
     g_names = set(ps.cfg)
 
     if mode == "map":
-        extra = g_names - _MAP_PARAMS
+        extra = g_names - _MAP_PARAMS - _COND_PARAMS
         missing = _MAP_PARAMS - g_names
         if extra or missing:
             raise ValueError(
                 "ParamSpace configuration is inconsistent with mode='map': it must hold "
-                f"exactly the coefficients {list(PHYSICS_COEFFS)} (free or fixed). "
+                f"the coefficients {list(PHYSICS_COEFFS)} (free or fixed), and may hold "
+                f"the conditions {list(CONDITION_NAMES)}. "
                 f"Not allowed: {sorted(extra)}; "
                 f"missing: {sorted(missing)}. Density is dataset.sim.density "
                 "(alpha was removed 2026-10-09)."
@@ -441,14 +455,18 @@ def _write_failed_iteration_block(
     resume found without a block (``run_bo_resumable``; no rows).
     """
     write_header = not os.path.exists(filepath)
+    # Condition columns (mode="map" with conditions in the ParamSpace) after
+    # the usual ones; none otherwise.
+    columns = _TRAJECTORY_PARAM_COLUMNS + tuple(
+        c for c in CONDITION_NAMES if any(c in r for r in records or []))
     with open(filepath, "a", newline="") as f:
         writer = csv.writer(f)
         if write_header:
-            writer.writerow(list(_TRAJECTORY_PARAM_COLUMNS))
+            writer.writerow(list(columns))
         writer.writerow([f"# Iteration {iteration}", "EVALUATION", status, reason])
         if records:
             writer.writerows([
-                [r.get(c, "") for c in _TRAJECTORY_PARAM_COLUMNS]
+                [r.get(c, "") for c in columns]
                 for r in records
             ])
 
@@ -473,6 +491,7 @@ def _failed_trajectory_record(eval_id, ds_id, G, plan=None, reason="FAILED"):
         "r0": "ERROR",
         "U0": "ERROR",
         **_m_rel_column(G),
+        **_condition_columns(G),
     }
     if plan is not None:
         rec.update({
@@ -510,10 +529,13 @@ def _resolve_sim_params(ds, G: Dict[str, Any], mode: str):
     """
     Simulation inputs ``(density, r0, U0, n, m)`` for one dataset.
 
-    mode="map": ``dataset.physics_params`` with the mapping coefficients
-    (``datasets.PHYSICS_COEFFS``); density is ``dataset.sim.density``. A
-    mapped point outside ``datasets.check_mapped_params`` raises ValueError,
-    which fails the evaluation (it is logged, not fed to the GP).
+    mode="map": ``datasets.physics_map`` with the mapping coefficients
+    (``datasets.PHYSICS_COEFFS``) at the dataset's condition; each condition
+    (``datasets.CONDITION_NAMES``) comes from the ParamSpace when it is there,
+    else from ``dataset.exp`` (the same order as mode="sim": ParamSpace, then
+    dataset). Density is ``dataset.sim.density``. A mapped point outside
+    ``datasets.check_mapped_params`` raises ValueError, which fails the
+    evaluation (it is logged, not fed to the GP).
 
     mode="sim": density, r0, U0, n, m from the ParamSpace, then ``dataset.sim``.
     With ``m_rel`` in the ParamSpace, ``m = 4 + m_rel (n - 5)`` (``n`` from the
@@ -525,7 +547,13 @@ def _resolve_sim_params(ds, G: Dict[str, Any], mode: str):
                 f"Dataset {ds.id}: mode='map' takes density from dataset.sim.density, "
                 "which is None."
             )
-        p = ds.physics_params(**{name: float(G[name]) for name in PHYSICS_COEFFS})
+        cond = {name: G[name] if name in G else getattr(ds.exp, name)
+                for name in CONDITION_NAMES}
+        if cond["L_bridge"] is None:
+            raise ValueError("L_bridge is required by the physics-based mapping but is None.")
+        p = physics_map(*(cond[name] for name in CONDITION_NAMES),
+                        **{name: float(G[name]) for name in PHYSICS_COEFFS},
+                        d_si=ds.exp.d_si)
         check_mapped_params(p["U0"], p["n"], p["m"])
         return float(ds.sim.density), p["r0"], p["U0"], p["n"], p["m"]
 
@@ -595,6 +623,7 @@ def _parallel_prepare_eval_jobs(
                 "r0": float(r0),
                 "U0": float(U0),
                 **_m_rel_column(G),
+                **_condition_columns(G),
             }
             param_path = os.path.join(save_dir, f"sim_params_{ds.id}.csv")
             with open(param_path, "w", newline="") as f:
@@ -718,6 +747,7 @@ def _collect_parallel_eval_loss(
                 "r0":      float(plan["r0"]),
                 "U0":      float(plan["U0"]),
                 **_m_rel_column(G),
+                **_condition_columns(G),
                 **_audit_fields(done_data.get("result"), plan["r0"], str(job.sim_dir)),
             })
         elif job is not None and job.done_status == "METRIC_FAILED":
@@ -932,8 +962,12 @@ def make_global_objective(
     ----
     "map" (default):
         r0, U0, n, m come from the physics-based mapping
-        ``dataset.physics_params(k, A, K_s, a_m, delta)``; the ParamSpace must
-        hold exactly these coefficients (free or fixed). Density is
+        ``datasets.physics_map`` with the coefficients k, A, K_s, a_m, delta,
+        which the ParamSpace must hold (free or fixed). The conditions
+        L_bridge, C_anchor, C_NaCl come from the ParamSpace when it holds
+        them (one-step inverse design: coefficients fixed, conditions free),
+        else from ``dataset.exp``; the ones in the ParamSpace get their own
+        trajectory and sim_params columns. Density is
         ``dataset.sim.density`` (fixed; the former ``alpha`` coefficient was
         removed 2026-10-09). A mapped point below ``datasets.check_mapped_params``
         limits fails the evaluation.
@@ -1050,6 +1084,7 @@ def make_global_objective(
                     "r0": float(r0),
                     "U0": float(U0),
                     **_m_rel_column(G),
+                    **_condition_columns(G),
                 }
                 param_path = os.path.join(save_dir, f"sim_params_{ds.id}.csv")
                 with open(param_path, "w", newline="") as f:
@@ -1126,6 +1161,7 @@ def make_global_objective(
                     "r0": float(r0),
                     "U0": float(U0),
                     **_m_rel_column(G),
+                    **_condition_columns(G),
                     **_audit_fields(sim_result, r0, save_dir),
                 })
 

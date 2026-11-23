@@ -1,0 +1,36 @@
+{
+  "format": "digitwin-mapping",
+  "version": 1,
+  "form": "physics",
+  "conditions": [
+    "L_bridge",
+    "C_anchor",
+    "C_NaCl"
+  ],
+  "outputs": [
+    "r0",
+    "U0",
+    "n",
+    "m"
+  ],
+  "coefficients": {
+    "k": 0.65,
+    "A": 1.2,
+    "K_s": 0.07,
+    "a_m": 3.2,
+    "delta": 3.2
+  },
+  "constants": {
+    "d_si": 24.6,
+    "fixed_linker_nm": 32.04,
+    "dsdna_rise_nm": 0.34,
+    "c_anchor_ref": 100.0
+  },
+  "source": {
+    "run": "R3.1",
+    "name": "GROUND_TRUTH",
+    "file": "campaigns/r3.1-gt/gt_config.py",
+    "sha256": "958e226dafad5e247c39a1d53b7cf146bfd3663b1acdd22fe696ba918d528266",
+    "note": "coefficients that generated the R3.1 virtual ground truth"
+  }
+}

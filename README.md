@@ -33,14 +33,16 @@ DNA_digitwin/
 ├── scattering.py         # GSD → I(q)/S(q): convert_to_SAXS, convert_to_SAXS_fft, extract_exp_sq
 ├── metrics.py            # compare_saxs_curves, compare_to_exp[_saxsfft] (MSE / weighted APDist + plots)
 ├── inverse.py            # inverse design driver: one config module per campaign
+├── mapping.py            # mapping files: save / load a trained mapping (one JSON file)
 ├── campaigns/
-│   ├── r3.1-gt/          # R3.1: virtual ground truth (conditions, coefficients, generation, QC)
-│   ├── r3.2-physics-validate/  # R3.2: BO training of the physics-based mapping on it
+│   ├── r3.1-gt/          # R3.1: virtual ground truth (conditions, coefficients, generation, QC); mapping/ground_truth.json
+│   ├── r3.2-physics-validate/  # R3.2: BO training of the physics-based mapping on it; mapping/r3.2_eval056.json
 │   ├── r4-measured/      # R4: physics-based mapping trained on six measured SAXS curves (data/ in the repo)
 │   ├── r5.1-predict/     # R5.1: S(q) predicted with the R3.2 eval-56 coefficients at new conditions
 │   └── inverse/
 │       ├── inverse-example/  # inverse.py example config (smoke tests), sbatch templates
 │       ├── inverse-targets/  # target S(q) generation for inverse campaigns
+│       ├── r6.*/, r7.1-onestep-fcc0.05/  # one config per campaign (R7.1: one-step, BO over conditions)
 │       └── analysis/         # pack_run.py (cluster: run summary + tar), structure_metrics.py (local: S(q) loss, q1, PTM, g(r))
 ├── parallel/             # Slurm launcher: submits 1 GPU job per dataset per BO iteration
 │   ├── __init__.py
@@ -527,8 +529,11 @@ across the change) reads as one sequence.
 
 ## Inverse design (`inverse.py`)
 
-`inverse.py` runs BO over simulation parameters (`mode="sim"`) against one
-target S(q). A campaign is one Python module that defines `CONFIG`; the
+`inverse.py` runs BO against one target S(q), over simulation parameters
+(`mode="sim"`; the two-step route, step 1) or, with `CONFIG["mapping"]`, over
+experimental conditions through a mapping file (the one-step route, R7; see
+**Mapping files and one-step inverse design** below). A campaign is one
+Python module that defines `CONFIG`; the
 driver holds no campaign values. `campaigns/inverse/inverse-example/config.py`
 shows the format (a 3-evaluation smoke test, not a campaign);
 `config_batch.py` next to it is the batch-BO example (3 batches of 4). Target
@@ -557,7 +562,8 @@ Smoke-test overrides: `--out DIR`, `--target FILE`, `--parallel true|false`,
 | `target` | Target S(q), `.npy` `(N, 2)` `[q (1/Å), S]` |
 | `N` | Particle number; the only forward-model argument (README **Forward model**) |
 | `density` | Fixed number density |
-| `search` | Flat `ParamSpace`: `U0`, `r0`, `n` and exactly one of `m`, `m_rel`, each `{"bounds": (lo, hi), "init": x}` or `{"fixed": x}` |
+| `search` | Flat `ParamSpace`. Without a mapping: `U0`, `r0`, `n` and exactly one of `m`, `m_rel`. With a mapping: exactly its conditions (`L_bridge`, `C_anchor`, `C_NaCl`). Each `{"bounds": (lo, hi), "init": x}` or `{"fixed": x}` |
+| `mapping` | Default `None` (search over simulation parameters). A mapping file (`mapping.py`): BO over its conditions, coefficients fixed from the file (bo `mode="map"`). Its content (sha256, coefficients) is locked on a resume; runs started before this key existed resume with `None` |
 | `max_evals` | Successful evaluations in total: first batch and acquisitions, resumes included (README **Batch BO**) |
 | `out_root` | Output directory (relative paths: from the working directory) |
 | `gp_log_dir` | GP log (C15); default `<out_root>/gp_log` |
@@ -586,7 +592,9 @@ Any failure stops the run before the first simulation (exit code 2):
    target)` must be 0 (this also checks the asymptote band);
 4. `compare_q_range` is `None`;
 5. `rmax < L/2` and `n > m` on a grid over the search box (6 points per
-   free axis plus the initial point), with `m = 4 + m_rel (n - 5)`;
+   free axis plus the initial point), with `m = 4 + m_rel (n - 5)`; with a
+   mapping the grid is over the conditions, each point is mapped and the
+   mapped `(U0, n, m)` must also pass `datasets.check_mapped_params`;
 6. the `ParamSpace` passes the `mode="sim"` rules; with `m_rel`, the lower
    bound (or fixed value) of `n` is above 5 and `m_rel` lies in `[0, 1]`;
 7. on a resume, the target's md5, `N`, `density`, `search`, the three names,
@@ -603,6 +611,8 @@ Any failure stops the run before the first simulation (exit code 2):
    long as with `batch_size=1` while the GP is refitted only once per q
    evaluations and each point is chosen with less data. A batch pays off
    only when its q simulations run at the same time, one GPU job each.
+9. with a mapping: the search holds exactly its conditions, its `d_si` is
+   the dataset's, and check 2 (`N_grid`) runs as without one.
 
 ### Outputs
 
@@ -615,7 +625,36 @@ The usual BO outputs (`bo_trajectory.csv`, `loss_components.txt`,
 - `inverse_summary.json` / `.txt`: best evaluation (id, folder, loss, `rmse`,
   `shift`, U0, r0, n, m, `m_rel`, density), counts of successful, failed and
   abandoned evaluations, target md5 and the commit(s). Written at the end;
-  `--summary` rewrites it at any time.
+  `--summary` rewrites it at any time. With a mapping, also the mapping
+  file and the conditions of the best evaluation.
+
+### Mapping files and one-step inverse design
+
+A trained mapping is handed over as one JSON file (`mapping.py`): form
+(`physics` so far), conditions, outputs, coefficients, the fixed constants of
+`datasets.physics_map` (a file whose constants differ from the code is
+refused) and its source. `mapping.load_mapping(path).apply({"L_bridge": ...,
+"C_anchor": ..., "C_NaCl": ...})` returns `{r0, U0, n, m}`.
+
+```bash
+# coefficients of one evaluation of a training bo_trajectory.csv -> mapping file
+python mapping.py export TRAJECTORY EVAL_ID OUT.json --run R3.2
+```
+
+Files in the repo: `campaigns/r3.2-physics-validate/mapping/r3.2_eval056.json`
+(R3.2 best evaluation; exported from
+`campaigns/r6.10-translation/inputs/r3.2_eval_056.csv`) and
+`campaigns/r3.1-gt/mapping/ground_truth.json` (written by
+`campaigns/r3.1-gt/write_mapping.py`). Training does not write a mapping
+file by itself yet; export it after the run.
+
+One-step inverse design: `CONFIG["mapping"]` names the file and `search`
+holds its conditions. bo `mode="map"` then takes each condition from the
+`ParamSpace` when it is there and from `dataset.exp` otherwise (training:
+none in the `ParamSpace`, files as before); the conditions in the
+`ParamSpace` get their own columns after `m_rel` in `bo_trajectory.csv`,
+`sim_params_*.csv` and failed rows, so a resume reads them back. Campaign:
+`campaigns/inverse/r7.1-onestep-fcc0.05/` (config and submission steps).
 
 ### `parallel=False` and `parallel=True`
 

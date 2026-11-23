@@ -1,0 +1,37 @@
+{
+  "format": "digitwin-mapping",
+  "version": 1,
+  "form": "physics",
+  "conditions": [
+    "L_bridge",
+    "C_anchor",
+    "C_NaCl"
+  ],
+  "outputs": [
+    "r0",
+    "U0",
+    "n",
+    "m"
+  ],
+  "coefficients": {
+    "k": 0.6520927389752293,
+    "A": 1.2028501815438974,
+    "K_s": 0.07251128398087511,
+    "a_m": 3.2087563613999377,
+    "delta": 3.3893817640184665
+  },
+  "constants": {
+    "d_si": 24.6,
+    "fixed_linker_nm": 32.04,
+    "dsdna_rise_nm": 0.34,
+    "c_anchor_ref": 100.0
+  },
+  "source": {
+    "run": "R3.2",
+    "eval_id": 56,
+    "file": "campaigns/r6.10-translation/inputs/r3.2_eval_056.csv",
+    "sha256": "9a60dc1a700e846e916acd9bb9203ac4b484c69828cd2d36c5ea51069d60fe8e",
+    "rows": 24,
+    "note": "best evaluation of R3.2 (100 evaluations); rows of iteration 56 of the R3.2 bo_trajectory.csv, provenance in campaigns/r6.10-translation/inputs/provenance.json"
+  }
+}

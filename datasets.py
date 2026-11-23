@@ -26,6 +26,11 @@ C_ANCHOR_REF = 100.0
 #: Global coefficients of the physics-based mapping, in trajectory column order.
 PHYSICS_COEFFS = ("k", "A", "K_s", "a_m", "delta")
 
+#: Experimental conditions read by physics_map, in its argument order. In
+#: bo mode="map" each is taken from the ParamSpace when it is there (one-step
+#: inverse design, BO over conditions), else from dataset.exp (training).
+CONDITION_NAMES = ("L_bridge", "C_anchor", "C_NaCl")
+
 # Lower limits of the mapped parameters. U0 >= 0.5 with n >= 5.5 and m >= 4
 # is where task 0a checked that pairs stay out of r < rmin = 0.5 r0;
 # n - m >= 1 is the inverse-design box (m <= n - 1).
