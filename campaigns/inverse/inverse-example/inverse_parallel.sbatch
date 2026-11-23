@@ -3,7 +3,7 @@
 # evaluation (partition etc. from CONFIG["parallel_cfg"]) and waits for it.
 # Run it from the repo copy pinned for this campaign (INV_REPO); the GPU jobs
 # import the same copy. Resubmitting the same command resumes the run
-# (README "Resuming a run"); first scancel GPU jobs left by the old master.
+# (README "Resuming a run"); first check squeue for GPU jobs left by the old master.
 #   sbatch --export=ALL,INV_REPO=/path/to/pinned/DNA_digitwin,INV_CONFIG=/path/to/config.py \
 #          $INV_REPO/campaigns/inverse/inverse-example/inverse_parallel.sbatch
 # Extra inverse.py arguments (smoke tests): INV_ARGS="--out OUT --steps 2000000 --parallel true".
@@ -15,6 +15,7 @@
 #SBATCH -c 2
 #SBATCH --mem=16G
 #SBATCH --time=80:00:00
+#SBATCH --signal=B:TERM@120
 #SBATCH -o inv_par_%j.out
 #SBATCH -e inv_par_%j.out
 
@@ -30,5 +31,8 @@ source /gscratch/zeelab/hanson/codes/HOOMD-start/hoomd-venv/bin/activate
 export PYTHONPATH="$INV_REPO:$MC_DFM_ROOT:${PYTHONPATH:-}"
 
 echo "job ${SLURM_JOB_ID:-local} on ${SLURM_NODELIST:-local}, start $(date)"
-python3 -u "$INV_REPO/inverse.py" "$INV_CONFIG" ${INV_ARGS:-}
+# 120 s before the walltime Slurm sends TERM to this shell (--signal above);
+# run_forward_term passes it to python, which scancels its GPU jobs and exits.
+. "$INV_REPO/parallel/forward_term.sh"
+run_forward_term python3 -u "$INV_REPO/inverse.py" "$INV_CONFIG" ${INV_ARGS:-}
 echo "end $(date)"

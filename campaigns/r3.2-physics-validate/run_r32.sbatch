@@ -13,6 +13,7 @@
 #SBATCH -c 2
 #SBATCH --mem=16G
 #SBATCH --time=80:00:00
+#SBATCH --signal=B:TERM@120
 #SBATCH -o r32_master_%j.out
 #SBATCH -e r32_master_%j.out
 
@@ -28,4 +29,7 @@ module load cuda/11.8
 source "$R32_VENV"
 export PYTHONPATH="$REPO:$MC_DFM_ROOT:${PYTHONPATH:-}"
 
-python3 -u "$REPO/campaigns/r3.2-physics-validate/run_r32.py" --gt "$R32_GT" --out "$R32_OUT" ${R32_ARGS:-}
+# 120 s before the walltime Slurm sends TERM to this shell (--signal above);
+# run_forward_term passes it to python, which scancels its GPU jobs and exits.
+. "$REPO/parallel/forward_term.sh"
+run_forward_term python3 -u "$REPO/campaigns/r3.2-physics-validate/run_r32.py" --gt "$R32_GT" --out "$R32_OUT" ${R32_ARGS:-}

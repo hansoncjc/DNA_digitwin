@@ -6,7 +6,9 @@ Public API:
 
 The master calls ``install_signal_handlers()`` once (main thread) so that
 SIGTERM cancels its GPU jobs; ``atexit`` does the same on a normal exit or an
-uncaught exception (``cancel_live_jobs``).
+uncaught exception (``cancel_live_jobs``). At the walltime the SIGTERM comes
+from the master sbatch script (``--signal=B:TERM@120`` and
+``parallel/forward_term.sh``).
 """
 from .submit_parallel import (  # noqa: F401
     Job,

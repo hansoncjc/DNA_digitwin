@@ -458,12 +458,21 @@ Steps after maintenance, a walltime end or a preemption:
 1. Check that the old master has stopped (`squeue -u $USER`). Run one master
    per `out_root`.
 2. With `parallel=True`, a master that exits (normal end, an exception,
-   or SIGTERM at its walltime or from `scancel`) cancels the GPU jobs it
-   submitted; its log ends with
-   `[launcher] SIGTERM: cancelled N job(s)` (or `master exit: ...`). Only a
-   master killed without SIGTERM (SIGKILL, node failure, out of memory)
-   leaves them running, and so does a failed `scancel` (the log then says
-   `scancel failed; cancel by hand: scancel <ids>`). Check with
+   or a TERM) cancels the GPU jobs it submitted; its log ends with
+   `[launcher] SIGTERM: cancelled N job(s)` (or `master exit: ...`).
+   - Walltime: the master sbatch scripts (`run_r4.sbatch`, `run_r32.sbatch`,
+     `inverse_parallel.sbatch`) set `#SBATCH --signal=B:TERM@120`. Slurm
+     sends TERM to the batch shell 120 s before the walltime, and
+     `parallel/forward_term.sh` passes it on to python. Slurm's own
+     SIGTERM at the walltime is not enough: in smoke test B (2026-11-22)
+     the master was killed without cancelling, and its GPU jobs ran on.
+   - To stop a master by hand, use `scancel --batch --signal=TERM <master id>`.
+     A plain `scancel <master id>` is like the walltime kill and may leave
+     the GPU jobs running.
+   - GPU jobs are left running when the master is killed without that TERM
+     (plain `scancel`, SIGKILL, node failure, out of memory), when the
+     master script does not forward it, or when `scancel` fails (the log
+     then says `scancel failed; cancel by hand: scancel <ids>`). Check with
    `squeue -u $USER -o "%i %j"`: the GPU jobs are named `i<eval>_d<k>`, e.g.
    `i37_d00` for eval 37, dataset `d0` (retries add `_r<n>`); `scancel` any
    that are left. Left running they only write into abandoned folders.
@@ -648,9 +657,13 @@ GPU job (`parallel_cfg`) and polls its flag files.
   newer job's flags or S(q). Files of an earlier attempt (a partial GSD,
   `potential_energy.csv`) stay in the folder; the S(q) is computed from the
   current attempt's own GSD.
-- Walltime end of the master: it receives SIGTERM and cancels the GPU jobs
-  of the current batch (see **Resuming a run**, step 2); resubmit the
-  master.
+- Walltime end of the master: 120 s before it, Slurm sends TERM to the
+  batch shell (`#SBATCH --signal=B:TERM@120`), which passes it on to python
+  (`parallel/forward_term.sh`). The master then cancels the GPU jobs of the
+  current batch (see **Resuming a run**, step 2). Resubmit the master. A
+  new master sbatch script must keep both pieces: the `--signal` line, and
+  `run_forward_term python3 ...` instead of a bare `python3 ...`
+  (`tests/test_forward_term.py` checks the three scripts).
 - Maintenance stops both; resubmit the master afterwards.
 
 Either way the walltime should end before a maintenance window starts, and

@@ -50,8 +50,11 @@ Cancellation and folder ownership (TIMELINE 1.1, C32):
   after that.
 - Every submitted job stays in a process-wide list until it ends. The master
   cancels the jobs left in it when it exits: normal exit, uncaught exception
-  (``atexit``) or SIGTERM (``install_signal_handlers``; walltime end, scancel
-  of the master). A master killed with SIGKILL cannot do this.
+  (``atexit``) or SIGTERM (``install_signal_handlers``). At the walltime that
+  SIGTERM comes from the master sbatch script: ``#SBATCH --signal=B:TERM@120``
+  and ``parallel/forward_term.sh``. Slurm's own walltime SIGTERM did not
+  reach python in time (smoke test B, 2026-11-22). A master killed with
+  SIGKILL cannot cancel anything.
 - ``prepare_jobs`` writes ``<sim_dir>/OWNER`` with a new token per job and
   passes the token to the worker. A worker whose token is no longer in
   ``OWNER`` (an older attempt still running) writes nothing into the folder.

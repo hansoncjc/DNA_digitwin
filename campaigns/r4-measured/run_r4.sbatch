@@ -14,6 +14,7 @@
 #SBATCH -c 2
 #SBATCH --mem=16G
 #SBATCH --time=80:00:00
+#SBATCH --signal=B:TERM@120
 #SBATCH -o r4_master_%j.out
 #SBATCH -e r4_master_%j.out
 
@@ -28,4 +29,7 @@ module load cuda/11.8
 source "$R4_VENV"
 export PYTHONPATH="$REPO:$MC_DFM_ROOT:${PYTHONPATH:-}"
 
-python3 -u "$REPO/campaigns/r4-measured/run_r4.py" --out "$R4_OUT" ${R4_ARGS:-}
+# 120 s before the walltime Slurm sends TERM to this shell (--signal above);
+# run_forward_term passes it to python, which scancels its GPU jobs and exits.
+. "$REPO/parallel/forward_term.sh"
+run_forward_term python3 -u "$REPO/campaigns/r4-measured/run_r4.py" --out "$R4_OUT" ${R4_ARGS:-}
