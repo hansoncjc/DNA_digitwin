@@ -275,3 +275,107 @@ def test_r71_initial_point(r71):
     assert x0 == {"L_bridge": 80.0, "C_anchor": 100.0, "C_NaCl": 20.0}
     p = m.apply(x0)
     assert p["r0"] == pytest.approx(2.5703, abs=1e-4) and p["U0"] == pytest.approx(2.9473, abs=1e-4)
+
+
+# ---------------- the box rule (mapping.physics_condition_box) ---------------- #
+
+def test_box_rule_reproduces_the_r71_box_bitwise(r71):
+    """R7.1 computed its box with its own copy of the rule; the shared
+    function, with the 5 bp floor (which does not bind there), gives the
+    same floats."""
+    m = mapping.load_mapping(EVAL56_JSON)
+    box = mapping.physics_condition_box(m, (2.0, 3.5), (0.5, 8.0), (0.0, 40.0), 5.0)
+    assert box == {k: tuple(r71["search"][k]["bounds"]) for k in CONDITION_NAMES}
+
+
+def test_box_rule_floor_binds_only_below_the_r0_bound():
+    m = mapping.load_mapping(EVAL56_JSON)
+    free = mapping.physics_condition_box(m, (1.0, 3.5), (0.5, 8.0), (0.0, 40.0), -1e9)
+    # unfloored, r0 = 1 needs a zero shell: L_bridge = -fixed linker / rise < 0
+    assert free["L_bridge"][0] == pytest.approx(-32.04 / 0.34, abs=1e-9)
+    box = mapping.physics_condition_box(m, (1.0, 3.5), (0.5, 8.0), (0.0, 40.0), 5.0)
+    assert box["L_bridge"] == (5.0, free["L_bridge"][1])
+    assert box["C_anchor"] == free["C_anchor"] and box["C_NaCl"] == free["C_NaCl"]
+
+
+@pytest.mark.parametrize("edit, match", [
+    (dict(l_bridge_min=500.0), "empty box in L_bridge"),
+    (dict(salt_range=(40.0, 40.0)), "empty box in C_NaCl"),
+])
+def test_box_rule_refuses_an_empty_box(edit, match):
+    m = mapping.load_mapping(EVAL56_JSON)
+    kw = dict(r0_range=(2.0, 3.5), u0_range=(0.5, 8.0), salt_range=(0.0, 40.0), l_bridge_min=5.0)
+    kw.update(edit)
+    with pytest.raises(mapping.MappingError, match=match):
+        mapping.physics_condition_box(m, **kw)
+
+
+def test_box_rule_refuses_negative_salt_screening(tmp_path):
+    m = mapping.save_mapping(tmp_path / "m.json", {**COEFFS, "K_s": -0.01})
+    with pytest.raises(mapping.MappingError, match="K_s >= 0"):
+        mapping.physics_condition_box(m, (2.0, 3.5), (0.5, 8.0), (0.0, 40.0), 5.0)
+
+
+# ---------------- R7.1b (FCC rho* = 0.10) and R7.1c (HS fluid) configs ---------------- #
+
+R7_OTHERS = {
+    # campaign: (R6 config it takes the target and ranges from, target md5, lower r0 of the box)
+    "r7.1b-onestep-fcc0.10": ("r6.4-fcc0.10", "9131767b29aa1004d8ffb092891ea359", 2.0),
+    "r7.1c-onestep-hs-fluid": ("r6.6-hs-fluid", "37c39120c6d44871953769456f8f3b75", None),
+}
+
+
+@pytest.mark.parametrize("name", sorted(R7_OTHERS))
+def test_r7_other_targets_differ_from_r71_only_in_target_box_and_names(name, r71):
+    r6_name, md5, _ = R7_OTHERS[name]
+    cfg = inverse.load_config(REPO / "campaigns" / "inverse" / name / "config.py")
+    r6 = inverse.load_config(REPO / "campaigns" / "inverse" / r6_name / "config.py")
+    assert Path(cfg["mapping"]) == EVAL56_JSON
+    assert hashlib.md5(Path(cfg["target"]).read_bytes()).hexdigest() == md5
+    for key in ("target", "N", "density", "potential", "metric", "scattering"):
+        assert cfg[key] == r6[key], key
+    same = set(r71) - {"description", "target", "N", "search", "out_root"}
+    for key in same:
+        assert cfg[key] == r71[key], key
+    assert cfg["out_root"] == r71["out_root"].replace("r7.1-onestep-fcc0.05", name)
+    assert "metric_kwargs" not in cfg
+    assert {k: cfg["search"][k]["init"] for k in CONDITION_NAMES} == \
+        {k: r71["search"][k]["init"] for k in CONDITION_NAMES}
+    assert inverse.run_mode(inverse.normalize_config(cfg)) == "map"
+
+
+@pytest.mark.parametrize("name", sorted(R7_OTHERS))
+def test_r7_other_targets_box_is_the_rule_on_their_r6_ranges(name):
+    r6_name, _, r0_lo = R7_OTHERS[name]
+    cfg = inverse.load_config(REPO / "campaigns" / "inverse" / name / "config.py")
+    r6 = inverse.load_config(REPO / "campaigns" / "inverse" / r6_name / "config.py")
+    m = mapping.load_mapping(cfg["mapping"])
+    box = {k: tuple(cfg["search"][k]["bounds"]) for k in CONDITION_NAMES}
+    assert box == mapping.physics_condition_box(
+        m, r6["search"]["r0"]["bounds"], r6["search"]["U0"]["bounds"], (0.0, 40.0), 5.0)
+    lo = m.apply({k: box[k][0] for k in CONDITION_NAMES})
+    hi = m.apply({k: box[k][1] for k in CONDITION_NAMES})
+    assert hi["r0"] == pytest.approx(3.5, abs=1e-12)
+    assert lo["U0"] == pytest.approx(0.5, abs=1e-12) and hi["U0"] == pytest.approx(8.0, abs=1e-12)
+    if r0_lo is None:                      # floor binds: the box starts at 5 bp
+        assert box["L_bridge"][0] == 5.0
+        assert lo["r0"] > r6["search"]["r0"]["bounds"][0]
+    else:
+        assert lo["r0"] == pytest.approx(r0_lo, abs=1e-12)
+    # Every point of the box maps inside the R6 search box (all four parameters).
+    grid = np.meshgrid(*[np.linspace(*box[k], 9) for k in CONDITION_NAMES], indexing="ij")
+    for x in zip(*(g.ravel() for g in grid)):
+        p = m.apply(dict(zip(CONDITION_NAMES, x)))
+        p["m_rel"] = bo.m_rel_from_m(p["n"], p["m"])
+        for k in ("U0", "r0", "n", "m_rel"):
+            a, b = r6["search"][k]["bounds"]
+            assert a - 1e-9 <= p[k] <= b + 1e-9, (x, k, p[k])
+
+
+def test_r71c_numbers_in_the_docstring():
+    cfg = inverse.load_config(REPO / "campaigns" / "inverse" / "r7.1c-onestep-hs-fluid" / "config.py")
+    m = mapping.load_mapping(cfg["mapping"])
+    lo = m.apply({"L_bridge": 5.0, "C_anchor": 100.0, "C_NaCl": 0.0})
+    assert round(lo["r0"], 3) == 1.894 and round(lo["n"], 2) == 13.98 and round(lo["m"], 2) == 6.80
+    assert round(m.apply({"L_bridge": 0.0, "C_anchor": 100.0, "C_NaCl": 0.0})["r0"], 3) == 1.849
+    assert cfg["search"]["L_bridge"]["bounds"][1] == pytest.approx(183.15, abs=5e-3)

@@ -42,7 +42,7 @@ DNA_digitwin/
 │   └── inverse/
 │       ├── inverse-example/  # inverse.py example config (smoke tests), sbatch templates
 │       ├── inverse-targets/  # target S(q) generation for inverse campaigns
-│       ├── r6.*/, r7.1-onestep-fcc0.05/  # one config per campaign (R7.1: one-step, BO over conditions)
+│       ├── r6.*/, r7.1*-onestep-*/   # one config per campaign (R7.1, R7.1b, R7.1c: one-step, BO over conditions)
 │       └── analysis/         # pack_run.py (cluster: run summary + tar), structure_metrics.py (local: S(q) loss, q1, PTM, g(r))
 ├── parallel/             # Slurm launcher: submits 1 GPU job per dataset per BO iteration
 │   ├── __init__.py
@@ -653,8 +653,16 @@ holds its conditions. bo `mode="map"` then takes each condition from the
 `ParamSpace` when it is there and from `dataset.exp` otherwise (training:
 none in the `ParamSpace`, files as before); the conditions in the
 `ParamSpace` get their own columns after `m_rel` in `bo_trajectory.csv`,
-`sim_params_*.csv` and failed rows, so a resume reads them back. Campaign:
-`campaigns/inverse/r7.1-onestep-fcc0.05/` (config and submission steps).
+`sim_params_*.csv` and failed rows, so a resume reads them back.
+
+Search box: `mapping.physics_condition_box(mapping, r0_range, u0_range,
+salt_range, l_bridge_min)`, for the given salt range the largest box in x
+whose image lies inside the r0 and U0 ranges, with L_bridge at least
+`l_bridge_min` (5 bp in the R7 campaigns). Campaigns (config and submission
+steps in each folder): `campaigns/inverse/r7.1-onestep-fcc0.05/` (R6.5
+target), `r7.1b-onestep-fcc0.10/` (R6.4 target), `r7.1c-onestep-hs-fluid/`
+(R6.6 target; its spacing is out of the mapping's reach, r0 >= 1.894 in the
+box).
 
 ### `parallel=False` and `parallel=True`
 

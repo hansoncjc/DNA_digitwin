@@ -111,6 +111,47 @@ class Mapping:
         return d
 
 
+def physics_condition_box(mapping, r0_range, u0_range, salt_range, l_bridge_min):
+    """
+    Search box in x for one-step inverse design with a physics mapping (R7).
+
+    Rule (author, 2026-11-22; floor 2026-11-23): for the given salt range, the
+    largest box in x whose image lies inside ``r0_range`` x ``u0_range``, with
+    L_bridge at least ``l_bridge_min`` (a bridge cannot be absent):
+
+    - L_bridge: r0 = 1 + k (l + rise L_bridge) / d_si inverted at the two ends
+      of ``r0_range``; the lower end is raised to ``l_bridge_min`` when the
+      inversion gives less (then the box reaches r0 only down to
+      r0(l_bridge_min));
+    - C_anchor: U0 = A (C_anchor / c_ref)(1 + K_s C_NaCl) grows with C_anchor
+      and salt, so the lower end puts U0 = u0_range[0] at the lowest salt and
+      the upper end U0 = u0_range[1] at the highest salt.
+
+    Returns {name: (lo, hi)} over ``CONDITION_NAMES``.
+    """
+    if mapping.form != "physics":
+        raise MappingError(f"physics_condition_box needs a physics mapping, not {mapping.form!r}")
+    c, k = mapping.coefficients, mapping.constants
+    if not (c["k"] > 0 and c["A"] > 0 and c["K_s"] >= 0):
+        raise MappingError(f"physics_condition_box needs k > 0, A > 0, K_s >= 0: {c}")
+
+    def bridge(r0):
+        return (k["d_si"] * (r0 - 1.0) / c["k"] - k["fixed_linker_nm"]) / k["dsdna_rise_nm"]
+
+    def anchor(U0, s):
+        return k["c_anchor_ref"] * U0 / (c["A"] * (1.0 + c["K_s"] * s))
+
+    box = {
+        "L_bridge": (max(float(l_bridge_min), bridge(r0_range[0])), bridge(r0_range[1])),
+        "C_anchor": (anchor(u0_range[0], salt_range[0]), anchor(u0_range[1], salt_range[1])),
+        "C_NaCl": (float(salt_range[0]), float(salt_range[1])),
+    }
+    for name, (lo, hi) in box.items():
+        if not lo < hi:
+            raise MappingError(f"empty box in {name}: ({lo}, {hi})")
+    return box
+
+
 def _check(data, where):
     if not isinstance(data, dict):
         raise MappingError(f"{where}: expected a JSON object")
