@@ -316,12 +316,15 @@ def test_box_rule_refuses_negative_salt_screening(tmp_path):
         mapping.physics_condition_box(m, (2.0, 3.5), (0.5, 8.0), (0.0, 40.0), 5.0)
 
 
-# ---------------- R7.1b (FCC rho* = 0.10) and R7.1c (HS fluid) configs ---------------- #
+# ------- R7.1b, R7.1c (FCC rho* = 0.10, lambda 1 / 0) and R7.1d-f (HS fluid, lambda 1 / 0 / 2) ------- #
 
 R7_OTHERS = {
     # campaign: (R6 config it takes the target and ranges from, target md5, lower r0 of the box)
     "r7.1b-onestep-fcc0.10": ("r6.4-fcc0.10", "9131767b29aa1004d8ffb092891ea359", 2.0),
-    "r7.1c-onestep-hs-fluid": ("r6.6-hs-fluid", "37c39120c6d44871953769456f8f3b75", None),
+    "r7.1c-onestep-fcc0.10-lam0": ("r6.8a-fcc0.10-lam0", "9131767b29aa1004d8ffb092891ea359", 2.0),
+    "r7.1d-onestep-hs-fluid": ("r6.6-hs-fluid", "37c39120c6d44871953769456f8f3b75", None),
+    "r7.1e-onestep-hs-lam0": ("r6.8b-hs-lam0", "37c39120c6d44871953769456f8f3b75", None),
+    "r7.1f-onestep-hs-lam2": ("r6.8c-hs-lam2", "37c39120c6d44871953769456f8f3b75", None),
 }
 
 
@@ -338,7 +341,9 @@ def test_r7_other_targets_differ_from_r71_only_in_target_box_and_names(name, r71
     for key in same:
         assert cfg[key] == r71[key], key
     assert cfg["out_root"] == r71["out_root"].replace("r7.1-onestep-fcc0.05", name)
-    assert "metric_kwargs" not in cfg
+    # The loss is that of the R6 counterpart: its metric_kwargs, or none in both.
+    assert set(cfg) - set(r71) == ({"metric_kwargs"} if "metric_kwargs" in r6 else set())
+    assert cfg.get("metric_kwargs") == r6.get("metric_kwargs")
     assert {k: cfg["search"][k]["init"] for k in CONDITION_NAMES} == \
         {k: r71["search"][k]["init"] for k in CONDITION_NAMES}
     assert inverse.run_mode(inverse.normalize_config(cfg)) == "map"
@@ -372,8 +377,37 @@ def test_r7_other_targets_box_is_the_rule_on_their_r6_ranges(name):
             assert a - 1e-9 <= p[k] <= b + 1e-9, (x, k, p[k])
 
 
-def test_r71c_numbers_in_the_docstring():
-    cfg = inverse.load_config(REPO / "campaigns" / "inverse" / "r7.1c-onestep-hs-fluid" / "config.py")
+R7_LAMBDA = {
+    # campaign: (lambda = 1 campaign on the same target, its R6 counterpart, R6 counterpart, lambda_shift)
+    "r7.1c-onestep-fcc0.10-lam0": ("r7.1b-onestep-fcc0.10", "r6.4-fcc0.10", "r6.8a-fcc0.10-lam0", 0.0),
+    "r7.1e-onestep-hs-lam0": ("r7.1d-onestep-hs-fluid", "r6.6-hs-fluid", "r6.8b-hs-lam0", 0.0),
+    "r7.1f-onestep-hs-lam2": ("r7.1d-onestep-hs-fluid", "r6.6-hs-fluid", "r6.8c-hs-lam2", 2.0),
+}
+
+
+@pytest.mark.parametrize("name", sorted(R7_LAMBDA))
+def test_r7_lambda_runs_differ_from_their_lambda1_run_as_the_r6_pair_does(name):
+    # One-step pair (lambda 1 run, this run) mirrors the two-step pair (R6 lambda 1, R6 lambda_old):
+    # the R6 pair differs only in metric_kwargs (and text), so the R7 pair differs only in
+    # metric_kwargs, description and out_root.
+    base_name, r6_base_name, r6_name, lam = R7_LAMBDA[name]
+    load = lambda n: inverse.load_config(REPO / "campaigns" / "inverse" / n / "config.py")
+    cfg, base, r6, r6_base = load(name), load(base_name), load(r6_name), load(r6_base_name)
+    assert set(r6) == set(r6_base) | {"metric_kwargs"}
+    # parallel_cfg is scheduling, not a run setting: the committed R6.8a config names ckpt-g2 5 h
+    # (R6.8a ran on gpu-a40 4 h, edited at submission; TIMELINE BO runs R6.8a).
+    for key in set(r6_base) - {"description", "out_root", "parallel_cfg"}:
+        assert r6[key] == r6_base[key], (r6_name, key)
+    assert set(cfg) == set(base) | {"metric_kwargs"}
+    for key in set(base) - {"description", "out_root"}:
+        assert cfg[key] == base[key], (name, key)
+    assert cfg["out_root"] == base["out_root"].replace(base_name, name)
+    assert cfg["metric_kwargs"] == r6["metric_kwargs"] == {"lambda_shift": lam}
+    assert inverse.normalize_config(cfg)["metric_kwargs"]["lambda_shift"] == lam
+
+
+def test_r71d_numbers_in_the_docstring():
+    cfg = inverse.load_config(REPO / "campaigns" / "inverse" / "r7.1d-onestep-hs-fluid" / "config.py")
     m = mapping.load_mapping(cfg["mapping"])
     lo = m.apply({"L_bridge": 5.0, "C_anchor": 100.0, "C_NaCl": 0.0})
     assert round(lo["r0"], 3) == 1.894 and round(lo["n"], 2) == 13.98 and round(lo["m"], 2) == 6.80

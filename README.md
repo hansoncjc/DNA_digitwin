@@ -42,7 +42,7 @@ DNA_digitwin/
 │   └── inverse/
 │       ├── inverse-example/  # inverse.py example config (smoke tests), sbatch templates
 │       ├── inverse-targets/  # target S(q) generation for inverse campaigns
-│       ├── r6.*/, r7.1*-onestep-*/   # one config per campaign (R7.1, R7.1b, R7.1c: one-step, BO over conditions)
+│       ├── r6.*/, r7.1*-onestep-*/   # one config per campaign (R7.1, R7.1b-f: one-step, BO over conditions)
 │       └── analysis/         # pack_run.py (cluster: run summary + tar), structure_metrics.py (local: S(q) loss, q1, PTM, g(r))
 ├── parallel/             # Slurm launcher: submits 1 GPU job per dataset per BO iteration
 │   ├── __init__.py
@@ -660,9 +660,15 @@ salt_range, l_bridge_min)`, for the given salt range the largest box in x
 whose image lies inside the r0 and U0 ranges, with L_bridge at least
 `l_bridge_min` (5 bp in the R7 campaigns). Campaigns (config and submission
 steps in each folder): `campaigns/inverse/r7.1-onestep-fcc0.05/` (R6.5
-target), `r7.1b-onestep-fcc0.10/` (R6.4 target), `r7.1c-onestep-hs-fluid/`
-(R6.6 target; its spacing is out of the mapping's reach, r0 >= 1.894 in the
-box).
+target), `r7.1b-onestep-fcc0.10/` (R6.4 target, λ = 1, as R6.4) and
+`r7.1c-onestep-fcc0.10-lam0/` (λ = 0, as R6.8a), and the HS set on the R6.6
+target, whose spacing is out of the mapping's reach (r0 >= 1.894 in the box):
+`r7.1d-onestep-hs-fluid/` (λ = 1, as R6.6), `r7.1e-onestep-hs-lam0/` (λ = 0,
+as R6.8b) and `r7.1f-onestep-hs-lam2/` (λ = 2, as R6.8c). Each R7 campaign
+takes the target, the r0 and U0 ranges and the `metric_kwargs` of its R6
+counterpart. λ here is the code's `lambda_shift`; the paper writes the loss
+as λ·spacing + (1 − λ)·M4 with λ = λ_old/(1 + λ_old), so λ_old 0, 1, 2 are
+λ 0, 1/2, 2/3 there.
 
 ### `parallel=False` and `parallel=True`
 

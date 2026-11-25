@@ -1,8 +1,12 @@
 """
-ON HOLD (author, 2026-11-23): do not submit. The R6.6 fluid target may be
-replaced by a rescaled fluid whose spacing lies in the mapping's reach.
+Run as configured (author, 2026-11-23; earlier on hold): the R6.6 target is
+kept (a rescaled fluid was not adopted), and this run (lambda = 1) is one of
+the R7 HS set with R7.1e (lambda = 0, r7.1e-onestep-hs-lam0) and R7.1f
+(lambda = 2, r7.1f-onestep-hs-lam2), the one-step counterparts of R6.6,
+R6.8b and R6.8c, discussed by lambda.
+Named R7.1c (folder r7.1c-onestep-hs-fluid) until 2026-11-23 (author).
 
-R7.1c: one-step inverse design (physics-based endpoint) against the R6.6
+R7.1d: one-step inverse design (physics-based endpoint) against the R6.6
 target, the hard-sphere fluid droplets at phi = 0.4 (author, 2026-11-23:
 the R7.1 setup on the other two R6 targets; the result shows what the choice
 of mapping does to a target outside its reach).
@@ -49,7 +53,7 @@ INIT = {"L_bridge": 80.0, "C_anchor": 100.0, "C_NaCl": 20.0}
 BOX = physics_condition_box(load_mapping(MAPPING), R6_R0, R6_U0, SALT, L_BRIDGE_MIN)
 
 CONFIG = {
-    "description": "R7.1c one-step: BO over (L_bridge, C_anchor, C_NaCl) through the R3.2 "
+    "description": "R7.1d one-step: BO over (L_bridge, C_anchor, C_NaCl) through the R3.2 "
                    "eval-56 mapping; R6.6 target HS fluid phi=0.4 (CPU S(q)); salt 0-40 mM, "
                    "box = image inside the R6.6 r0 and U0 ranges, L_bridge >= 5 bp "
                    "(r0 >= 1.894); batch BO 10 x 10 on gpu-a40",
@@ -68,7 +72,7 @@ CONFIG = {
     "bo_seed": 0,
 
     "out_root": "/gscratch/zeelab/hanson/codes/DNA_lipid_silica/testing/inverse/"
-                "r7/r7.1c-onestep-hs-fluid/Optimization_Results",
+                "r7/r7.1d-onestep-hs-fluid/Optimization_Results",
     "gp_log_dir": None,                # <out_root>/gp_log
 
     "potential": "mie_r0",
